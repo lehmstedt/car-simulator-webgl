@@ -25,10 +25,10 @@ export class Car {
   }
 
   update(dt, c, onGrass = false) {
-    // Smooth steering toward target, less lock at high speed.
+    // The wheel input is already gradual; just map it to road-wheel angle,
+    // with less lock at high speed.
     const lock = this.maxSteer / (1 + Math.abs(this.speed) * 0.05);
-    const target = c.steer * lock;
-    this.steer += (target - this.steer) * Math.min(1, dt * 8);
+    this.steer = c.steer * lock;
 
     const v = this.speed;
     let a = 0;
