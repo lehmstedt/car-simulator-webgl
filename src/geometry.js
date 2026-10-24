@@ -1,4 +1,5 @@
 // Procedural geometry. All meshes are non-indexed triangle lists.
+// The circuit's own geometry lives in track.js.
 
 // Unit cube centered at origin (size 1).
 export function cube() {

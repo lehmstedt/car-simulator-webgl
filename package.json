@@ -1,9 +1,10 @@
 {
   "name": "car-simulator-webgl",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "npx --yes http-server -c-1 -p 8080 ."
+    "start": "npx --yes http-server -c-1 -p 8080 .",
+    "bundle": "node scripts/bundle.mjs"
   }
 }

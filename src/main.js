@@ -3,6 +3,7 @@ import { cube, plane } from './geometry.js';
 import { perspective, lookAt, multiply, trs, identity } from './math.js';
 import { readControls } from './input.js';
 import { Car } from './car.js';
+import { buildTrack, ROAD_HALF_WIDTH } from './track.js';
 
 const VS = `#version 300 es
 in vec3 aPosition;
@@ -35,16 +36,19 @@ void main() {
     vec2 w = fwidth(g);
     vec2 a = abs(fract(g - 0.5) - 0.5) / w;
     float line = 1.0 - min(min(a.x, a.y), 1.0);
-    c = mix(c, c * 0.7, line);
+    c = mix(c, c * 0.85, line);
   }
   outColor = vec4(c, 1.0);
 }`;
 
 const canvas = document.getElementById('gl');
-const hud = document.getElementById('hud');
+const speedEl = document.getElementById('speed');
+const gearEl = document.getElementById('gear');
+const lapEl = document.getElementById('lap');
+const bestEl = document.getElementById('best');
 const gl = canvas.getContext('webgl2', { antialias: true });
 if (!gl) {
-  hud.textContent = 'WebGL2 not supported';
+  document.getElementById('hud').textContent = 'WebGL2 is not available in this browser.';
   throw new Error('WebGL2 not supported');
 }
 
@@ -54,21 +58,69 @@ const uViewProj = gl.getUniformLocation(program, 'uViewProj');
 const uColor = gl.getUniformLocation(program, 'uColor');
 const uGrid = gl.getUniformLocation(program, 'uGrid');
 
+const track = buildTrack();
 const meshes = {
   cube: createMesh(gl, program, cube()),
-  ground: createMesh(gl, program, plane(500)),
+  ground: createMesh(gl, program, plane(600)),
+  road: createMesh(gl, program, track.meshes.road),
+  curbRed: createMesh(gl, program, track.meshes.curbRed),
+  curbWhite: createMesh(gl, program, track.meshes.curbWhite),
+  startLine: createMesh(gl, program, track.meshes.startLine),
 };
 
-// A few static obstacles so motion is visible.
+// Scenery blocks scattered around, kept well clear of the road.
 const props = [];
-for (let i = 0; i < 60; i++) {
-  const ang = i * 2.399; // golden angle spiral
-  const r = 20 + i * 6;
-  props.push({ x: Math.cos(ang) * r, z: Math.sin(ang) * r, s: 2 + (i % 4) });
+for (let i = 0; props.length < 50 && i < 400; i++) {
+  const ang = i * 2.399; // golden-angle spiral
+  const r = 30 + i * 2.2;
+  const x = Math.cos(ang) * r, z = Math.sin(ang) * r;
+  if (track.locate(x, z).distance > ROAD_HALF_WIDTH + 14) props.push({ x, z, s: 2 + (i % 4) });
+}
+
+// Grid starts a few meters before the line, facing along the track.
+function startPose() {
+  const n = track.points.length, i = n - 4;
+  const [x, z] = track.points[i], [tx, tz] = track.tangents[i];
+  return [x, z, Math.atan2(-tx, -tz)];
 }
 
 const car = new Car();
-const cam = { x: 0, y: 4, z: 10 };
+const cam = { x: 0, y: 4, z: 0 };
+// Laps: the track is split into 4 sectors; a lap counts only after visiting all of them.
+const lap = { start: null, last: null, best: null, sector: 3, visited: new Set() };
+
+function resetRace() {
+  car.reset(...startPose());
+  cam.x = car.x + Math.sin(car.heading) * 9;
+  cam.z = car.z + Math.cos(car.heading) * 9;
+  lap.start = null;
+  lap.sector = 3;
+  lap.visited.clear();
+}
+resetRace();
+
+function updateLap(index, now) {
+  const sector = Math.floor((index / track.points.length) * 4);
+  if (sector === lap.sector) return;
+  if (lap.sector === 3 && sector === 0) {
+    // Crossed the start/finish line going forward.
+    if (lap.start !== null && lap.visited.size === 3) {
+      lap.last = now - lap.start;
+      if (lap.best === null || lap.last < lap.best) lap.best = lap.last;
+    }
+    lap.start = now;
+    lap.visited.clear();
+  } else if (sector !== 0) {
+    lap.visited.add(sector);
+  }
+  lap.sector = sector;
+}
+
+const fmt = (ms) => {
+  if (ms === null) return '–:––.––';
+  const m = Math.floor(ms / 60000), s = (ms % 60000) / 1000;
+  return `${m}:${s.toFixed(2).padStart(5, '0')}`;
+};
 
 function resize() {
   const dpr = Math.min(devicePixelRatio, 2);
@@ -91,11 +143,9 @@ function draw(mesh, model, color, gridSize = 0) {
 
 function drawCar() {
   const { x, z, heading: h, steer } = car;
-  // Body + cabin.
   draw(meshes.cube, trs(x, 0.6, z, h, 1.8, 0.6, 4.2), [0.85, 0.15, 0.15]);
   const fx = -Math.sin(h), fz = -Math.cos(h);
   draw(meshes.cube, trs(x - fx * 0.3, 1.15, z - fz * 0.3, h, 1.5, 0.5, 2.0), [0.2, 0.2, 0.25]);
-  // Wheels (front ones turn with steering).
   const rx = Math.cos(h), rz = -Math.sin(h);
   for (const [side, fwd, front] of [[-1, 1.3, true], [1, 1.3, true], [-1, -1.3, false], [1, -1.3, false]]) {
     const wx = x + rx * side * 0.95 + fx * fwd;
@@ -110,8 +160,10 @@ function frame(now) {
   last = now;
 
   const controls = readControls();
-  if (controls.reset) car.reset();
-  car.update(dt, controls);
+  if (controls.reset) resetRace();
+  const where = track.locate(car.x, car.z);
+  car.update(dt, controls, !where.onTrack);
+  updateLap(track.locate(car.x, car.z).index, now);
 
   // Chase camera: lag behind the car, smoothed.
   const back = 9, height = 3.5;
@@ -126,20 +178,35 @@ function frame(now) {
   gl.clearColor(0.55, 0.75, 0.95, 1);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
   gl.enable(gl.DEPTH_TEST);
-  gl.enable(gl.CULL_FACE);
   gl.useProgram(program);
 
-  const proj = perspective(Math.PI / 3, canvas.width / canvas.height, 0.1, 1000);
+  const aspect = canvas.width / canvas.height;
+  // Keep a usable horizontal view on tall (portrait phone) screens.
+  const fovy = aspect < 1 ? 2 * Math.atan(Math.tan(Math.PI / 6) * 0.8 / aspect) : Math.PI / 3;
+  const proj = perspective(fovy, aspect, 0.1, 1000);
   const view = lookAt([cam.x, cam.y, cam.z], [car.x, 1, car.z], [0, 1, 0]);
   gl.uniformMatrix4fv(uViewProj, false, multiply(proj, view));
 
+  // Flat ground layers all sit at y = 0: draw them back to front without
+  // writing depth, so they never z-fight; everything after sits on top.
+  gl.disable(gl.CULL_FACE);
+  gl.depthMask(false);
   draw(meshes.ground, identity(), [0.3, 0.55, 0.3], 10);
+  draw(meshes.road, identity(), [0.32, 0.33, 0.36]);
+  draw(meshes.curbRed, identity(), [0.85, 0.15, 0.12]);
+  draw(meshes.curbWhite, identity(), [0.95, 0.95, 0.95]);
+  draw(meshes.startLine, identity(), [0.95, 0.95, 0.95]);
+  gl.depthMask(true);
+  gl.enable(gl.CULL_FACE);
+
   for (const p of props) draw(meshes.cube, trs(p.x, p.s / 2, p.z, 0, p.s, p.s, p.s), [0.7, 0.65, 0.5]);
   drawCar();
 
-  hud.textContent =
-    `Speed: ${(car.speed * 3.6).toFixed(0)} km/h\n` +
-    `W/S or ↑/↓  throttle/brake\nA/D or ←/→  steer\nSpace handbrake · R reset`;
+  speedEl.textContent = Math.abs(car.speed * 3.6).toFixed(0).padStart(3, ' ');
+  speedEl.classList.toggle('grass', !where.onTrack);
+  gearEl.textContent = car.speed < -0.3 ? 'R' : Math.abs(car.speed) < 0.3 ? 'N' : 'D';
+  lapEl.textContent = fmt(lap.start === null ? null : now - lap.start);
+  bestEl.textContent = fmt(lap.best);
 
   requestAnimationFrame(frame);
 }
