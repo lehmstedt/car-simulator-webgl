@@ -33,14 +33,16 @@ addEventListener('blur', () => {
 });
 const pressed = (k) => (pads.get(k)?.ids.size ?? 0) > 0;
 
-let resetQueued = false, driveQueued = false, ghostQueued = false;
+let resetQueued = false, driveQueued = false, ghostQueued = false, viewQueued = false;
 document.getElementById('reset')?.addEventListener('click', () => { resetQueued = true; });
 document.getElementById('drive')?.addEventListener('click', () => { driveQueued = true; });
 document.getElementById('ghost')?.addEventListener('click', () => { ghostQueued = true; });
+document.getElementById('view')?.addEventListener('click', () => { viewQueued = true; });
 addEventListener('keydown', (e) => {
   if (e.repeat) return;
   if (e.code === 'KeyT') driveQueued = true;
   if (e.code === 'KeyG') ghostQueued = true;
+  if (e.code === 'KeyC') viewQueued = true;
 });
 
 // Steering wheel position: -1 (full right) .. 1 (full left). Keys turn it
@@ -102,10 +104,13 @@ function updateWheel(dt) {
 
 export function resetWheel() { wheel = 0; }
 
+// Wheel rotation in radians, for drawing the cockpit's steering wheel.
+export const wheelAngle = () => wheel * WHEEL_TURNS * Math.PI / 180;
+
 export function readControls(dt) {
   const reset = any('KeyR') || resetQueued;
-  const switchDrive = driveQueued, toggleGhost = ghostQueued;
-  resetQueued = driveQueued = ghostQueued = false;
+  const switchDrive = driveQueued, toggleGhost = ghostQueued, toggleView = viewQueued;
+  resetQueued = driveQueued = ghostQueued = viewQueued = false;
   updateWheel(dt);
   return {
     throttle: any('ArrowUp', 'KeyW') || pressed('gas') ? 1 : 0,
@@ -115,5 +120,6 @@ export function readControls(dt) {
     reset,
     switchDrive,
     toggleGhost,
+    toggleView,
   };
 }

@@ -57,6 +57,9 @@
   }
   .top-right button:focus-visible, .pad:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   #drive { color: var(--accent); min-width: 4.2em; }
+  #view { min-width: 5.6em; }
+  /* Narrow portrait: stack the buttons so they clear the HUD. */
+  @media (max-width: 560px) { .top-right { flex-direction: column; align-items: stretch; } }
   #ghost[aria-pressed="false"] { color: var(--hud-dim); text-decoration: line-through; }
   #balance {
     font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
@@ -112,10 +115,11 @@
   <div class="times" title="Weight on front / rear axle, % of the car's weight"><span class="unit">F / R</span><span id="load">50 / 50</span></div>
   <div id="balance" aria-live="polite"></div>
 </div>
-<div class="hint">W/S or ↑/↓ drive · A/D or ←/→ steer · Space handbrake · T FWD/RWD · G ghost · R reset</div>
+<div class="hint">W/S or ↑/↓ drive · A/D or ←/→ steer · Space handbrake · T FWD/RWD · G ghost · C camera · R reset</div>
 <div class="top-right">
   <button id="drive" type="button" aria-label="Switch drivetrain (T)">RWD</button>
   <button id="ghost" type="button" aria-pressed="true" aria-label="Show ghost of best lap (G)">Ghost</button>
+  <button id="view" type="button" aria-label="Switch camera view (C)">Chase</button>
   <button id="reset" type="button">Reset</button>
 </div>
 <div class="controls">

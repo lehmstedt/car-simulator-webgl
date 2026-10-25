@@ -37,6 +37,13 @@ Your best lap for each drivetrain is replayed as a see-through ghost car, so you
 can race it. It starts when you cross the line and is saved in the browser along
 with your best time. Toggle it with **G** or the Ghost button.
 
+## Cockpit view
+
+Press **C** or the view button to sit in the driver's seat. You look over the
+dashboard and hood, between the A-pillars, with a steering wheel that turns with
+your input. The view pitches and rolls with the body as weight shifts and glances
+a little into the turn. The choice is remembered.
+
 ## Run
 
 ES modules need to be served over HTTP:
@@ -67,11 +74,12 @@ With the keyboard, holding A/D turns the wheel gradually; let go and it returns 
 | Space          | Handbrake       |
 | T              | Switch FWD/RWD  |
 | G              | Toggle ghost    |
+| C              | Chase / cockpit view |
 | R              | Reset           |
 
 ## Layout
 
-- `src/main.js` — setup, render loop, chase camera, lap timing, HUD
+- `src/main.js` — setup, render loop, chase and cockpit cameras, lap timing, HUD
 - `src/track.js` — circuit spline, road/curb meshes, on-track test
 - `src/car.js` — car physics (dynamic bicycle model, tire grip, FWD/RWD)
 - `src/skids.js` — skid marks

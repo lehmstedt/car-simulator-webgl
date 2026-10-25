@@ -1,8 +1,8 @@
 import { createProgram, createMesh } from './gl.js';
-import { cube } from './geometry.js';
+import { cube, torus } from './geometry.js';
 import { perspective, lookAt, multiply, identity, basis, rotate } from './math.js';
 import { terrainHeight, terrainNormal, terrainSample, terrainMesh } from './terrain.js';
-import { readControls, resetWheel } from './input.js';
+import { readControls, resetWheel, wheelAngle } from './input.js';
 import { Car, VARIANTS } from './car.js';
 import { Skids } from './skids.js';
 import { Ghost } from './ghost.js';
@@ -60,6 +60,7 @@ const bestEl = document.getElementById('best');
 const driveEl = document.getElementById('drive');
 const balanceEl = document.getElementById('balance');
 const ghostBtn = document.getElementById('ghost');
+const viewBtn = document.getElementById('view');
 const loadEl = document.getElementById('load');
 const gradeEl = document.getElementById('grade');
 const gl = canvas.getContext('webgl2', { antialias: true });
@@ -79,6 +80,7 @@ const uTextured = gl.getUniformLocation(program, 'uTextured');
 const track = buildTrack();
 const meshes = {
   cube: createMesh(gl, program, cube()),
+  wheelRim: createMesh(gl, program, torus(0.17, 0.018)),
   ground: createMesh(gl, program, terrainMesh(600, 8)),
   road: createMesh(gl, program, track.meshes.road),
   curbRed: createMesh(gl, program, track.meshes.curbRed),
@@ -120,6 +122,17 @@ function toggleGhost() {
   updateGhostBtn();
 }
 const cam = { x: 0, y: 4, z: 0 };
+// Camera: 'chase' (behind the car) or 'cockpit' (driver's seat).
+let view = 'chase';
+try { view = localStorage.getItem('view') === 'cockpit' ? 'cockpit' : 'chase'; } catch {}
+const updateViewBtn = () => { if (viewBtn) viewBtn.textContent = view === 'cockpit' ? 'Cockpit' : 'Chase'; };
+updateViewBtn();
+function toggleView() {
+  view = view === 'cockpit' ? 'chase' : 'cockpit';
+  try { localStorage.setItem('view', view); } catch {}
+  updateViewBtn();
+}
+let glance = 0; // cockpit head turn into corners (rad), smoothed
 const tilt = { pitch: 0, roll: 0 }; // body lean from weight transfer (visual only)
 // Laps: the track is split into 4 sectors; a lap counts only after visiting all of them.
 // Best laps are kept per drivetrain so FWD and RWD can be compared.
@@ -137,7 +150,7 @@ function resetRace() {
   cam.x = car.x + Math.sin(car.heading) * 9;
   cam.z = car.z + Math.cos(car.heading) * 9;
   cam.y = terrainHeight(car.x, car.z) + 3.5;
-  tilt.pitch = tilt.roll = 0;
+  tilt.pitch = tilt.roll = glance = 0;
   lap.start = null;
   lap.sector = 3;
   lap.visited.clear();
@@ -226,16 +239,21 @@ function wheelPositions(pose = car) {
 const CAR_COLORS = { body: [0.85, 0.15, 0.15], cabin: [0.2, 0.2, 0.25], wheel: [0.08, 0.08, 0.08] };
 const GHOST_COLORS = { body: [0.75, 0.9, 1], cabin: [0.55, 0.7, 0.85], wheel: [0.45, 0.55, 0.65] };
 
-function drawCar(pose = car, colors = CAR_COLORS, alpha = 1, lean = tilt) {
-  const F = carFrame(pose);
-  // The body leans on its springs: nose dives under braking, squats under
-  // throttle, rolls toward the outside of a turn.
+// The body leans on its springs: nose dives under braking, squats under
+// throttle, rolls toward the outside of a turn.
+function bodyFrame(F, lean) {
   let { right, up, back } = F;
   up = rotate(up, right, lean.pitch); back = rotate(back, right, lean.pitch);
   up = rotate(up, back, lean.roll); right = rotate(right, back, lean.roll);
-  const body = { o: F.o, right, up, back };
+  return { o: F.o, right, up, back };
+}
+
+function drawCar(pose = car, colors = CAR_COLORS, alpha = 1, lean = tilt, cabin = true) {
+  const F = carFrame(pose);
+  const body = bodyFrame(F, lean);
+  const { right, up, back } = body;
   draw(meshes.cube, basis(toWorld(body, 0, 0.6, 0), right, up, back, 1.8, 0.6, 4.2), colors.body, 0, alpha);
-  draw(meshes.cube, basis(toWorld(body, 0, 1.15, 0.3), right, up, back, 1.5, 0.5, 2.0), colors.cabin, 0, alpha);
+  if (cabin) draw(meshes.cube, basis(toWorld(body, 0, 1.15, 0.3), right, up, back, 1.5, 0.5, 2.0), colors.cabin, 0, alpha);
   // Wheels stay on the road frame and glow orange when past the grip peak.
   for (const [side, fwd, front] of WHEELS) {
     const sliding = front ? pose.frontSliding : pose.rearSliding;
@@ -244,6 +262,53 @@ function drawCar(pose = car, colors = CAR_COLORS, alpha = 1, lean = tilt) {
     const color = sliding ? [0.95, 0.55, 0.1] : colors.wheel;
     draw(meshes.cube, basis(toWorld(F, side * 0.95, 0.35, -fwd), r, F.up, b, 0.3, 0.7, 0.7), color, 0, alpha);
   }
+}
+
+// Driver's seat, left-hand drive, in the body frame (x right, y up, z back).
+const EYE = [-0.35, 1.22, 0.15];
+const INTERIOR = [0.13, 0.13, 0.15], DASH_TOP = [0.2, 0.2, 0.23], TRIM = [0.06, 0.06, 0.07];
+
+// A box stretched between two body-frame points, w wide and h thick.
+function drawBeam(B, a, b, w, h, color) {
+  const pa = toWorld(B, ...a), pb = toWorld(B, ...b);
+  let ax = [0, 1, 2].map((i) => pb[i] - pa[i]);
+  const len = Math.hypot(...ax);
+  ax = ax.map((v) => v / len);
+  let r = [ax[1] * B.up[2] - ax[2] * B.up[1], ax[2] * B.up[0] - ax[0] * B.up[2], ax[0] * B.up[1] - ax[1] * B.up[0]];
+  const rl = Math.hypot(...r);
+  r = r.map((v) => v / rl);
+  const u = [r[1] * ax[2] - r[2] * ax[1], r[2] * ax[0] - r[0] * ax[2], r[0] * ax[1] - r[1] * ax[0]];
+  const mid = [0, 1, 2].map((i) => (pa[i] + pb[i]) / 2);
+  draw(meshes.cube, basis(mid, r, u, ax, w, h, len), color);
+}
+
+// Dashboard, pillars, roof edge, mirror and a steering wheel that follows the input.
+function drawCockpit() {
+  const B = bodyFrame(carFrame(car), tilt);
+  const box = (x, y, z, sx, sy, sz, c) => draw(meshes.cube, basis(toWorld(B, x, y, z), B.right, B.up, B.back, sx, sy, sz), c);
+  box(0, 0.905, -0.2, 1.56, 0.05, 1.3, TRIM);          // floor, hides the body's top
+  box(0, 0.9, -0.8, 1.56, 0.16, 0.5, INTERIOR);        // dashboard
+  box(0, 0.985, -0.92, 1.56, 0.01, 0.24, DASH_TOP);    // top of the dash, toward the glass
+  box(EYE[0], 1.0, -0.64, 0.34, 0.05, 0.12, INTERIOR); // instrument hood
+  for (const s of [-1, 1]) {
+    drawBeam(B, [s * 0.8, 0.98, -1.15], [s * 0.7, 1.45, -0.25], 0.045, 0.06, TRIM); // A-pillar
+    box(s * 0.8, 0.98, 0.1, 0.06, 0.16, 1.2, INTERIOR);                            // door top
+  }
+  box(0, 1.46, -0.22, 1.5, 0.04, 0.1, TRIM);         // roof edge
+  box(0, 1.39, -0.5, 0.2, 0.05, 0.02, [0.35, 0.38, 0.42]); // rear-view mirror
+  drawBeam(B, [0, 1.46, -0.3], [0, 1.4, -0.5], 0.02, 0.02, TRIM); // its stem
+  // Steering wheel, tilted toward the driver and turned with the input.
+  const c = toWorld(B, EYE[0], 0.88, -0.3);
+  let wb = rotate(B.back, B.right, -0.42), wu = rotate(B.up, B.right, -0.42); // wheel axis and up
+  const a = wheelAngle();
+  const wr = rotate(B.right, wb, a);
+  wu = rotate(wu, wb, a);
+  draw(meshes.wheelRim, basis(c, wr, wu, wb), TRIM);
+  const W = { o: c, right: wr, up: wu, back: wb };
+  draw(meshes.cube, basis(c, wr, wu, wb, 0.08, 0.08, 0.05), [0.18, 0.18, 0.2]); // hub
+  draw(meshes.cube, basis(toWorld(W, 0, 0.16, 0), wr, wu, wb, 0.03, 0.025, 0.025), [0.95, 0.77, 0.24]); // top marker
+  for (const s of [-1, 1]) draw(meshes.cube, basis(toWorld(W, s * 0.1, -0.01, 0), wr, wu, wb, 0.12, 0.03, 0.015), TRIM);
+  draw(meshes.cube, basis(toWorld(W, 0, -0.1, 0), wr, wu, wb, 0.03, 0.12, 0.015), TRIM);
 }
 
 // The ghost is see-through and never hides anything behind it. Blending keeps
@@ -270,6 +335,7 @@ function frame(now) {
 
   const controls = readControls(dt);
   if (controls.toggleGhost) toggleGhost();
+  if (controls.toggleView) toggleView();
   if (controls.switchDrive) switchDrive();
   else if (controls.reset) resetRace();
   const where = track.locate(car.x, car.z);
@@ -303,9 +369,20 @@ function frame(now) {
   const aspect = canvas.width / canvas.height;
   // Keep a usable horizontal view on tall (portrait phone) screens.
   const fovy = aspect < 1 ? 2 * Math.atan(Math.tan(Math.PI / 6) * 0.8 / aspect) : Math.PI / 3;
-  const proj = perspective(fovy, aspect, 0.1, 1000);
-  const view = lookAt([cam.x, cam.y, cam.z], [car.x, carY + 1, car.z], [0, 1, 0]);
-  gl.uniformMatrix4fv(uViewProj, false, multiply(proj, view));
+  const cockpit = view === 'cockpit';
+  let viewMat;
+  if (cockpit) {
+    // Eye rides the leaning body; it looks a touch down and glances into turns.
+    glance += (Math.max(-0.25, Math.min(0.25, car.yawRate * 0.12)) - glance) * Math.min(1, dt * 3);
+    const B = bodyFrame(carFrame(car), tilt);
+    const eye = toWorld(B, ...EYE);
+    const dir = rotate(rotate(B.back.map((v) => -v), B.right, -0.08), B.up, glance);
+    viewMat = lookAt(eye, [0, 1, 2].map((i) => eye[i] + dir[i]), B.up);
+  } else {
+    viewMat = lookAt([cam.x, cam.y, cam.z], [car.x, carY + 1, car.z], [0, 1, 0]);
+  }
+  const proj = perspective(cockpit ? fovy * 1.1 : fovy, aspect, cockpit ? 0.05 : 0.1, 1000);
+  gl.uniformMatrix4fv(uViewProj, false, multiply(proj, viewMat));
 
   // Road layers sit a few cm above the ground; polygon offset keeps them from
   // z-fighting with it (and the start line and skids with the road) far away.
@@ -328,7 +405,8 @@ function frame(now) {
   draw(signs.faces, identity(), [1, 1, 1]);
   gl.uniform1i(uTextured, 0);
   for (const p of props) draw(meshes.cube, basis([p.x, p.y + p.s / 2, p.z], [1, 0, 0], [0, 1, 0], [0, 0, 1], p.s, p.s, p.s), [0.7, 0.65, 0.5]);
-  drawCar();
+  drawCar(car, CAR_COLORS, 1, tilt, !cockpit);
+  if (cockpit) drawCockpit();
   drawGhost(now);
 
   speedEl.textContent = Math.abs(car.speed * 3.6).toFixed(0).padStart(3, ' ');
