@@ -73,6 +73,14 @@ const ghostBtn = document.getElementById('ghost');
 const viewBtn = document.getElementById('view');
 const loadEl = document.getElementById('load');
 const gradeEl = document.getElementById('grade');
+const gmeterEl = document.getElementById('gmeter');
+const gdotEl = document.getElementById('gdot');
+const glimitEl = document.getElementById('glimit');
+const gtrailEl = document.getElementById('gtrail');
+const gvalEl = document.getElementById('gval');
+const guseEl = document.getElementById('guse');
+const G_SCALE = 28; // px per g on the G-meter (grid rings at 0.5 g and 1 g)
+const gTrail = [];
 const gl = canvas.getContext('webgl2', { antialias: true });
 if (!gl) {
   document.getElementById('hud').textContent = 'WebGL2 is not available in this browser.';
@@ -356,6 +364,26 @@ function drawGhost(now) {
   gl.disable(gl.BLEND);
 }
 
+// The dot shows the push the driver feels: braking moves it up, a left turn
+// moves it right. It sits inside the dashed ring (the grip limit) until the
+// tires are maxed out.
+function updateGMeter() {
+  const clampR = (x, y, r) => { const d = Math.hypot(x, y); return d > r ? [x * r / d, y * r / d] : [x, y]; };
+  const [x, y] = clampR(car.gLat * G_SCALE, car.gLong * G_SCALE, 42);
+  gdotEl.setAttribute('cx', x.toFixed(1));
+  gdotEl.setAttribute('cy', y.toFixed(1));
+  glimitEl.setAttribute('r', Math.min(42, car.gripLimit * G_SCALE).toFixed(1));
+  gTrail.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+  if (gTrail.length > 30) gTrail.shift();
+  gtrailEl.setAttribute('points', gTrail.join(' '));
+  gvalEl.textContent = Math.hypot(car.gLong, car.gLat).toFixed(2);
+  const use = Math.max(car.tires.front.use, car.tires.rear.use);
+  guseEl.textContent = `${Math.min(100, Math.round(use * 100))}%`;
+  const sliding = car.frontSliding || car.rearSliding;
+  gmeterEl.classList.toggle('slide', sliding);
+  gmeterEl.classList.toggle('near', !sliding && use > 0.85);
+}
+
 let last = performance.now();
 function frame(now) {
   const dt = Math.min(0.05, (now - last) / 1000);
@@ -462,6 +490,7 @@ function frame(now) {
   const front = Math.round((car.loadFront / weight) * 100), rear = Math.round((car.loadRear / weight) * 100);
   loadEl.textContent = `${front} / ${rear}`;
   loadEl.classList.toggle('light', front + rear < 85);
+  updateGMeter();
   const grade = Math.round(car.grade * 100);
   gradeEl.textContent = `${grade > 0 ? '+' : grade < 0 ? '−' : ''}${Math.abs(grade)}%`;
 

@@ -15,11 +15,15 @@
 
 const G = 9.81;
 
-// Tire curve (simplified Pacejka): peaks near 8 deg of slip, then drops to
-// about 90% of peak grip when fully sliding.
+// Tire curve (simplified Pacejka) up to its peak near 9 deg of slip, then flat.
+// Past the peak the tire loses up to 10% of its grip, but over time (see
+// `axle`), so slides build up and settle down smoothly instead of snapping.
 const B = 17, C = 1.3;
 export const PEAK_SLIP = Math.tan(Math.PI / (2 * C)) / B; // ~0.156 rad
-const tireCurve = (alpha) => Math.sin(C * Math.atan(B * alpha));
+const tireCurve = (alpha) => Math.abs(alpha) < PEAK_SLIP ? Math.sin(C * Math.atan(B * alpha)) : Math.sign(alpha);
+// How quickly a tire's grip follows what the road allows (seconds): it lets go
+// over ~0.1 s and takes ~0.3 s to bite again.
+const GRIP_LOSS_TIME = 0.1, GRIP_GAIN_TIME = 0.3;
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 // Sign that fades to 0 near zero, so forces don't chatter at standstill.
@@ -87,6 +91,12 @@ export class Car {
     this.frontSliding = false;
     this.rearSliding = false;
     this.balance = null;    // 'under' | 'over' | null
+    // Per-axle tire state: share of peak cornering grip on hand right now,
+    // whether it is sliding, and how much of its grip it is using (0..1+).
+    this.tires = { front: { grip: 1, sliding: false, use: 0 }, rear: { grip: 1, sliding: false, use: 0 } };
+    this.gLong = this.gLat = 0; // tire acceleration in g (forward, left), smoothed
+    this.gripLimit = 1;     // what the tires can give in total, in g
+    this._felt = null;
     this._sinceUnder = this._sinceOver = 1;
   }
 
@@ -108,35 +118,57 @@ export class Car {
     this.brake = ramp(this.brake, c.brake);
     const pedals = { throttle: this.throttle, brake: this.brake, handbrake: c.handbrake };
 
-    let front = { slip: 0, sliding: false }, rear = front;
+    let front = { slip: 0 }, rear = front;
     for (let t = dt; t > 1e-6; t -= STEP) [front, rear] = this.step(Math.min(STEP, t), pedals, surf);
 
     this.slipFront = front.slip;
     this.slipRear = rear.slip;
-    this.frontSliding = front.sliding;
-    this.rearSliding = rear.sliding;
+    this.frontSliding = this.tires.front.sliding;
+    this.rearSliding = this.tires.rear.sliding;
+    // Smoothed for the G-meter so it reads steadily.
+    const k = Math.min(1, dt * 8);
+    const felt = this._felt;
+    if (felt) {
+      this.gLong += (felt.long - this.gLong) * k;
+      this.gLat += (felt.lat - this.gLat) * k;
+      this.gripLimit += (felt.limit - this.gripLimit) * k;
+    }
     this.updateBalance(dt);
   }
 
   // Forces from one axle's tires, in that axle's wheel frame (x along the wheel).
-  axle(u, w, load, mu, fxDemand, locked) {
+  // `tire` is that axle's state in this.tires; `h` the time step.
+  axle(u, w, load, mu, fxDemand, locked, tire, h) {
     const max = mu * load;
     const slip = Math.atan2(w, Math.max(Math.abs(u), 3));
+    const ease = (target) => {
+      const tau = target < tire.grip ? GRIP_LOSS_TIME : GRIP_GAIN_TIME;
+      tire.grip += (target - tire.grip) * Math.min(1, h / tau);
+    };
     if (locked) {
       // Locked wheels just slide: friction opposes the contact patch velocity.
+      // Grip drops too, so it comes back gradually once the handbrake is off.
+      ease(0.5);
       const v = Math.max(Math.hypot(u, w), 0.5);
-      return { fx: -0.9 * max * u / v, fy: -0.9 * max * w / v, slip, sliding: Math.hypot(u, w) > 1 };
+      tire.sliding = Math.hypot(u, w) > 1;
+      tire.use = 1;
+      return { fx: -0.9 * max * u / v, fy: -0.9 * max * w / v, slip };
     }
-    let fx = fxDemand, spinning = false;
-    if (Math.abs(fx) > max) {
-      // Wheelspin or brake lock-up: grip drops and little is left for cornering.
-      fx = Math.sign(fx) * 0.9 * max;
-      spinning = true;
-    }
-    // Friction circle: whatever grip drive/brake uses is gone from cornering.
-    const latMax = spinning ? 0.5 * max : max * Math.sqrt(Math.max(0.25, 1 - (fx / max) ** 2));
-    const fy = -latMax * tireCurve(slip);
-    return { fx, fy, slip, sliding: spinning || Math.abs(slip) > PEAK_SLIP * 1.15 };
+    // Wheelspin or brake lock-up past the limit: drive eases down to 90%.
+    let fx = fxDemand;
+    const demand = Math.abs(fx) / Math.max(max, 1e-6);
+    const spin = clamp((demand - 1) / 0.3, 0, 1);
+    if (demand > 1) fx = Math.sign(fx) * max * (1 - 0.1 * spin);
+    // Friction circle: whatever grip drive/brake uses is gone from cornering
+    // (never below half). Sliding past the peak costs up to 10% more.
+    const circle = Math.sqrt(Math.max(0.25, 1 - Math.min(demand, 1) ** 2));
+    const past = Math.max(0, Math.abs(slip) / PEAK_SLIP - 1);
+    ease(circle * (1 - 0.1 * Math.min(1, past / 3)));
+    const fy = -max * tire.grip * tireCurve(slip);
+    // Hysteresis so the sliding state (orange wheels, skids) doesn't flicker.
+    tire.sliding = spin > 0 || Math.abs(slip) > PEAK_SLIP * (tire.sliding ? 1 : 1.15);
+    tire.use = Math.hypot(fx, fy) / Math.max(max, 1e-6);
+    return { fx, fy, slip };
   }
 
   step(h, c, surf) {
@@ -190,14 +222,20 @@ export class Car {
     }
     const demandF = (fwd ? drive : 0) - brake * this.brakeFront * softSign(uF);
     const demandR = (fwd ? 0 : drive) - brake * (1 - this.brakeFront) * softSign(vx);
-    const front = this.axle(uF, wF, loadF, this.muFront * grip, demandF, false);
-    const rear = this.axle(vx, vyR, loadR, this.muRear * grip, demandR, !!c.handbrake);
+    const front = this.axle(uF, wF, loadF, this.muFront * grip, demandF, false, this.tires.front, h);
+    const rear = this.axle(vx, vyR, loadR, this.muRear * grip, demandR, !!c.handbrake, this.tires.rear, h);
 
     // Into the body frame.
     const fxF = front.fx * cs - front.fy * sn;
     const fyF = front.fx * sn + front.fy * cs;
     let fx = fxF + rear.fx - m * G * sinPitch;
     const fy = fyF + rear.fy - m * G * sinBank;
+    // What the driver feels: tire forces only, in g (smoothed in update()).
+    this._felt = {
+      long: (fxF + rear.fx) / (m * G),
+      lat: (fyF + rear.fy) / (m * G),
+      limit: ((this.muFront * loadF + this.muRear * loadR) * grip) / (m * G),
+    };
 
     // Resistance.
     fx -= this.drag * vx * Math.abs(vx);
@@ -208,7 +246,7 @@ export class Car {
     this.vx += (fx / m + r * vy) * h;
     this.vy += (fy / m - r * vx) * h;
     this.yawRate += ((a * fyF - b * rear.fy) / this.yawInertia) * h;
-    this.accel += (fx / m - this.accel) * Math.min(1, h * 10);
+    this.accel += (fx / m - this.accel) * Math.min(1, h * 6); // springs: weight shifts over ~0.15 s
 
     // Let the car come to rest instead of creeping, unless the slope is steep
     // enough to roll it (the handbrake holds it on any hill).
