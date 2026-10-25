@@ -27,12 +27,15 @@ const GRIP_LOSS_TIME = 0.1, GRIP_GAIN_TIME = 0.3;
 
 // Tire temperature (deg C, one value per axle). Grip is best in a window and
 // fades gradually outside it: cold tires feel a little greasy, overheated ones
-// go off faster. Heat comes from the work the tires do against the road
-// (sliding, wheelspin, braking, and a little from rolling), and the air cools
-// them, faster at speed.
+// go off faster. Most heat comes from the rubber flexing under load: the harder
+// a tire is working (cornering, braking, driving) and the faster it rolls, the
+// hotter it gets, so both axles warm up in hard driving. Sliding adds some more
+// (rubber scrubbing on the road), but not so much that one slide cooks the tires.
+// The air cools them, faster at speed.
 export const TIRE_TEMP = { ambient: 20, start: 45, optLo: 80, optHi: 100 };
-const HEAT = 2.2e-4;       // deg C per joule dissipated (per axle)
-const ROLL_HEAT = 0.015;   // share of load * speed that heats the tire by flexing
+const FLEX_HEAT = 1.1e-5;  // deg C per (N of tire force * m/s rolled)
+const ROLL_HEAT = 5e-6;    // deg C per (N of load * m/s): rolling alone, a little
+const SLIDE_HEAT = 4e-5;   // deg C per joule scrubbed off sliding
 const COOL = 0.006, COOL_SPEED = 0.0008; // per second, plus per (m/s)
 // Grip multiplier for a temperature: 1 inside the window, then a loss that
 // starts gently (quadratic) and grows linearly further out.
@@ -198,7 +201,7 @@ export class Car {
       tire.sliding = Math.hypot(u, w) > 1;
       tire.use = 1;
       // All the friction work goes into the rubber: locked wheels heat fast.
-      this.heatTire(tire, 0.9 * max * Math.hypot(u, w), load, u, h);
+      this.heatTire(tire, 0.9 * max * Math.hypot(u, w), 0.9 * max, load, u, h);
       return { fx: -0.9 * max * u / v, fy: -0.9 * max * w / v, slip };
     }
     // Wheelspin or brake lock-up past the limit: drive eases down to 90%.
@@ -215,17 +218,18 @@ export class Car {
     // Hysteresis so the sliding state (orange wheels, skids) doesn't flicker.
     tire.sliding = spin > 0 || Math.abs(slip) > PEAK_SLIP * (tire.sliding ? 1 : 1.15);
     tire.use = Math.hypot(fx, fy) / Math.max(max, 1e-6);
-    // Work done against the road: cornering force times the patch's sideways
-    // speed, plus drive/brake force times the wheel's slip (a few % normally,
-    // a lot more when it spins or locks up).
-    const slipSpeed = Math.abs(u) * 0.05 * Math.min(demand, 1) + spin * 4;
-    this.heatTire(tire, Math.abs(fy * w) + Math.abs(fx) * slipSpeed, load, u, h);
+    // Scrubbing: cornering force times the patch's sideways speed, plus
+    // drive/brake force times the wheel's slip (small normally, a lot more
+    // when it spins).
+    const slipSpeed = Math.abs(u) * 0.03 * Math.min(demand, 1) + spin * 4;
+    this.heatTire(tire, Math.abs(fy * w) + Math.abs(fx) * slipSpeed, Math.hypot(fx, fy), load, u, h);
     return { fx, fy, slip };
   }
 
-  heatTire(tire, power, load, u, h) {
+  // `scrub`: power lost sliding (W); `force`: total tire force (N).
+  heatTire(tire, scrub, force, load, u, h) {
     const speed = Math.abs(u);
-    const gain = (power + ROLL_HEAT * load * speed) * HEAT;
+    const gain = (FLEX_HEAT * force + ROLL_HEAT * load) * speed + SLIDE_HEAT * scrub;
     const loss = (tire.temp - TIRE_TEMP.ambient) * (COOL + COOL_SPEED * speed);
     tire.heat = gain - loss;
     tire.temp += tire.heat * h;
