@@ -38,6 +38,19 @@ document.getElementById('reset')?.addEventListener('click', () => { resetQueued 
 document.getElementById('drive')?.addEventListener('click', () => { driveQueued = true; });
 document.getElementById('ghost')?.addEventListener('click', () => { ghostQueued = true; });
 document.getElementById('view')?.addEventListener('click', () => { viewQueued = true; });
+// Settings panel: the gear button toggles it; tapping elsewhere closes it.
+const settingsBtn = document.getElementById('settings-btn');
+const settingsEl = document.getElementById('settings');
+const setSettings = (open) => {
+  settingsEl.hidden = !open;
+  settingsBtn.setAttribute('aria-expanded', String(open));
+};
+settingsBtn?.addEventListener('click', () => setSettings(settingsEl.hidden));
+addEventListener('pointerdown', (e) => {
+  if (settingsEl && !settingsEl.hidden && !e.target.closest('.top-right')) setSettings(false);
+});
+// Drop focus after a click so Space (handbrake) doesn't re-press the button.
+document.querySelectorAll('.top-right button').forEach((b) => b.addEventListener('click', () => b.blur()));
 addEventListener('keydown', (e) => {
   if (e.repeat) return;
   if (e.code === 'KeyT') driveQueued = true;

@@ -137,7 +137,10 @@ const skids = new Skids(gl, program);
 const ghost = new Ghost();
 let showGhost = true;
 try { showGhost = localStorage.getItem('showGhost') !== 'off'; } catch {}
-const updateGhostBtn = () => ghostBtn?.setAttribute('aria-pressed', String(showGhost));
+const updateGhostBtn = () => {
+  ghostBtn?.setAttribute('aria-pressed', String(showGhost));
+  const v = ghostBtn?.querySelector('b'); if (v) v.textContent = showGhost ? 'On' : 'Off';
+};
 updateGhostBtn();
 function toggleGhost() {
   showGhost = !showGhost;
@@ -145,10 +148,12 @@ function toggleGhost() {
   updateGhostBtn();
 }
 const cam = { x: 0, y: 4, z: 0 };
-// Camera: 'chase' (behind the car) or 'cockpit' (driver's seat).
-let view = 'chase';
-try { view = localStorage.getItem('view') === 'cockpit' ? 'cockpit' : 'chase'; } catch {}
-const updateViewBtn = () => { if (viewBtn) viewBtn.textContent = view === 'cockpit' ? 'Cockpit' : 'Chase'; };
+// Camera: 'cockpit' (driver's seat, the default) or 'chase' (behind the car).
+let view = 'cockpit';
+try { view = localStorage.getItem('view') === 'chase' ? 'chase' : 'cockpit'; } catch {}
+const updateViewBtn = () => {
+  const v = viewBtn?.querySelector('b'); if (v) v.textContent = view === 'cockpit' ? 'Cockpit' : 'Chase';
+};
 updateViewBtn();
 function toggleView() {
   view = view === 'cockpit' ? 'chase' : 'cockpit';
@@ -179,7 +184,7 @@ function resetRace() {
   lap.visited.clear();
   ghost.stop();
   skids.clear();
-  driveEl.textContent = VARIANTS[car.variant].label;
+  driveEl.querySelector('b').textContent = VARIANTS[car.variant].label;
 }
 resetRace();
 
