@@ -4,6 +4,7 @@ import { perspective, lookAt, multiply, trs, identity } from './math.js';
 import { readControls, resetWheel } from './input.js';
 import { Car, VARIANTS } from './car.js';
 import { Skids } from './skids.js';
+import { Ghost } from './ghost.js';
 import { buildTrack, ROAD_HALF_WIDTH } from './track.js';
 
 const VS = `#version 300 es
@@ -26,6 +27,7 @@ in vec3 vNormal;
 in vec3 vWorld;
 uniform vec3 uColor;
 uniform float uGrid; // grid cell size in meters, 0 = off
+uniform float uAlpha;
 out vec4 outColor;
 void main() {
   vec3 L = normalize(vec3(0.4, 1.0, 0.3));
@@ -39,7 +41,7 @@ void main() {
     float line = 1.0 - min(min(a.x, a.y), 1.0);
     c = mix(c, c * 0.85, line);
   }
-  outColor = vec4(c, 1.0);
+  outColor = vec4(c, uAlpha);
 }`;
 
 const canvas = document.getElementById('gl');
@@ -49,6 +51,7 @@ const lapEl = document.getElementById('lap');
 const bestEl = document.getElementById('best');
 const driveEl = document.getElementById('drive');
 const balanceEl = document.getElementById('balance');
+const ghostBtn = document.getElementById('ghost');
 const gl = canvas.getContext('webgl2', { antialias: true });
 if (!gl) {
   document.getElementById('hud').textContent = 'WebGL2 is not available in this browser.';
@@ -60,6 +63,7 @@ const uModel = gl.getUniformLocation(program, 'uModel');
 const uViewProj = gl.getUniformLocation(program, 'uViewProj');
 const uColor = gl.getUniformLocation(program, 'uColor');
 const uGrid = gl.getUniformLocation(program, 'uGrid');
+const uAlpha = gl.getUniformLocation(program, 'uAlpha');
 
 const track = buildTrack();
 const meshes = {
@@ -91,10 +95,20 @@ let savedDrive = 'rwd';
 try { savedDrive = localStorage.getItem('drive') in VARIANTS ? localStorage.getItem('drive') : 'rwd'; } catch {}
 const car = new Car(savedDrive);
 const skids = new Skids(gl, program);
+const ghost = new Ghost();
+let showGhost = true;
+try { showGhost = localStorage.getItem('showGhost') !== 'off'; } catch {}
+const updateGhostBtn = () => ghostBtn?.setAttribute('aria-pressed', String(showGhost));
+updateGhostBtn();
+function toggleGhost() {
+  showGhost = !showGhost;
+  try { localStorage.setItem('showGhost', showGhost ? 'on' : 'off'); } catch {}
+  updateGhostBtn();
+}
 const cam = { x: 0, y: 4, z: 0 };
 // Laps: the track is split into 4 sectors; a lap counts only after visiting all of them.
 // Best laps are kept per drivetrain so FWD and RWD can be compared.
-const lap = { start: null, last: null, best: { fwd: null, rwd: null }, sector: 3, visited: new Set() };
+const lap = { start: null, last: null, best: { fwd: ghost.best('fwd'), rwd: ghost.best('rwd') }, sector: 3, visited: new Set() };
 
 function switchDrive() {
   car.setVariant(car.variant === 'fwd' ? 'rwd' : 'fwd');
@@ -110,6 +124,7 @@ function resetRace() {
   lap.start = null;
   lap.sector = 3;
   lap.visited.clear();
+  ghost.stop();
   skids.clear();
   driveEl.textContent = VARIANTS[car.variant].label;
 }
@@ -123,9 +138,13 @@ function updateLap(index, now) {
     if (lap.start !== null && lap.visited.size === 3) {
       lap.last = now - lap.start;
       const v = car.variant;
-      if (lap.best[v] === null || lap.last < lap.best[v]) lap.best[v] = lap.last;
+      if (lap.best[v] === null || lap.last < lap.best[v]) {
+        lap.best[v] = lap.last;
+        ghost.save(v, lap.last, car);
+      }
     }
     lap.start = now;
+    ghost.start();
     lap.visited.clear();
   } else if (sector !== 0) {
     lap.visited.add(sector);
@@ -150,37 +169,58 @@ function resize() {
   gl.viewport(0, 0, w, h);
 }
 
-function draw(mesh, model, color, gridSize = 0) {
+function draw(mesh, model, color, gridSize = 0, alpha = 1) {
   gl.uniformMatrix4fv(uModel, false, model);
   gl.uniform3fv(uColor, color);
   gl.uniform1f(uGrid, gridSize);
+  gl.uniform1f(uAlpha, alpha);
   gl.bindVertexArray(mesh.vao);
   gl.drawArrays(mesh.mode, 0, mesh.count);
 }
 
 const WHEELS = [[-1, 1.3, true], [1, 1.3, true], [-1, -1.3, false], [1, -1.3, false]];
 
-function wheelPositions() {
-  const { x, z, heading: h } = car;
+function wheelPositions(pose = car) {
+  const { x, z, heading: h } = pose;
   const fx = -Math.sin(h), fz = -Math.cos(h), rx = Math.cos(h), rz = -Math.sin(h);
   return WHEELS.map(([side, fwd, front]) => ({
     x: x + rx * side * 0.95 + fx * fwd,
     z: z + rz * side * 0.95 + fz * fwd,
     front,
-    sliding: front ? car.frontSliding : car.rearSliding,
+    sliding: front ? pose.frontSliding : pose.rearSliding,
   }));
 }
 
-function drawCar() {
-  const { x, z, heading: h, steer } = car;
-  draw(meshes.cube, trs(x, 0.6, z, h, 1.8, 0.6, 4.2), [0.85, 0.15, 0.15]);
+const CAR_COLORS = { body: [0.85, 0.15, 0.15], cabin: [0.2, 0.2, 0.25], wheel: [0.08, 0.08, 0.08] };
+const GHOST_COLORS = { body: [0.75, 0.9, 1], cabin: [0.55, 0.7, 0.85], wheel: [0.45, 0.55, 0.65] };
+
+function drawCar(pose = car, colors = CAR_COLORS, alpha = 1) {
+  const { x, z, heading: h, steer } = pose;
+  draw(meshes.cube, trs(x, 0.6, z, h, 1.8, 0.6, 4.2), colors.body, 0, alpha);
   const fx = -Math.sin(h), fz = -Math.cos(h);
-  draw(meshes.cube, trs(x - fx * 0.3, 1.15, z - fz * 0.3, h, 1.5, 0.5, 2.0), [0.2, 0.2, 0.25]);
+  draw(meshes.cube, trs(x - fx * 0.3, 1.15, z - fz * 0.3, h, 1.5, 0.5, 2.0), colors.cabin, 0, alpha);
   // Wheels glow orange when their tires are past the grip peak.
-  for (const w of wheelPositions()) {
-    const color = w.sliding ? [0.95, 0.55, 0.1] : [0.08, 0.08, 0.08];
-    draw(meshes.cube, trs(w.x, 0.35, w.z, h + (w.front ? steer : 0), 0.3, 0.7, 0.7), color);
+  for (const w of wheelPositions(pose)) {
+    const color = w.sliding ? [0.95, 0.55, 0.1] : colors.wheel;
+    draw(meshes.cube, trs(w.x, 0.35, w.z, h + (w.front ? steer : 0), 0.3, 0.7, 0.7), color, 0, alpha);
   }
+}
+
+// The ghost is see-through and never hides anything behind it. Blending keeps
+// the canvas alpha at 1 so the page never shows through.
+function drawGhost(now) {
+  if (!showGhost || lap.start === null) return;
+  const pose = ghost.pose(car.variant, now - lap.start);
+  if (!pose) return;
+  // Fade it out when it overlaps the player's car so the view stays clear.
+  const d = Math.hypot(pose.x - car.x, pose.z - car.z);
+  const alpha = 0.45 * Math.min(1, Math.max(0.5, d / 8));
+  gl.enable(gl.BLEND);
+  gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE);
+  gl.depthMask(false);
+  drawCar(pose, GHOST_COLORS, alpha);
+  gl.depthMask(true);
+  gl.disable(gl.BLEND);
 }
 
 let last = performance.now();
@@ -189,11 +229,13 @@ function frame(now) {
   last = now;
 
   const controls = readControls(dt);
+  if (controls.toggleGhost) toggleGhost();
   if (controls.switchDrive) switchDrive();
   else if (controls.reset) resetRace();
   const where = track.locate(car.x, car.z);
   car.update(dt, controls, !where.onTrack);
   updateLap(track.locate(car.x, car.z).index, now);
+  if (lap.start !== null) ghost.record(now - lap.start, car);
   wheelPositions().forEach((w, i) => skids.track(i, w.x, w.z, w.sliding));
 
   // Chase camera: lag behind the car, smoothed.
@@ -233,6 +275,7 @@ function frame(now) {
 
   for (const p of props) draw(meshes.cube, trs(p.x, p.s / 2, p.z, 0, p.s, p.s, p.s), [0.7, 0.65, 0.5]);
   drawCar();
+  drawGhost(now);
 
   speedEl.textContent = Math.abs(car.speed * 3.6).toFixed(0).padStart(3, ' ');
   speedEl.classList.toggle('grass', !where.onTrack);

@@ -33,10 +33,15 @@ addEventListener('blur', () => {
 });
 const pressed = (k) => (pads.get(k)?.ids.size ?? 0) > 0;
 
-let resetQueued = false, driveQueued = false;
+let resetQueued = false, driveQueued = false, ghostQueued = false;
 document.getElementById('reset')?.addEventListener('click', () => { resetQueued = true; });
 document.getElementById('drive')?.addEventListener('click', () => { driveQueued = true; });
-addEventListener('keydown', (e) => { if (e.code === 'KeyT' && !e.repeat) driveQueued = true; });
+document.getElementById('ghost')?.addEventListener('click', () => { ghostQueued = true; });
+addEventListener('keydown', (e) => {
+  if (e.repeat) return;
+  if (e.code === 'KeyT') driveQueued = true;
+  if (e.code === 'KeyG') ghostQueued = true;
+});
 
 // Steering wheel position: -1 (full right) .. 1 (full left). Keys turn it
 // gradually and it springs back to center when released, like a real wheel.
@@ -99,8 +104,8 @@ export function resetWheel() { wheel = 0; }
 
 export function readControls(dt) {
   const reset = any('KeyR') || resetQueued;
-  const switchDrive = driveQueued;
-  resetQueued = driveQueued = false;
+  const switchDrive = driveQueued, toggleGhost = ghostQueued;
+  resetQueued = driveQueued = ghostQueued = false;
   updateWheel(dt);
   return {
     throttle: any('ArrowUp', 'KeyW') || pressed('gas') ? 1 : 0,
@@ -109,5 +114,6 @@ export function readControls(dt) {
     handbrake: any('Space') ? 1 : 0,
     reset,
     switchDrive,
+    toggleGhost,
   };
 }

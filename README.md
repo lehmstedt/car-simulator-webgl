@@ -17,6 +17,12 @@ The car uses tire forces, so rough driving gets punished:
   - **FWD** — front-heavy, front wheels drive. Throttle in a corner makes it push wide.
   - **RWD** — balanced, rear wheels drive. Throttle in a slow corner kicks the tail out.
 
+## Ghost car
+
+Your best lap for each drivetrain is replayed as a see-through ghost car, so you
+can race it. It starts when you cross the line and is saved in the browser along
+with your best time. Toggle it with **G** or the Ghost button.
+
 ## Run
 
 ES modules need to be served over HTTP:
@@ -46,6 +52,7 @@ With the keyboard, holding A/D turns the wheel gradually; let go and it returns 
 | A / D, ← / →   | Steer           |
 | Space          | Handbrake       |
 | T              | Switch FWD/RWD  |
+| G              | Toggle ghost    |
 | R              | Reset           |
 
 ## Layout
@@ -54,6 +61,7 @@ With the keyboard, holding A/D turns the wheel gradually; let go and it returns 
 - `src/track.js` — circuit spline, road/curb meshes, on-track test
 - `src/car.js` — car physics (dynamic bicycle model, tire grip, FWD/RWD)
 - `src/skids.js` — skid marks
+- `src/ghost.js` — best-lap recording and ghost replay
 - `src/gl.js` — shader/mesh helpers
 - `src/geometry.js` — cube, ground plane (grid is drawn in the shader)
 - `src/math.js` — mat4 helpers
