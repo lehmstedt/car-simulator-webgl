@@ -15,7 +15,8 @@ export function buildGates(track) {
   const put = (m, side, fwd, y0, sx, sy, sz, color) => {
     const [tx, tz] = m.tangent, right = [-tz, 0, tx];
     const x = m.x + right[0] * side + tx * fwd, z = m.z + right[2] * side + tz * fwd;
-    boxes.push({ c: [x, y0 + sy / 2, z], axes: [right, [0, 1, 0], [-tx, 0, -tz]], s: [sx, sy, sz], color });
+    const mat = color === GATE_POST ? 'metal' : color === GATE_BALE ? 'straw' : 'matte';
+    boxes.push({ c: [x, y0 + sy / 2, z], axes: [right, [0, 1, 0], [-tx, 0, -tz]], s: [sx, sy, sz], color, mat });
   };
   // Ground under the road's center at a mark: the banner stays level across.
   const groundAt = (m) => Math.min(...[-span, 0, span].map((o) => terrainHeight(m.x - m.tangent[1] * o, m.z + m.tangent[0] * o)));

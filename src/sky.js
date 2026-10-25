@@ -6,7 +6,7 @@
 import { createProgram, createMesh } from './gl.js';
 
 export const HORIZON = [0.78, 0.86, 0.93];
-const ZENITH = [0.27, 0.5, 0.86];
+export const ZENITH = [0.27, 0.5, 0.86];
 export const SUN_DIR = [0.4, 1.0, 0.3];
 
 const SKY_VS = `#version 300 es

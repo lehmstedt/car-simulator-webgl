@@ -15,6 +15,7 @@ export const onPaddock = (x, z, margin = 0) =>
 
 const CONCRETE = [0.78, 0.78, 0.75], WALL = [0.86, 0.86, 0.84], ROOF = [0.32, 0.34, 0.37];
 const DOOR = [0.09, 0.1, 0.12], GLASS = [0.2, 0.32, 0.45], WHITE = [0.94, 0.94, 0.94];
+const MATS = new Map([[CONCRETE, 'concrete'], [WALL, 'concrete'], [ROOF, 'metal'], [DOOR, 'matte'], [GLASS, 'glass'], [WHITE, 'paint']]);
 const TEAMS = [[0.85, 0.15, 0.15], [0.15, 0.35, 0.8], [0.95, 0.75, 0.15], [0.1, 0.55, 0.3]];
 
 // Lowest ground under a footprint, so boxes never float at a corner.
@@ -43,7 +44,7 @@ export function buildPaddock() {
   const boxes = [];
   const box = (cx, cz, sx, sy, sz, color, lift = 0, y0 = null) => {
     const y = (y0 ?? base(cx - sx / 2, cx + sx / 2, cz - sz / 2, cz + sz / 2) - 0.3) + lift;
-    boxes.push({ c: [cx, y + sy / 2, cz], s: [sx, sy, sz], color });
+    boxes.push({ c: [cx, y + sy / 2, cz], s: [sx, sy, sz], color, mat: MATS.get(color) ?? 'paint' });
   };
 
   // Pit wall, open at both ends for the pit entry and exit.

@@ -12,57 +12,8 @@ import { Signs } from './signs.js';
 import { onPaddock, buildPaddock } from './paddock.js';
 import { buildTrees } from './trees.js';
 import { buildGates } from './gates.js';
-import { Sky, HORIZON } from './sky.js';
-
-const VS = `#version 300 es
-in vec3 aPosition;
-in vec3 aNormal;
-in vec2 aUV;
-uniform mat4 uModel;
-uniform mat4 uViewProj;
-out vec3 vNormal;
-out vec3 vWorld;
-out vec2 vUV;
-void main() {
-  vUV = aUV;
-  vec4 world = uModel * vec4(aPosition, 1.0);
-  vNormal = mat3(uModel) * aNormal;
-  vWorld = world.xyz;
-  gl_Position = uViewProj * world;
-}`;
-
-const FS = `#version 300 es
-precision highp float;
-in vec3 vNormal;
-in vec3 vWorld;
-in vec2 vUV;
-uniform vec3 uColor;
-uniform sampler2D uTex;
-uniform bool uTextured; // color comes from uTex (sign faces), lit more evenly
-uniform float uGrid; // grid cell size in meters, 0 = off
-uniform float uAlpha;
-uniform float uGrain; // speckle strength (sand), 0 = off
-uniform vec3 uCam;
-uniform vec3 uFog;
-out vec4 outColor;
-float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-void main() {
-  vec3 L = normalize(vec3(0.4, 1.0, 0.3));
-  float d = max(dot(normalize(vNormal), L), 0.0);
-  vec3 c = uTextured ? texture(uTex, vUV).rgb * (0.6 + 0.4 * d) : uColor * (0.35 + 0.65 * d);
-  if (uGrid > 0.0) {
-    // Anti-aliased grid lines on the XZ plane.
-    vec2 g = vWorld.xz / uGrid;
-    vec2 w = fwidth(g);
-    vec2 a = abs(fract(g - 0.5) - 0.5) / w;
-    float line = 1.0 - min(min(a.x, a.y), 1.0);
-    c = mix(c, c * 0.85, line);
-  }
-  if (uGrain > 0.0) c *= 1.0 + uGrain * (hash(floor(vWorld.xz * 4.0)) - 0.5);
-  // Haze: far things fade into the sky's horizon color.
-  float fog = smoothstep(120.0, 750.0, distance(vWorld, uCam)) * 0.85;
-  outColor = vec4(mix(c, uFog, fog), uAlpha);
-}`;
+import { Sky, HORIZON, ZENITH, SUN_DIR } from './sky.js';
+import { SCENE_VS, SCENE_FS, MAT } from './shading.js';
 
 const canvas = document.getElementById('gl');
 const speedEl = document.getElementById('speed');
@@ -96,16 +47,18 @@ if (!gl) {
   throw new Error('WebGL2 not supported');
 }
 
-const program = createProgram(gl, VS, FS);
+const program = createProgram(gl, SCENE_VS, SCENE_FS);
 const uModel = gl.getUniformLocation(program, 'uModel');
 const uViewProj = gl.getUniformLocation(program, 'uViewProj');
 const uColor = gl.getUniformLocation(program, 'uColor');
-const uGrid = gl.getUniformLocation(program, 'uGrid');
+const uMat = gl.getUniformLocation(program, 'uMat');
 const uAlpha = gl.getUniformLocation(program, 'uAlpha');
 const uTextured = gl.getUniformLocation(program, 'uTextured');
-const uGrain = gl.getUniformLocation(program, 'uGrain');
 const uCam = gl.getUniformLocation(program, 'uCam');
 const uFog = gl.getUniformLocation(program, 'uFog');
+const uZenith = gl.getUniformLocation(program, 'uZenith');
+const uSun = gl.getUniformLocation(program, 'uSun');
+const SUN = (() => { const l = Math.hypot(...SUN_DIR); return SUN_DIR.map((v) => v / l); })();
 const sky = new Sky(gl);
 
 // Everything that depends on the layout ('circuit' or 'stage'): the ground,
@@ -136,8 +89,8 @@ function buildWorld(kind) {
     return t.signs.every((s) => Math.hypot(s.x - x, s.z - z) > 6);
   }, terrainHeight, circuit ? null : { points: t.points, tangents: t.tangents });
   const boxes = [
-    ...paddock.boxes.map(({ c, s, color }) => ({ color, model: basis(c, [1, 0, 0], [0, 1, 0], [0, 0, 1], ...s) })),
-    ...(circuit ? [] : buildGates(t)).map(({ c, axes, s, color }) => ({ color, model: basis(c, ...axes, ...s) })),
+    ...paddock.boxes.map(({ c, s, color, mat }) => ({ color, mat, model: basis(c, [1, 0, 0], [0, 1, 0], [0, 0, 1], ...s) })),
+    ...(circuit ? [] : buildGates(t)).map(({ c, axes, s, color, mat }) => ({ color, mat, model: basis(c, ...axes, ...s) })),
   ];
   return {
     kind,
@@ -148,14 +101,16 @@ function buildWorld(kind) {
     apron: paddock.apron && upload(paddock.apron),
     layers: t.layers.map((l) => ({ ...l, mesh: upload(l.mesh) })),
     signs,
-    signParts: signs.parts().map(({ part, m }) => ({ color: part === 'post' ? [0.55, 0.57, 0.6] : [0.3, 0.32, 0.35], model: basis(...m) })),
+    signParts: signs.parts().map(({ part, m }) => ({
+      color: part === 'post' ? [0.55, 0.57, 0.6] : [0.3, 0.32, 0.35], mat: part === 'post' ? 'metal' : 'matte', model: basis(...m),
+    })),
     boxes,
     cars: paddock.cars,
     trees: [
-      [upload(trees.trunks), [0.36, 0.25, 0.16]],
-      [upload(trees.pines), [0.13, 0.33, 0.18]],
-      [upload(trees.leaves), [0.22, 0.45, 0.17]],
-      [upload(trees.leavesLight), [0.36, 0.55, 0.2]],
+      [upload(trees.trunks), [0.36, 0.25, 0.16], 'bark'],
+      [upload(trees.pines), [0.13, 0.33, 0.18], 'leaves'],
+      [upload(trees.leaves), [0.22, 0.45, 0.17], 'leaves'],
+      [upload(trees.leavesLight), [0.36, 0.55, 0.2], 'leaves'],
     ],
     gpu,
   };
@@ -320,10 +275,11 @@ function resize() {
   gl.viewport(0, 0, w, h);
 }
 
-function draw(mesh, model, color, gridSize = 0, alpha = 1) {
+// mat: a material name from MAT (shading.js).
+function draw(mesh, model, color, mat = 'matte', alpha = 1) {
   gl.uniformMatrix4fv(uModel, false, model);
   gl.uniform3fv(uColor, color);
-  gl.uniform1f(uGrid, gridSize);
+  gl.uniform1i(uMat, MAT[mat]);
   gl.uniform1f(uAlpha, alpha);
   gl.bindVertexArray(mesh.vao);
   if (mesh.indexed) gl.drawElements(mesh.mode, mesh.count, gl.UNSIGNED_INT, 0);
@@ -409,8 +365,8 @@ function drawCar(pose = car, colors = CAR_COLORS, alpha = 1, lean = { pitch: 0, 
   const F = carFrame(pose);
   const body = bodyFrame(F, lean);
   const { right, up, back } = body;
-  draw(meshes.cube, basis(toWorld(body, 0, 0.6, 0), right, up, back, 1.8, 0.6, 4.2), colors.body, 0, alpha);
-  if (cabin) draw(meshes.cube, basis(toWorld(body, 0, 1.15, 0.3), right, up, back, 1.5, 0.5, 2.0), colors.cabin, 0, alpha);
+  draw(meshes.cube, basis(toWorld(body, 0, 0.6, 0), right, up, back, 1.8, 0.6, 4.2), colors.body, 'paint', alpha);
+  if (cabin) draw(meshes.cube, basis(toWorld(body, 0, 1.15, 0.3), right, up, back, 1.5, 0.5, 2.0), colors.cabin, 'glass', alpha);
   // Wheels stay on the road frame and glow orange when past the grip peak.
   WHEELS.forEach(([side, fwd, front], i) => {
     const sliding = front ? pose.frontSliding : pose.rearSliding;
@@ -418,7 +374,7 @@ function drawCar(pose = car, colors = CAR_COLORS, alpha = 1, lean = { pitch: 0, 
     const r = rotate(F.right, F.up, a), b = rotate(F.back, F.up, a);
     const color = sliding ? [0.95, 0.55, 0.1] : colors.wheel;
     const y = 0.35 + (lean.wheels?.[i] ?? 0);
-    draw(meshes.cube, basis(toWorld(F, side * 0.95, y, -fwd), r, F.up, b, 0.3, 0.7, 0.7), color, 0, alpha);
+    draw(meshes.cube, basis(toWorld(F, side * 0.95, y, -fwd), r, F.up, b, 0.3, 0.7, 0.7), color, 'rubber', alpha);
   });
 }
 
@@ -427,7 +383,7 @@ const EYE = [-0.35, 1.22, 0.15];
 const INTERIOR = [0.13, 0.13, 0.15], DASH_TOP = [0.2, 0.2, 0.23], TRIM = [0.06, 0.06, 0.07];
 
 // A box stretched between two body-frame points, w wide and h thick.
-function drawBeam(B, a, b, w, h, color) {
+function drawBeam(B, a, b, w, h, color, mat) {
   const pa = toWorld(B, ...a), pb = toWorld(B, ...b);
   let ax = [0, 1, 2].map((i) => pb[i] - pa[i]);
   const len = Math.hypot(...ax);
@@ -437,7 +393,7 @@ function drawBeam(B, a, b, w, h, color) {
   r = r.map((v) => v / rl);
   const u = [r[1] * ax[2] - r[2] * ax[1], r[2] * ax[0] - r[0] * ax[2], r[0] * ax[1] - r[1] * ax[0]];
   const mid = [0, 1, 2].map((i) => (pa[i] + pb[i]) / 2);
-  draw(meshes.cube, basis(mid, r, u, ax, w, h, len), color);
+  draw(meshes.cube, basis(mid, r, u, ax, w, h, len), color, mat);
 }
 
 // Dashboard, pillars, roof edge, mirror and a steering wheel that follows the input.
@@ -453,7 +409,7 @@ function drawCockpit() {
     box(s * 0.8, 0.98, 0.1, 0.06, 0.16, 1.2, INTERIOR);                            // door top
   }
   box(0, 1.46, -0.22, 1.5, 0.04, 0.1, TRIM);         // roof edge
-  box(0, 1.39, -0.5, 0.2, 0.05, 0.02, [0.35, 0.38, 0.42]); // rear-view mirror
+  draw(meshes.cube, basis(toWorld(B, 0, 1.39, -0.5), B.right, B.up, B.back, 0.2, 0.05, 0.02), [0.35, 0.38, 0.42], 'metal'); // rear-view mirror
   drawBeam(B, [0, 1.46, -0.3], [0, 1.4, -0.5], 0.02, 0.02, TRIM); // its stem
   // Steering wheel, tilted toward the driver and turned with the input.
   const c = toWorld(B, EYE[0], 0.88, -0.3);
@@ -461,10 +417,10 @@ function drawCockpit() {
   const a = wheelAngle();
   const wr = rotate(B.right, wb, a);
   wu = rotate(wu, wb, a);
-  draw(meshes.wheelRim, basis(c, wr, wu, wb), TRIM);
+  draw(meshes.wheelRim, basis(c, wr, wu, wb), TRIM, 'rubber');
   const W = { o: c, right: wr, up: wu, back: wb };
   draw(meshes.cube, basis(c, wr, wu, wb, 0.08, 0.08, 0.05), [0.18, 0.18, 0.2]); // hub
-  draw(meshes.cube, basis(toWorld(W, 0, 0.16, 0), wr, wu, wb, 0.03, 0.025, 0.025), [0.95, 0.77, 0.24]); // top marker
+  draw(meshes.cube, basis(toWorld(W, 0, 0.16, 0), wr, wu, wb, 0.03, 0.025, 0.025), [0.95, 0.77, 0.24], 'paint'); // top marker
   for (const s of [-1, 1]) draw(meshes.cube, basis(toWorld(W, s * 0.1, -0.01, 0), wr, wu, wb, 0.12, 0.03, 0.015), TRIM);
   draw(meshes.cube, basis(toWorld(W, 0, -0.1, 0), wr, wu, wb, 0.03, 0.12, 0.015), TRIM);
 }
@@ -605,33 +561,30 @@ function frame(now) {
   gl.uniformMatrix4fv(uViewProj, false, viewProj);
   gl.uniform3fv(uCam, eyePos);
   gl.uniform3fv(uFog, HORIZON);
+  gl.uniform3fv(uZenith, ZENITH);
+  gl.uniform3fv(uSun, SUN);
 
   // Road layers sit a few cm above the ground; polygon offset keeps them from
   // z-fighting with it (and the start line and skids with the road) far away.
   gl.disable(gl.CULL_FACE);
-  draw(world.ground, identity(), [0.3, 0.55, 0.3], 10);
+  draw(world.ground, identity(), [0.3, 0.55, 0.3], 'grass');
   gl.enable(gl.POLYGON_OFFSET_FILL);
   gl.polygonOffset(-1, -2);
-  if (world.apron) draw(world.apron, identity(), [0.4, 0.41, 0.43]);
-  for (const l of world.layers) {
-    if (l.top) continue;
-    gl.uniform1f(uGrain, l.grain ?? 0);
-    draw(l.mesh, identity(), l.color);
-  }
-  gl.uniform1f(uGrain, 0);
+  if (world.apron) draw(world.apron, identity(), [0.4, 0.41, 0.43], 'asphalt');
+  for (const l of world.layers) if (!l.top) draw(l.mesh, identity(), l.color, l.mat);
   gl.polygonOffset(-2, -4);
-  for (const l of world.layers) if (l.top) draw(l.mesh, identity(), l.color);
-  if (skids.used) draw(skids.mesh, identity(), [0.12, 0.12, 0.13]);
+  for (const l of world.layers) if (l.top) draw(l.mesh, identity(), l.color, l.mat);
+  if (skids.used) draw(skids.mesh, identity(), [0.12, 0.12, 0.13], 'rubber');
   gl.disable(gl.POLYGON_OFFSET_FILL);
-  for (const [mesh, color] of world.trees) draw(mesh, identity(), color); // open cones: no culling
+  for (const [mesh, color, mat] of world.trees) draw(mesh, identity(), color, mat); // open cones: no culling
   gl.enable(gl.CULL_FACE);
 
-  for (const p of world.signParts) draw(meshes.cube, p.model, p.color);
+  for (const p of world.signParts) draw(meshes.cube, p.model, p.color, p.mat);
   gl.uniform1i(uTextured, 1);
   gl.bindTexture(gl.TEXTURE_2D, world.signs.texture);
   draw(world.signs.faces, identity(), [1, 1, 1]);
   gl.uniform1i(uTextured, 0);
-  for (const b of world.boxes) draw(meshes.cube, b.model, b.color);
+  for (const b of world.boxes) draw(meshes.cube, b.model, b.color, b.mat);
   for (const p of world.cars) drawCar(p, p.colors, 1, { pitch: 0, roll: 0 });
   drawCar(car, CAR_COLORS, 1, lean, !cockpit);
   if (cockpit) drawCockpit();

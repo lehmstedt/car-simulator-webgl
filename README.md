@@ -6,6 +6,10 @@ The grass is slippery and slow (about 45 km/h max) but you can drive back on.
 Sand traps on the outside of the bends catch cars that run wide: they bog you down fast and you crawl out at about 13 km/h.
 Yellow sausage kerbs sit just past the flat kerb on the inside of each tight corner. Cut the apex
 over them and the car thumps up and rolls, the wheels that hit skip and lose grip for a moment, and you lose a little speed.
+Surfaces are textured and catch the light by material (`src/shading.js`): car paint and
+windows mirror the sky with a sharp sun highlight, asphalt has a speckle of stones and a soft
+sheen toward the horizon, while grass, sand (which glints in the sun) and gravel stay matte.
+The rally stage's gravel road has two packed wheel ruts.
 A paddock sits beside the start/finish straight: pit wall, garages, race control and team trucks (scenery only, no collisions).
 
 ## Handling

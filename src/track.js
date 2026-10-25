@@ -193,11 +193,12 @@ export function buildTrack(layout, avoid = () => false) {
   // terrain and lifted by `lift`. It's split into `lanes` across so it follows
   // the ground's curvature. `filter(i, lane)` picks pieces (alternating curb colors).
   function strip(inner, outer, lift, filter = () => true, lanes = 1) {
-    const positions = [], normals = [];
+    const positions = [], normals = [], uvs = [];
     const at = (i, o) => {
       const x = pts[i][0] + nor[i][0] * o, z = pts[i][1] + nor[i][1] * o;
       positions.push(x, terrainHeight(x, z) + lift, z);
       normals.push(...terrainNormal(x, z));
+      uvs.push(o, 0); // meters across, for the shader's wheel ruts
     };
     for (let i = 0; i < segs; i++) {
       const k = (i + 1) % N;
@@ -207,12 +208,13 @@ export function buildTrack(layout, avoid = () => false) {
         for (const [s, o] of [[i, o0], [i, o1], [k, o1], [i, o0], [k, o1], [k, o0]]) at(s, o);
       }
     }
-    return { positions, normals };
+    return { positions, normals, uvs };
   }
 
   const merge = (...ms) => ({
     positions: ms.flatMap((m) => m.positions),
     normals: ms.flatMap((m) => m.normals),
+    uvs: ms.every((m) => m.uvs) ? ms.flatMap((m) => m.uvs) : undefined,
   });
   // Sand: like strip(), but out to a per-sample offset; tapers where it starts and ends.
   function sandStrip(s) {
@@ -347,21 +349,21 @@ export function buildTrack(layout, avoid = () => false) {
   if (closed) {
     const red = (i) => Math.floor(i / 2) % 2 === 0;
     layers = [
-      { mesh: merge(sandStrip(0), sandStrip(1)), color: [0.86, 0.76, 0.52], grain: 0.22 },
-      { mesh: strip(-w, w, ROAD_LIFT, undefined, 4), color: layout.colors.road },
-      { mesh: edges(red), color: [0.85, 0.15, 0.12] },
-      { mesh: edges((i) => !red(i)), color: [0.95, 0.95, 0.95] },
-      { mesh: line(startIndex, () => true), color: [0.95, 0.95, 0.95], top: true },
-      { mesh: sausageMesh(), color: [0.98, 0.8, 0.08], raised: true },
+      { mesh: merge(sandStrip(0), sandStrip(1)), color: [0.86, 0.76, 0.52], mat: 'sand' },
+      { mesh: strip(-w, w, ROAD_LIFT, undefined, 4), color: layout.colors.road, mat: 'asphalt' },
+      { mesh: edges(red), color: [0.85, 0.15, 0.12], mat: 'kerb' },
+      { mesh: edges((i) => !red(i)), color: [0.95, 0.95, 0.95], mat: 'kerb' },
+      { mesh: line(startIndex, () => true), color: [0.95, 0.95, 0.95], mat: 'line', top: true },
+      { mesh: sausageMesh(), color: [0.98, 0.8, 0.08], mat: 'kerb', raised: true },
     ];
   } else {
     // Gravel with a darker, rutted verge; a white start line and a chequered finish.
     layers = [
-      { mesh: edges(() => true), color: [0.45, 0.41, 0.32], grain: 0.3 },
-      { mesh: strip(-w, w, ROAD_LIFT, undefined, 4), color: layout.colors.road, grain: 0.12 },
-      { mesh: line(startIndex, () => true), color: [0.95, 0.95, 0.95], top: true },
-      { mesh: line(finishIndex, (l) => l % 2 === 0), color: [0.95, 0.95, 0.95], top: true },
-      { mesh: line(finishIndex, (l) => l % 2 === 1), color: [0.08, 0.08, 0.09], top: true },
+      { mesh: edges(() => true), color: [0.45, 0.41, 0.32], mat: 'gravel' },
+      { mesh: strip(-w, w, ROAD_LIFT, undefined, 4), color: layout.colors.road, mat: 'gravel' },
+      { mesh: line(startIndex, () => true), color: [0.95, 0.95, 0.95], mat: 'line', top: true },
+      { mesh: line(finishIndex, (l) => l % 2 === 0), color: [0.95, 0.95, 0.95], mat: 'line', top: true },
+      { mesh: line(finishIndex, (l) => l % 2 === 1), color: [0.08, 0.08, 0.09], mat: 'line', top: true },
     ];
   }
   const mark = (i) => ({ x: pts[i][0], z: pts[i][1], tangent: tan[i], along: along[i] });
