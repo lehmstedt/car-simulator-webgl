@@ -6,6 +6,7 @@ import { readControls, resetWheel, wheelAngle } from './input.js';
 import { Car, VARIANTS, TIRE_TEMP, tempGrip } from './car.js';
 import { Skids } from './skids.js';
 import { Ghost } from './ghost.js';
+import { BOT_LAPS } from './bot-lap.js';
 import { buildTrack, LAYOUTS, ROAD_LIFT } from './track.js';
 import { Signs } from './signs.js';
 import { onPaddock, buildPaddock } from './paddock.js';
@@ -68,6 +69,7 @@ const speedEl = document.getElementById('speed');
 const gearEl = document.getElementById('gear');
 const lapEl = document.getElementById('lap');
 const bestEl = document.getElementById('best');
+const botEl = document.getElementById('bot');
 const driveEl = document.getElementById('drive');
 const balanceEl = document.getElementById('balance');
 const ghostBtn = document.getElementById('ghost');
@@ -357,6 +359,8 @@ function wheelPositions(pose = car) {
 
 const CAR_COLORS = { body: [0.85, 0.15, 0.15], cabin: [0.2, 0.2, 0.25], wheel: [0.08, 0.08, 0.08] };
 const GHOST_COLORS = { body: [0.75, 0.9, 1], cabin: [0.55, 0.7, 0.85], wheel: [0.45, 0.55, 0.65] };
+// Claude's run (scripts/autodrive.mjs): same physics, amber so it's told apart.
+const BOT_COLORS = { body: [1, 0.72, 0.2], cabin: [0.8, 0.55, 0.15], wheel: [0.55, 0.42, 0.2] };
 
 // The body leans on its springs: nose dives under braking, squats under
 // throttle, rolls toward the outside of a turn.
@@ -469,15 +473,18 @@ function drawCockpit() {
 // the canvas alpha at 1 so the page never shows through.
 function drawGhost(now) {
   if (!showGhost || lap.start === null) return;
-  const pose = ghost.pose(car.variant, now - lap.start);
-  if (!pose) return;
-  // Fade it out when it overlaps the player's car so the view stays clear.
-  const d = Math.hypot(pose.x - car.x, pose.z - car.z);
-  const alpha = 0.45 * Math.min(1, Math.max(0.5, d / 8));
+  const t = now - lap.start;
+  const ghosts = [[ghost.pose(car.variant, t), GHOST_COLORS], [ghost.pose(car.variant, t, BOT_LAPS[layout]), BOT_COLORS]];
   gl.enable(gl.BLEND);
   gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE);
   gl.depthMask(false);
-  drawCar(pose, GHOST_COLORS, alpha, { pitch: 0, roll: 0 });
+  for (const [pose, colors] of ghosts) {
+    if (!pose) continue;
+    // Fade it out when it overlaps the player's car so the view stays clear.
+    const d = Math.hypot(pose.x - car.x, pose.z - car.z);
+    const alpha = 0.45 * Math.min(1, Math.max(0.5, d / 8));
+    drawCar(pose, colors, alpha, { pitch: 0, roll: 0 });
+  }
   gl.depthMask(true);
   gl.disable(gl.BLEND);
 }
@@ -635,6 +642,7 @@ function frame(now) {
   gearEl.textContent = car.speed < -0.3 ? 'R' : Math.abs(car.speed) < 0.3 ? 'N' : 'D';
   lapEl.textContent = fmt(lap.done ? lap.last : lap.start === null ? null : now - lap.start);
   bestEl.textContent = fmt(lap.best[car.variant]);
+  botEl.textContent = fmt(BOT_LAPS[layout]?.[car.variant]?.time ?? null);
   balanceEl.textContent = car.balance === 'over' ? 'Oversteer' : car.balance === 'under' ? 'Understeer' : '';
   balanceEl.className = car.balance ?? '';
   // Weight on each axle as a share of the car's weight: grade and braking move

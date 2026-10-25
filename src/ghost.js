@@ -37,8 +37,9 @@ export class Ghost {
   }
 
   // Interpolated pose t ms into the lap, or null once the ghost has finished.
-  pose(variant, t) {
-    const s = this.laps[variant]?.samples;
+  // `laps` defaults to this layout's own; pass BOT_LAPS[layout] for Claude's ghost.
+  pose(variant, t, laps = this.laps) {
+    const s = laps?.[variant]?.samples;
     if (!s || t < 0 || t > s[s.length - STRIDE]) return null;
     let lo = 0, hi = s.length / STRIDE - 1;
     while (hi - lo > 1) {

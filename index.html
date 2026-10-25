@@ -43,7 +43,7 @@
   .unit { font-size: 12px; color: var(--hud-dim); letter-spacing: .08em; text-transform: uppercase; }
   #gear { font-size: 18px; font-weight: 700; color: var(--accent); min-width: 1ch; }
   .times { font-size: 13px; font-variant-numeric: tabular-nums; }
-  .times .unit { min-width: 3.8em; display: inline-block; }
+  .times .unit { min-width: 4.6em; display: inline-block; }
   .top-right {
     position: fixed;
     top: calc(12px + env(safe-area-inset-top, 0px));
@@ -153,6 +153,7 @@
   <div class="row"><span id="speed">  0</span><span class="unit">km/h</span><span id="gear">N</span></div>
   <div class="times"><span class="unit" id="lap-label">Lap</span><span id="lap">–:––.––</span></div>
   <div class="times"><span class="unit">Best</span><span id="best">–:––.––</span></div>
+  <div class="times" title="Claude's run, the amber ghost"><span class="unit">Claude</span><span id="bot">–:––.––</span></div>
   <div class="times"><span class="unit">Grade</span><span id="grade">0%</span></div>
   <div class="times" title="Weight on front / rear axle, % of the car's weight"><span class="unit">F / R</span><span id="load">50 / 50</span></div>
   <div id="balance" aria-live="polite"></div>
@@ -169,7 +170,7 @@
     <button id="layout" type="button" aria-label="Switch between circuit and rally stage (M)">Track <b>Circuit</b></button>
     <button id="view" type="button" aria-label="Switch camera view (C)">Camera <b>Cockpit</b></button>
     <button id="drive" type="button" aria-label="Switch drivetrain (T)">Drive <b>RWD</b></button>
-    <button id="ghost" type="button" aria-pressed="true" aria-label="Show ghost of best lap (G)">Ghost <b>On</b></button>
+    <button id="ghost" type="button" aria-pressed="true" aria-label="Show ghosts: your best lap and Claude's (G)">Ghost <b>On</b></button>
   </div>
   <div class="gmeter" id="gmeter">
     <svg viewBox="-44 -44 88 88" role="img" aria-label="G-force meter: dot is the force felt, dashed ring is the grip limit">
