@@ -12,7 +12,7 @@ const CONTROL = [
 ];
 
 export const ROAD_HALF_WIDTH = 7;   // m
-const CURB_WIDTH = 1.2;             // m
+const CURB_WIDTH = 2.4;             // m
 export const ROAD_LIFT = 0.05;      // m above the ground mesh
 const SAMPLES = 400;
 
@@ -20,7 +20,7 @@ const SAMPLES = 400;
 // boards stand this many meters before its entry, on the outside.
 const TIGHT_RADIUS = 30;            // m
 export const SIGN_DISTANCES = [150, 100, 50];
-const SIGN_OFFSET = ROAD_HALF_WIDTH + 1.2 + 2.5; // m from the centerline
+const SIGN_OFFSET = ROAD_HALF_WIDTH + CURB_WIDTH + 2.5; // m from the centerline
 
 function catmullRom(p0, p1, p2, p3, t) {
   const t2 = t * t, t3 = t2 * t;
