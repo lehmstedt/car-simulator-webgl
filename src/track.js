@@ -34,7 +34,7 @@ export const LAYOUTS = {
       [110, 20], [180, 30], [250, 60], [320, 40], [372, 4], [392, -52], [370, -110],
       [310, -125], [240, -110], [200, -112],
     ],
-    halfWidth: 3, edge: 1.2, sand: false, surface: 'gravel', edgeSurface: 'dirt', bumps: true,
+    halfWidth: 2.4, edge: 1.2, sand: false, surface: 'gravel', edgeSurface: 'dirt', bumps: true,
     start: 40, finish: 120, // m: start line from point A, finish line before the road ends at B
     colors: { road: [0.6, 0.53, 0.42] },
   },
@@ -42,20 +42,23 @@ export const LAYOUTS = {
 
 export const ROAD_LIFT = 0.05;      // m above the ground mesh
 const SAMPLES = 400;                // circuit samples
-const STAGE_STEP = 2;                  // m between stage samples (fine enough for the bumps)
+const STAGE_STEP = 1.5;                  // m between stage samples (fine enough for the bumps)
 
 // Stage bumps: the height (m, >= 0) they add `s` meters along the road and `o`
-// meters right of the centerline. Two waves along the road (the shorter one
+// meters right of the centerline. Three waves along the road (the shorter ones
 // skewed across it, so the car rocks side to side too) whose size swells and
 // fades over ~230 m: rough sections between smoother ones. Full height across
 // the road, easing to nothing over the verge, so the road meets the ground.
-const BUMP_MIN = 0.1, BUMP_MAX = 0.24; // m: roughness of the smoothest / roughest sections
+const BUMP_MIN = 0.16, BUMP_MAX = 0.36; // m: roughness of the smoothest / roughest sections
 function bumpHeight(s, o, w, verge) {
   const a = Math.abs(o);
   if (a >= w + verge) return 0;
   const t = Math.max(0, (a - w) / verge), fade = 1 - t * t * (3 - 2 * t);
   const size = BUMP_MIN + (BUMP_MAX - BUMP_MIN) * (0.5 + 0.5 * Math.sin((2 * Math.PI * s) / 230 + 0.9));
-  const u = 0.5 + 0.5 * (0.55 * Math.sin((2 * Math.PI * s) / 29 + 0.7) + 0.45 * Math.sin((2 * Math.PI * s) / 13 + 2.1 + 0.4 * o));
+  const u = 0.5 + 0.5 * (
+    0.45 * Math.sin((2 * Math.PI * s) / 29 + 0.7) +
+    0.35 * Math.sin((2 * Math.PI * s) / 13 + 2.1 + 0.4 * o) +
+    0.2 * Math.sin((2 * Math.PI * s) / 7.5 + 0.3 - 0.7 * o));
   return size * u * u * fade;
 }
 
