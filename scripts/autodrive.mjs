@@ -4,7 +4,7 @@
 // itself, then writes its best run to src/bot-lap.js, which the game replays
 // as Claude's ghost.
 //
-//   node scripts/autodrive.mjs [circuit|stage|montreal|ring] [fwd|rwd|gt3|both|all] [iterations]
+//   node scripts/autodrive.mjs [circuit|stage|montreal|downtown|ring] [fwd|rwd|gt3|both|all] [iterations]
 import { writeFileSync, readFileSync } from 'node:fs';
 import { Car, VARIANTS } from '../src/car.js';
 import { buildTrack, LAYOUTS } from '../src/track.js';
@@ -14,7 +14,7 @@ import { onPaddock } from '../src/paddock.js';
 const DT = 1 / 60;            // one game frame
 const STEER_RATE = 4;         // wheel travel per second (the keyboard's counter-steer rate)
 const kind = process.argv[2] ?? 'circuit';
-const circuit = kind === 'circuit', asphalt = circuit || kind === 'ring';
+const circuit = kind === 'circuit', asphalt = circuit || kind === 'ring' || kind === 'downtown';
 // Laps per try: the Nordschleife's one lap (from the standing start) is long enough.
 const LAPS = kind === 'ring' ? 1 : 2;
 setTerrain(kind);

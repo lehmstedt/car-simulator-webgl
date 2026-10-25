@@ -60,9 +60,10 @@ function blob(m, T, r, cy) {
 // `road` (stage only): centerline points and tangents to line with woods.
 // `opts` (stage-style roads): how many trees at most, after how many tries,
 // and `chunk`, a size (m) to split the forest into square pieces so far ones
-// can be skipped when drawing (0: one piece).
+// can be skipped when drawing (0: one piece). `spots` (Montreal downtown):
+// candidate places, each planted where clear.
 export function buildTrees(clear, height, road = null, opts = {}) {
-  const { count: most = 900, tries = 9000, chunk = 0 } = opts;
+  const { count: most = 900, tries = 9000, chunk = 0, spots = null } = opts;
   const rand = rng(7);
   const pieces = new Map(); // chunk key -> meshes
   let trunks, pines, leaves, leavesLight;
@@ -103,6 +104,11 @@ export function buildTrees(clear, height, road = null, opts = {}) {
     taken.set(cellOf(x, z), true);
     count++;
   };
+
+  if (spots) {
+    for (const [x, z] of spots) if (clear(x, z) && free(x, z)) plant(x, z);
+    return { pieces: [...pieces.values()], count };
+  }
 
   if (road) {
     // Stage: woods close along both sides of the road, gaps where the density dips.

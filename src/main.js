@@ -13,6 +13,7 @@ import { Signs } from './signs.js';
 import { onPaddock, buildPaddock } from './paddock.js';
 import { buildTrees } from './trees.js';
 import { buildGates } from './gates.js';
+import { buildCity } from './city.js';
 import { Sky, HORIZON, ZENITH, SUN_DIR } from './sky.js';
 import { SCENE_VS, SCENE_FS, MAT } from './shading.js';
 
@@ -64,12 +65,12 @@ const uSun = gl.getUniformLocation(program, 'uSun');
 const SUN = (() => { const l = Math.hypot(...SUN_DIR); return SUN_DIR.map((v) => v / l); })();
 const sky = new Sky(gl);
 
-// Everything that depends on the layout ('circuit', 'stage', 'montreal' or 'ring', the
-// Nordschleife): the
-// ground, the road, signs, trees and buildings. Rebuilt when the layout changes.
+// Everything that depends on the layout ('circuit', 'stage', 'montreal' (Circuit
+// Gilles-Villeneuve), 'downtown' (Montreal's streets) or 'ring', the Nordschleife):
+// the ground, the road, signs, trees and buildings. Rebuilt when the layout changes.
 // M / the Track button cycles through them in this order.
-const LAYOUT_ORDER = ['circuit', 'stage', 'montreal', 'ring'];
-const LAYOUT_NAMES = { circuit: 'Circuit', stage: 'Stage', montreal: 'Montréal', ring: 'Nordschleife' };
+const LAYOUT_ORDER = ['circuit', 'stage', 'montreal', 'downtown', 'ring'];
+const LAYOUT_NAMES = { circuit: 'Circuit', stage: 'Stage', montreal: 'Montréal', downtown: 'Downtown MTL', ring: 'Nordschleife' };
 let layout = 'circuit';
 try { const v = localStorage.getItem('layout'); if (LAYOUT_ORDER.includes(v)) layout = v; } catch {}
 // Scenery further than this (m) isn't drawn: past the far plane, or lost in the haze.
@@ -85,19 +86,23 @@ function buildWorld(kind) {
   const circuit = kind === 'circuit', stage = kind === 'stage', ring = kind === 'ring';
   const paddockAt = circuit ? onPaddock : () => false;
   const t = buildTrack(LAYOUTS[kind], (x, z) => paddockAt(x, z, 4));
+  // Downtown Montreal: the city around the street circuit; corner boards never stand in a building.
+  const city = kind === 'downtown' ? buildCity() : null;
+  if (city) t.signs = t.signs.filter((s) => !city.buildingAt(s.x, s.z, 1.5));
   const paddock = circuit ? buildPaddock() : { apron: null, boxes: [], cars: [] };
   const gpu = [];
   const upload = (m) => { const mesh = createMesh(gl, program, m); gpu.push(mesh); return mesh; };
   const signs = new Signs(gl, program, t.signs);
   gpu.push(signs.faces);
   // Trees: off the road and the sand, away from the signs and the paddock.
+  const roadside = city ? t.halfWidth + t.edgeWidth + 1.5 : t.halfWidth + (stage ? t.edgeWidth + 4 : 8);
   const trees = buildTrees((x, z) => {
     const at = t.locate(x, z);
-    if (at.distance < Math.max(t.halfWidth + (stage ? t.edgeWidth + 4 : 8), at.sandEdge + 4)) return false;
+    if (at.distance < Math.max(roadside, at.sandEdge + 4)) return false;
     if (paddockAt(x, z, 10)) return false;
     return t.signs.every((s) => Math.hypot(s.x - x, s.z - z) > 6);
-  }, terrainHeight, circuit ? null : { points: t.points, tangents: t.tangents },
-  ring ? { count: 6000, tries: 70000, chunk: 500 } : {});
+  }, terrainHeight, circuit || city ? null : { points: t.points, tangents: t.tangents },
+  ring ? { count: 6000, tries: 70000, chunk: 500 } : city ? { spots: city.treeSpots(t.points, t.halfWidth + t.edgeWidth + 2.4) } : {});
   const boxes = [
     ...paddock.boxes.map(({ c, s, color, mat }) => ({ color, mat, model: basis(c, [1, 0, 0], [0, 1, 0], [0, 0, 1], ...s) })),
     ...(stage ? buildGates(t) : []).map(({ c, axes, s, color, mat }) => ({ color, mat, model: basis(c, ...axes, ...s) })),
@@ -105,13 +110,24 @@ function buildWorld(kind) {
   return {
     kind,
     track: t,
-    onPaddock: paddockAt,
     // The stage covers more ground: a wider hill mesh, in slightly bigger cells.
     // Montreal is ~2 km long but flat, so a few big cells do.
     // The Nordschleife's ~60 km² come in chunks, drawn only when near.
     ground: ring
       ? ringTerrainChunks(20).map((c) => ({ mesh: upload(c), x: c.x, z: c.z, radius: c.radius }))
-      : [{ mesh: upload(circuit ? terrainMesh(600, 8) : stage ? terrainMesh(800, 11) : terrainMesh(1600, 100)), x: 0, z: 0, radius: Infinity }],
+      : [{ mesh: upload(circuit ? terrainMesh(600, 8) : stage ? terrainMesh(800, 11) : city ? terrainMesh(4000) : terrainMesh(1600, 100)), x: 0, z: 0, radius: Infinity }],
+    // Downtown: sidewalks between the buildings; the ground reaches out to Mount Royal.
+    groundLook: city ? [[0.6, 0.59, 0.56], 'concrete'] : [[0.3, 0.55, 0.3], 'grass'],
+    far: city ? 2500 : 1000,
+    // What's underfoot off the timed road.
+    offTrack: (x, z, where) => city ? city.surfaceAt(x, z) : paddockAt(x, z) ? 'road' : where.sand ? 'sand' : 'grass',
+    city: city && {
+      collide: city.collide,
+      streets: upload(city.streets),
+      parks: upload(city.parks),
+      roofs: upload(city.roofs),
+      walls: city.walls.map(({ mesh, color, mat }) => [upload(mesh), color, mat]),
+    },
     apron: paddock.apron && upload(paddock.apron),
     layers: t.layers.map((l) => ({ ...l, mesh: upload(l.mesh) })),
     signs,
@@ -590,9 +606,10 @@ function frame(now) {
   else if (controls.switchDrive) switchDrive();
   else if (controls.reset) resetRace();
   const where = track.locate(car.x, car.z);
-  const surface = where.surface ?? (world.onPaddock(car.x, car.z) ? 'road' : where.sand ? 'sand' : 'grass');
+  const surface = where.surface ?? world.offTrack(car.x, car.z, where);
   updateKerbs(dt);
   car.update(dt, controls, surface, terrainSample(car.x, car.z));
+  if (world.city) world.city.collide(car);
   const after = track.locate(car.x, car.z);
   if (track.closed) updateLap(after.index, now);
   else updateStage(after, now);
@@ -637,7 +654,7 @@ function frame(now) {
     eyePos = [cam.x, cam.y, cam.z];
     viewMat = lookAt(eyePos, [car.x, carY + 1, car.z], [0, 1, 0]);
   }
-  const proj = perspective(cockpit ? fovy * 1.1 : fovy, aspect, cockpit ? 0.05 : 0.1, 1000);
+  const proj = perspective(cockpit ? fovy * 1.1 : fovy, aspect, cockpit ? 0.05 : 0.1, world.far);
   const viewProj = multiply(proj, viewMat);
   sky.draw(viewProj, eyePos, now / 1000);
   gl.useProgram(program);
@@ -651,9 +668,13 @@ function frame(now) {
   // z-fighting with it (and the start line and skids with the road) far away.
   gl.disable(gl.CULL_FACE);
   const seen = (c) => Math.hypot(c.x - eyePos[0], c.z - eyePos[2]) - c.radius < DRAW_DISTANCE;
-  for (const g of world.ground) if (seen(g)) draw(g.mesh, identity(), [0.3, 0.55, 0.3], 'grass');
+  for (const g of world.ground) if (seen(g)) draw(g.mesh, identity(), ...world.groundLook);
   gl.enable(gl.POLYGON_OFFSET_FILL);
   gl.polygonOffset(-1, -2);
+  if (world.city) {
+    draw(world.city.parks, identity(), [0.3, 0.52, 0.27], 'grass');
+    draw(world.city.streets, identity(), [0.3, 0.31, 0.33], 'asphalt');
+  }
   if (world.apron) draw(world.apron, identity(), [0.4, 0.41, 0.43], 'asphalt');
   for (const l of world.layers) if (!l.top) draw(l.mesh, identity(), l.color, l.mat);
   gl.polygonOffset(-2, -4);
@@ -663,6 +684,10 @@ function frame(now) {
   for (const t of world.trees) {
     if (!seen(t)) continue;
     for (const [mesh, color, mat] of t.parts) draw(mesh, identity(), color, mat); // open cones: no culling
+  }
+  if (world.city) {
+    for (const [mesh, color, mat] of world.city.walls) draw(mesh, identity(), color, mat);
+    draw(world.city.roofs, identity(), [0.36, 0.37, 0.38], 'concrete');
   }
   gl.enable(gl.CULL_FACE);
 

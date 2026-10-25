@@ -158,6 +158,7 @@ export const SURFACES = {
   dirt: { grip: 0.5, drag: 0.08, rolling: 0.7 },
   grass: { grip: 0.75, drag: 0.2, rolling: 0.8 },  // top ~40 km/h
   sand: { grip: 0.6, drag: 0.35, rolling: 1.6 },
+  sidewalk: { grip: 0.9, drag: 0.04, rolling: 0.4 }, // downtown Montreal: up the curb onto the concrete
 };
 
 // Sausage kerbs: a wheel that hits one skips off it, so its axle's tires lose

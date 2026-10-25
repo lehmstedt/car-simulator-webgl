@@ -5,12 +5,15 @@
 //   (with the horizon and the ground below it), strongest at grazing angles;
 // - asphalt: a dull, broad highlight and a blurry sheen toward the horizon when
 //   seen at a low angle, over a speckle of light stones;
-// - sand, grass, gravel: rough, no reflection; sand glints in the sun.
+// - sand, grass, gravel: rough, no reflection; sand glints in the sun;
+// - city walls (facade, curtain): a grid of windows from the wall's UVs (meters
+//   along the wall, meters up), glassy and mirroring the sky.
 // Fine detail fades out with distance (per pixel footprint), so it never shimmers.
 
 export const MAT = {
   matte: 0, grass: 1, asphalt: 2, sand: 3, gravel: 4, paint: 5, glass: 6, rubber: 7,
   line: 8, metal: 9, concrete: 10, leaves: 11, bark: 12, kerb: 13, straw: 14,
+  facade: 15, curtain: 16,
 };
 
 export const SCENE_VS = `#version 300 es
@@ -37,7 +40,7 @@ precision highp float;
 ${defines}
 in vec3 vNormal;
 in vec3 vWorld;
-in vec2 vUV; // road strips: x = meters across from the center line (0 elsewhere)
+in vec2 vUV; // road strips: x = meters across from the center line; walls: meters along, up
 uniform vec3 uColor;
 uniform sampler2D uTex;
 uniform bool uTextured; // color comes from uTex (sign faces)
@@ -139,6 +142,21 @@ void main() {
   } else if (uMat == M_KERB) {
     alb *= 0.92 + 0.1 * tn(p, 6.0);
     gloss = 0.55; refl = 0.3;
+  } else if (uMat == M_FACADE) {
+    // Stone or brick with punched windows: 2.6 m bays, 3.4 m floors.
+    vec2 g = vec2(vUV.x / 2.6, vUV.y / 3.4), f = fract(g);
+    float win = step(0.24, f.x) * step(f.x, 0.76) * step(0.3, f.y) * step(f.y, 0.85);
+    win = mix(win, 0.28, smoothstep(0.1, 0.35, fp / 2.6));
+    alb *= 0.86 + 0.16 * tn(p, 0.7) + 0.05 * tc(p, 12.0);
+    alb = mix(alb, vec3(0.09, 0.12, 0.16) + 0.07 * hash(floor(g) + 3.1), win);
+    gloss = mix(0.15, 0.92, win); refl = mix(0.03, 0.7, win);
+  } else if (uMat == M_CURTAIN) {
+    // Glass tower: tinted panes in a grid of light mullions.
+    vec2 g = vec2(vUV.x / 1.6, vUV.y / 3.8), f = fract(g);
+    float mull = 1.0 - step(0.05, f.x) * step(f.x, 0.95) * step(0.06, f.y) * step(f.y, 0.94);
+    mull = mix(mull, 0.14, smoothstep(0.1, 0.35, fp / 1.6));
+    alb = mix(alb * (0.85 + 0.25 * hash(floor(g))), vec3(0.6, 0.62, 0.65), mull);
+    gloss = mix(0.96, 0.4, mull); refl = mix(0.9, 0.2, mull); f0 = 0.05; fmin = mix(0.2, 0.0, mull);
   } else if (uMat == M_STRAW) {
     alb *= 0.72 + 0.5 * tn(p, 7.0) * (0.7 + 0.3 * tc(p, 30.0));
     gloss = 0.05; refl = 0.0;

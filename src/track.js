@@ -1,10 +1,13 @@
 // Roads built from a Catmull-Rom spline through control points: the closed
-// circuit, or the point-to-point rally stage. They drape over the terrain;
-// road surfaces sit a few cm above the ground.
+// circuit, the point-to-point rally stage, or real tracks from open data. They
+// drape over the terrain; road surfaces sit a few cm above the ground.
 
 import { terrainHeight, terrainNormal, terrainSlope, groundHeight, setRoadBumps, RING_VERGE } from './terrain.js';
 import { NORDSCHLEIFE } from './nordschleife.js';
 import { MONTREAL } from './montreal.js';
+import { DOWNTOWN } from './downtown-data.js';
+
+export const pairs = (a) => Array.from({ length: a.length / 2 }, (_, i) => [a[2 * i], a[2 * i + 1]]);
 
 export const LAYOUTS = {
   // Asphalt circuit: two hairpins (~10 m radius) and a few tight corners among
@@ -60,6 +63,17 @@ export const LAYOUTS = {
     step: 3, // m between road samples
     halfWidth: 4.5, edge: 0.3, sand: false, sausages: false, surface: 'road', edgeSurface: 'road',
     verge: true, sections: NORDSCHLEIFE.sections,
+    colors: { road: [0.3, 0.31, 0.33] },
+  },
+  // Downtown Montreal, from open map data (scripts/downtown/): Sherbrooke, Peel,
+  // Sainte-Catherine, Crescent, René-Lévesque and Guy, ~2.5 km with six
+  // right-angle street corners, among the city's buildings (city.js). Concrete
+  // gutters and a double yellow center line.
+  downtown: {
+    closed: true, city: true,
+    control: pairs(DOWNTOWN.route),
+    step: 3, // m between samples: the control points are 3 m apart already
+    halfWidth: 6.5, edge: 0.6, sand: false, sausages: false, surface: 'road', edgeSurface: 'road',
     colors: { road: [0.3, 0.31, 0.33] },
   },
 };
@@ -463,7 +477,16 @@ export function buildTrack(layout, avoid = () => false) {
 
   // Surface layers, bottom to top; `top` ones need extra polygon offset over the road.
   let layers;
-  if (layout.verge) {
+  if (layout.city) {
+    // Asphalt, concrete gutters, a double yellow center line and a white start line.
+    const yellow = (o) => strip(o - 0.06, o + 0.06, ROAD_LIFT + 0.02, undefined, 1);
+    layers = [
+      { mesh: strip(-w, w, ROAD_LIFT, undefined, 4), color: layout.colors.road, mat: 'asphalt' },
+      { mesh: edges(() => true), color: [0.62, 0.62, 0.6], mat: 'concrete' },
+      { mesh: merge(yellow(-0.12), yellow(0.12)), color: [0.95, 0.75, 0.12], mat: 'line', top: true },
+      { mesh: line(startIndex, () => true), color: [0.95, 0.95, 0.95], mat: 'line', top: true },
+    ];
+  } else if (layout.verge) {
     // Nordschleife: asphalt with white edge lines, on grass verges that show
     // the exact ground out to RING_VERGE (see terrain.js).
     layers = [
