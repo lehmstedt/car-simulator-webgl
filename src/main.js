@@ -2,7 +2,8 @@ import { createProgram, createMesh } from './gl.js';
 import { cube, plane } from './geometry.js';
 import { perspective, lookAt, multiply, trs, identity } from './math.js';
 import { readControls } from './input.js';
-import { Car } from './car.js';
+import { Car, VARIANTS } from './car.js';
+import { Skids } from './skids.js';
 import { buildTrack, ROAD_HALF_WIDTH } from './track.js';
 
 const VS = `#version 300 es
@@ -46,6 +47,8 @@ const speedEl = document.getElementById('speed');
 const gearEl = document.getElementById('gear');
 const lapEl = document.getElementById('lap');
 const bestEl = document.getElementById('best');
+const driveEl = document.getElementById('drive');
+const balanceEl = document.getElementById('balance');
 const gl = canvas.getContext('webgl2', { antialias: true });
 if (!gl) {
   document.getElementById('hud').textContent = 'WebGL2 is not available in this browser.';
@@ -84,10 +87,20 @@ function startPose() {
   return [x, z, Math.atan2(-tx, -tz)];
 }
 
-const car = new Car();
+let savedDrive = 'rwd';
+try { savedDrive = localStorage.getItem('drive') in VARIANTS ? localStorage.getItem('drive') : 'rwd'; } catch {}
+const car = new Car(savedDrive);
+const skids = new Skids(gl, program);
 const cam = { x: 0, y: 4, z: 0 };
 // Laps: the track is split into 4 sectors; a lap counts only after visiting all of them.
-const lap = { start: null, last: null, best: null, sector: 3, visited: new Set() };
+// Best laps are kept per drivetrain so FWD and RWD can be compared.
+const lap = { start: null, last: null, best: { fwd: null, rwd: null }, sector: 3, visited: new Set() };
+
+function switchDrive() {
+  car.setVariant(car.variant === 'fwd' ? 'rwd' : 'fwd');
+  try { localStorage.setItem('drive', car.variant); } catch {}
+  resetRace();
+}
 
 function resetRace() {
   car.reset(...startPose());
@@ -96,6 +109,8 @@ function resetRace() {
   lap.start = null;
   lap.sector = 3;
   lap.visited.clear();
+  skids.clear();
+  driveEl.textContent = VARIANTS[car.variant].label;
 }
 resetRace();
 
@@ -106,7 +121,8 @@ function updateLap(index, now) {
     // Crossed the start/finish line going forward.
     if (lap.start !== null && lap.visited.size === 3) {
       lap.last = now - lap.start;
-      if (lap.best === null || lap.last < lap.best) lap.best = lap.last;
+      const v = car.variant;
+      if (lap.best[v] === null || lap.last < lap.best[v]) lap.best[v] = lap.last;
     }
     lap.start = now;
     lap.visited.clear();
@@ -141,16 +157,28 @@ function draw(mesh, model, color, gridSize = 0) {
   gl.drawArrays(mesh.mode, 0, mesh.count);
 }
 
+const WHEELS = [[-1, 1.3, true], [1, 1.3, true], [-1, -1.3, false], [1, -1.3, false]];
+
+function wheelPositions() {
+  const { x, z, heading: h } = car;
+  const fx = -Math.sin(h), fz = -Math.cos(h), rx = Math.cos(h), rz = -Math.sin(h);
+  return WHEELS.map(([side, fwd, front]) => ({
+    x: x + rx * side * 0.95 + fx * fwd,
+    z: z + rz * side * 0.95 + fz * fwd,
+    front,
+    sliding: front ? car.frontSliding : car.rearSliding,
+  }));
+}
+
 function drawCar() {
   const { x, z, heading: h, steer } = car;
   draw(meshes.cube, trs(x, 0.6, z, h, 1.8, 0.6, 4.2), [0.85, 0.15, 0.15]);
   const fx = -Math.sin(h), fz = -Math.cos(h);
   draw(meshes.cube, trs(x - fx * 0.3, 1.15, z - fz * 0.3, h, 1.5, 0.5, 2.0), [0.2, 0.2, 0.25]);
-  const rx = Math.cos(h), rz = -Math.sin(h);
-  for (const [side, fwd, front] of [[-1, 1.3, true], [1, 1.3, true], [-1, -1.3, false], [1, -1.3, false]]) {
-    const wx = x + rx * side * 0.95 + fx * fwd;
-    const wz = z + rz * side * 0.95 + fz * fwd;
-    draw(meshes.cube, trs(wx, 0.35, wz, h + (front ? steer : 0), 0.3, 0.7, 0.7), [0.08, 0.08, 0.08]);
+  // Wheels glow orange when their tires are past the grip peak.
+  for (const w of wheelPositions()) {
+    const color = w.sliding ? [0.95, 0.55, 0.1] : [0.08, 0.08, 0.08];
+    draw(meshes.cube, trs(w.x, 0.35, w.z, h + (w.front ? steer : 0), 0.3, 0.7, 0.7), color);
   }
 }
 
@@ -160,10 +188,12 @@ function frame(now) {
   last = now;
 
   const controls = readControls();
-  if (controls.reset) resetRace();
+  if (controls.switchDrive) switchDrive();
+  else if (controls.reset) resetRace();
   const where = track.locate(car.x, car.z);
   car.update(dt, controls, !where.onTrack);
   updateLap(track.locate(car.x, car.z).index, now);
+  wheelPositions().forEach((w, i) => skids.track(i, w.x, w.z, w.sliding));
 
   // Chase camera: lag behind the car, smoothed.
   const back = 9, height = 3.5;
@@ -196,6 +226,7 @@ function frame(now) {
   draw(meshes.curbRed, identity(), [0.85, 0.15, 0.12]);
   draw(meshes.curbWhite, identity(), [0.95, 0.95, 0.95]);
   draw(meshes.startLine, identity(), [0.95, 0.95, 0.95]);
+  if (skids.used) draw(skids.mesh, identity(), [0.12, 0.12, 0.13]);
   gl.depthMask(true);
   gl.enable(gl.CULL_FACE);
 
@@ -206,7 +237,9 @@ function frame(now) {
   speedEl.classList.toggle('grass', !where.onTrack);
   gearEl.textContent = car.speed < -0.3 ? 'R' : Math.abs(car.speed) < 0.3 ? 'N' : 'D';
   lapEl.textContent = fmt(lap.start === null ? null : now - lap.start);
-  bestEl.textContent = fmt(lap.best);
+  bestEl.textContent = fmt(lap.best[car.variant]);
+  balanceEl.textContent = car.balance === 'over' ? 'Oversteer' : car.balance === 'under' ? 'Understeer' : '';
+  balanceEl.className = car.balance ?? '';
 
   requestAnimationFrame(frame);
 }

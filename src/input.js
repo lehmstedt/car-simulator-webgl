@@ -32,12 +32,15 @@ addEventListener('blur', () => {
 });
 const pressed = (k) => (pads.get(k)?.ids.size ?? 0) > 0;
 
-let resetQueued = false;
+let resetQueued = false, driveQueued = false;
 document.getElementById('reset')?.addEventListener('click', () => { resetQueued = true; });
+document.getElementById('drive')?.addEventListener('click', () => { driveQueued = true; });
+addEventListener('keydown', (e) => { if (e.code === 'KeyT' && !e.repeat) driveQueued = true; });
 
 export function readControls() {
   const reset = any('KeyR') || resetQueued;
-  resetQueued = false;
+  const switchDrive = driveQueued;
+  resetQueued = driveQueued = false;
   return {
     throttle: any('ArrowUp', 'KeyW') || pressed('gas') ? 1 : 0,
     brake: any('ArrowDown', 'KeyS') || pressed('brake') ? 1 : 0,
@@ -45,5 +48,6 @@ export function readControls() {
            (any('ArrowRight', 'KeyD') || pressed('right') ? 1 : 0),
     handbrake: any('Space') ? 1 : 0,
     reset,
+    switchDrive,
   };
 }

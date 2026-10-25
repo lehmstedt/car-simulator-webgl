@@ -1,53 +1,200 @@
-// Very simple kinematic bicycle model. Good enough to drive around;
-// we'll swap in proper tire forces later.
+// Dynamic bicycle model: one tire per axle, slip-angle lateral forces with a
+// grip peak that falls off past it, a friction circle shared between grip and
+// drive/brake, and longitudinal weight transfer.
+//
+// That gives the classic behaviours:
+// - Steer too much or too fast: the tires pass their peak and slide (less grip).
+// - FWD: throttle in a corner uses up front grip -> understeer (the nose pushes wide).
+// - RWD: throttle in a corner uses up rear grip -> oversteer (the tail steps out).
+// - Lifting off or braking mid-corner moves weight forward -> the rear goes light.
+
+const G = 9.81;
+
+// Tire curve (simplified Pacejka): peaks near 7 deg of slip, then drops to
+// about 80% of peak grip when fully sliding.
+const B = 14, C = 1.5;
+export const PEAK_SLIP = Math.tan(Math.PI / (2 * C)) / B; // ~0.124 rad
+const tireCurve = (alpha) => Math.sin(C * Math.atan(B * alpha));
+
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+// Sign that fades to 0 near zero, so forces don't chatter at standstill.
+const softSign = (v, eps = 0.3) => clamp(v / eps, -1, 1);
+
+export const VARIANTS = {
+  // Front-heavy (60% front), front wheels drive and steer.
+  fwd: { label: 'FWD', drive: 'front', cgToFront: 1.04, cgToRear: 1.56, muFront: 1.0, muRear: 1.1 },
+  // Near 50/50, rear wheels drive.
+  rwd: { label: 'RWD', drive: 'rear', cgToFront: 1.35, cgToRear: 1.25, muFront: 1.0, muRear: 1.08 },
+};
+
+const STEP = 1 / 240; // fixed physics step; tire forces are stiff
 
 export class Car {
-  constructor() {
-    this.wheelBase = 2.6;     // m
-    this.maxSteer = 0.6;      // rad
-    this.engineAccel = 10;    // m/s^2 at full throttle
-    this.brakeDecel = 15;     // m/s^2
-    this.reverseAccel = 4;    // m/s^2
-    this.maxReverse = 8;      // m/s
-    this.aero = 0.004;        // quadratic drag, top speed ~ sqrt(10/0.004) = 50 m/s
-    this.rolling = 1.0;       // m/s^2
-    this.grassDrag = 0.7;     // extra linear drag per second on grass (top ~36 km/h)
-    this.grassRolling = 3.0;  // m/s^2
+  constructor(variant = 'rwd') {
+    this.mass = 1200;          // kg
+    this.yawInertia = 1800;    // kg m^2
+    this.cgHeight = 0.5;       // m, sets how much weight shifts under accel/brake
+    this.maxSteer = 0.6;       // rad at standstill
+    this.steerInRate = 1.6;    // rad/s turning the wheel in: tap for small inputs
+    this.steerOutRate = 3.0;   // rad/s back toward center
+    this.maxDrive = 5500;      // N at the tires (low speed)
+    this.power = 140000;       // W, caps drive force at speed
+    this.reverseForce = 4000;  // N
+    this.maxReverse = 8;       // m/s
+    this.brakeForce = 10000;   // N total
+    this.brakeFront = 0.8;     // brake bias
+    this.drag = 1.1;           // N per (m/s)^2, top speed ~50 m/s
+    this.rolling = 150;        // N
+    this.grassGrip = 0.6;      // grip multiplier on grass
+    this.grassDrag = 0.7;      // extra linear drag per second on grass
+    this.grassRolling = 3.0;   // m/s^2
+    this.pedalRate = 3;        // pedals reach full travel in ~1/3 s
+    this.setVariant(variant);
     this.reset();
+  }
+
+  setVariant(name) {
+    this.variant = name;
+    Object.assign(this, VARIANTS[name]);
+    this.wheelBase = this.cgToFront + this.cgToRear;
   }
 
   reset(x = 0, z = 0, heading = 0) {
     this.x = x;
     this.z = z;
-    this.heading = heading; // yaw, 0 = facing -Z
-    this.speed = 0;         // m/s, signed along heading
-    this.steer = 0;         // current steering angle (rad)
+    this.heading = heading; // yaw, 0 = facing -Z, positive turns left
+    this.vx = 0;            // m/s forward (body frame)
+    this.vy = 0;            // m/s to the left (body frame)
+    this.yawRate = 0;       // rad/s
+    this.steer = 0;         // road wheel angle (rad)
+    this.throttle = 0;      // smoothed pedals, 0..1
+    this.brake = 0;
+    this.accel = 0;         // filtered longitudinal accel, drives weight transfer
+    this.slipFront = 0;     // slip angles (rad), for HUD / visuals
+    this.slipRear = 0;
+    this.frontSliding = false;
+    this.rearSliding = false;
+    this.balance = null;    // 'under' | 'over' | null
+    this._sinceUnder = this._sinceOver = 1;
   }
 
+  get speed() { return this.vx; }
+
   update(dt, c, onGrass = false) {
-    // Smooth steering toward target, less lock at high speed.
-    const lock = this.maxSteer / (1 + Math.abs(this.speed) * 0.05);
+    // Steering is rate limited: holding a key winds on lock steadily, so short
+    // taps give gentle inputs and holding it is the "rough" input that gets punished.
+    const lock = this.maxSteer / (1 + Math.abs(this.vx) * 0.03);
     const target = c.steer * lock;
-    this.steer += (target - this.steer) * Math.min(1, dt * 8);
+    const turningIn = Math.abs(target) > Math.abs(this.steer) && target * this.steer >= 0;
+    const rate = (turningIn ? this.steerInRate : this.steerOutRate) * dt;
+    this.steer += clamp(target - this.steer, -rate, rate);
 
-    const v = this.speed;
-    let a = 0;
-    if (c.throttle) a += this.engineAccel;
-    if (c.brake) a -= v > 0.5 ? this.brakeDecel : this.reverseAccel;
-    if (c.handbrake) a -= Math.sign(v) * this.brakeDecel;
-    a -= this.aero * v * Math.abs(v);
-    const rolling = onGrass ? this.grassRolling : this.rolling;
-    if (!c.throttle && !c.brake) a -= Math.sign(v) * rolling;
-    if (onGrass) a -= v * this.grassDrag + (c.throttle ? Math.sign(v) * this.grassRolling : 0);
+    // Pedals ramp in (keys are on/off) but release twice as fast.
+    const ramp = (cur, want) => cur + clamp(want - cur, -2 * this.pedalRate * dt, this.pedalRate * dt);
+    this.throttle = ramp(this.throttle, c.throttle);
+    this.brake = ramp(this.brake, c.brake);
+    const pedals = { throttle: this.throttle, brake: this.brake, handbrake: c.handbrake };
 
-    this.speed += a * dt;
-    // Resistance alone must never flip the direction of travel.
-    if (!c.throttle && !c.brake && Math.sign(v) !== Math.sign(this.speed)) this.speed = 0;
-    this.speed = Math.max(-this.maxReverse, this.speed);
+    let front = { slip: 0, sliding: false }, rear = front;
+    for (let t = dt; t > 1e-6; t -= STEP) [front, rear] = this.step(Math.min(STEP, t), pedals, onGrass);
 
-    // Bicycle model: yaw rate = v / L * tan(steer).
-    this.heading += (this.speed / this.wheelBase) * Math.tan(this.steer) * dt;
-    this.x -= Math.sin(this.heading) * this.speed * dt;
-    this.z -= Math.cos(this.heading) * this.speed * dt;
+    this.slipFront = front.slip;
+    this.slipRear = rear.slip;
+    this.frontSliding = front.sliding;
+    this.rearSliding = rear.sliding;
+    this.updateBalance(dt);
+  }
+
+  // Forces from one axle's tires, in that axle's wheel frame (x along the wheel).
+  axle(u, w, load, mu, fxDemand, locked) {
+    const max = mu * load;
+    const slip = Math.atan2(w, Math.max(Math.abs(u), 3));
+    if (locked) {
+      // Locked wheels just slide: friction opposes the contact patch velocity.
+      const v = Math.max(Math.hypot(u, w), 0.5);
+      return { fx: -0.9 * max * u / v, fy: -0.9 * max * w / v, slip, sliding: Math.hypot(u, w) > 1 };
+    }
+    let fx = fxDemand, spinning = false;
+    if (Math.abs(fx) > max) {
+      // Wheelspin or brake lock-up: grip drops and little is left for cornering.
+      fx = Math.sign(fx) * 0.9 * max;
+      spinning = true;
+    }
+    // Friction circle: whatever grip drive/brake uses is gone from cornering.
+    const latMax = spinning ? 0.35 * max : max * Math.sqrt(Math.max(0.12, 1 - (fx / max) ** 2));
+    const fy = -latMax * tireCurve(slip);
+    return { fx, fy, slip, sliding: spinning || Math.abs(slip) > PEAK_SLIP * 1.15 };
+  }
+
+  step(h, c, onGrass) {
+    const m = this.mass, a = this.cgToFront, b = this.cgToRear, L = this.wheelBase;
+    const { vx, vy, yawRate: r } = this;
+
+    // Weight transfer: accelerating loads the rear, braking loads the front.
+    const transfer = (m * this.accel * this.cgHeight) / L;
+    const minLoad = 0.1 * m * G;
+    const loadF = Math.max(minLoad, (m * G * b) / L - transfer);
+    const loadR = Math.max(minLoad, (m * G * a) / L + transfer);
+    const grip = onGrass ? this.grassGrip : 1;
+
+    // Drive and brake demand.
+    let drive = 0, brake = 0;
+    if (c.throttle) drive += c.throttle * Math.min(this.maxDrive, this.power / Math.max(Math.abs(vx), 1));
+    if (c.brake) {
+      if (vx > 0.5) brake = c.brake * this.brakeForce;
+      else if (vx > -this.maxReverse) drive -= c.brake * this.reverseForce;
+    }
+
+    // Contact patch velocities (front is rotated by the steering angle).
+    const cs = Math.cos(this.steer), sn = Math.sin(this.steer);
+    const vyF = vy + a * r, vyR = vy - b * r;
+    const uF = vx * cs + vyF * sn, wF = -vx * sn + vyF * cs;
+
+    const fwd = this.drive === 'front';
+    const demandF = (fwd ? drive : 0) - brake * this.brakeFront * softSign(uF);
+    const demandR = (fwd ? 0 : drive) - brake * (1 - this.brakeFront) * softSign(vx);
+    const front = this.axle(uF, wF, loadF, this.muFront * grip, demandF, false);
+    const rear = this.axle(vx, vyR, loadR, this.muRear * grip, demandR, !!c.handbrake);
+
+    // Into the body frame.
+    const fxF = front.fx * cs - front.fy * sn;
+    const fyF = front.fx * sn + front.fy * cs;
+    let fx = fxF + rear.fx;
+    const fy = fyF + rear.fy;
+
+    // Resistance.
+    fx -= this.drag * vx * Math.abs(vx);
+    fx -= this.rolling * softSign(vx);
+    if (onGrass) fx -= m * (this.grassDrag * vx + this.grassRolling * softSign(vx));
+
+    // Rigid body in a rotating frame.
+    this.vx += (fx / m + r * vy) * h;
+    this.vy += (fy / m - r * vx) * h;
+    this.yawRate += ((a * fyF - b * rear.fy) / this.yawInertia) * h;
+    this.accel += (fx / m - this.accel) * Math.min(1, h * 10);
+
+    // Let the car come to rest instead of creeping.
+    if (!c.throttle && !c.brake && Math.abs(this.vx) < 0.05 && Math.abs(this.vy) < 0.05) {
+      this.vx = this.vy = 0;
+      if (Math.abs(this.yawRate) < 0.05) this.yawRate = 0;
+    }
+
+    this.heading += this.yawRate * h;
+    const s = Math.sin(this.heading), co = Math.cos(this.heading);
+    // forward = (-sin, -cos), left = (-cos, sin)
+    this.x += (-s * this.vx - co * this.vy) * h;
+    this.z += (-co * this.vx + s * this.vy) * h;
+    return [front, rear];
+  }
+
+  // Which end lets go first, held briefly so the HUD label doesn't flicker.
+  updateBalance(dt) {
+    const fast = Math.hypot(this.vx, this.vy) > 4;
+    const f = Math.abs(this.slipFront), r = Math.abs(this.slipRear);
+    const over = fast && this.rearSliding && r > f * 0.8;
+    const under = fast && this.frontSliding && !over && f > r * 1.2;
+    this._sinceOver = over ? 0 : this._sinceOver + dt;
+    this._sinceUnder = under ? 0 : this._sinceUnder + dt;
+    this.balance = this._sinceOver < 0.25 ? 'over' : this._sinceUnder < 0.25 ? 'under' : null;
   }
 }
