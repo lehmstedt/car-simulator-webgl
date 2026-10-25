@@ -1,7 +1,7 @@
 # Car Simulator (WebGL)
 
 Barebone car simulator in raw WebGL2 — no frameworks, no build step.
-Drive laps of a 1 km circuit; the grass is slippery and slow (about 50 km/h max) but you can drive back on.
+Drive laps of a 1.25 km circuit with two hairpins; the grass is slippery and slow (about 50 km/h max) but you can drive back on.
 
 ## Handling
 
@@ -24,6 +24,12 @@ The car uses tire forces, so rough driving gets punished:
 - **Two drivetrains**, switched with **T** or the FWD/RWD button (best laps kept per car):
   - **FWD** — front-heavy, front wheels drive. Throttle in a corner makes it push wide.
   - **RWD** — balanced, rear wheels drive. Throttle in a slow corner kicks the tail out.
+
+## Corner boards
+
+Count-down boards stand at 150, 100 and 50 m before each tight corner, on the
+outside of the turn. The arrow shows which way it goes. Corners are found from
+the track's curvature, so boards follow any change to the layout.
 
 ## Ghost car
 

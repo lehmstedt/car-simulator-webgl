@@ -7,15 +7,19 @@ import { Car, VARIANTS } from './car.js';
 import { Skids } from './skids.js';
 import { Ghost } from './ghost.js';
 import { buildTrack, ROAD_HALF_WIDTH, ROAD_LIFT } from './track.js';
+import { Signs } from './signs.js';
 
 const VS = `#version 300 es
 in vec3 aPosition;
 in vec3 aNormal;
+in vec2 aUV;
 uniform mat4 uModel;
 uniform mat4 uViewProj;
 out vec3 vNormal;
 out vec3 vWorld;
+out vec2 vUV;
 void main() {
+  vUV = aUV;
   vec4 world = uModel * vec4(aPosition, 1.0);
   vNormal = mat3(uModel) * aNormal;
   vWorld = world.xyz;
@@ -26,14 +30,17 @@ const FS = `#version 300 es
 precision mediump float;
 in vec3 vNormal;
 in vec3 vWorld;
+in vec2 vUV;
 uniform vec3 uColor;
+uniform sampler2D uTex;
+uniform bool uTextured; // color comes from uTex (sign faces), lit more evenly
 uniform float uGrid; // grid cell size in meters, 0 = off
 uniform float uAlpha;
 out vec4 outColor;
 void main() {
   vec3 L = normalize(vec3(0.4, 1.0, 0.3));
   float d = max(dot(normalize(vNormal), L), 0.0);
-  vec3 c = uColor * (0.35 + 0.65 * d);
+  vec3 c = uTextured ? texture(uTex, vUV).rgb * (0.6 + 0.4 * d) : uColor * (0.35 + 0.65 * d);
   if (uGrid > 0.0) {
     // Anti-aliased grid lines on the XZ plane.
     vec2 g = vWorld.xz / uGrid;
@@ -67,6 +74,7 @@ const uViewProj = gl.getUniformLocation(program, 'uViewProj');
 const uColor = gl.getUniformLocation(program, 'uColor');
 const uGrid = gl.getUniformLocation(program, 'uGrid');
 const uAlpha = gl.getUniformLocation(program, 'uAlpha');
+const uTextured = gl.getUniformLocation(program, 'uTextured');
 
 const track = buildTrack();
 const meshes = {
@@ -77,6 +85,8 @@ const meshes = {
   curbWhite: createMesh(gl, program, track.meshes.curbWhite),
   startLine: createMesh(gl, program, track.meshes.startLine),
 };
+const signs = new Signs(gl, program, track.signs);
+const signParts = signs.parts().map(({ part, m }) => ({ color: part === 'post' ? [0.55, 0.57, 0.6] : [0.3, 0.32, 0.35], model: basis(...m) }));
 
 // Scenery blocks scattered around, kept well clear of the road.
 const props = [];
@@ -311,6 +321,11 @@ function frame(now) {
   gl.disable(gl.POLYGON_OFFSET_FILL);
   gl.enable(gl.CULL_FACE);
 
+  for (const p of signParts) draw(meshes.cube, p.model, p.color);
+  gl.uniform1i(uTextured, 1);
+  gl.bindTexture(gl.TEXTURE_2D, signs.texture);
+  draw(signs.faces, identity(), [1, 1, 1]);
+  gl.uniform1i(uTextured, 0);
   for (const p of props) draw(meshes.cube, basis([p.x, p.y + p.s / 2, p.z], [1, 0, 0], [0, 1, 0], [0, 0, 1], p.s, p.s, p.s), [0.7, 0.65, 0.5]);
   drawCar();
   drawGhost(now);

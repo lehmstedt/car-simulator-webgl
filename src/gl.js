@@ -21,20 +21,21 @@ export function createProgram(gl, vsSrc, fsSrc) {
   return p;
 }
 
-// mesh = { positions: number[], normals: number[], mode? }
-export function createMesh(gl, program, { positions, normals, mode = gl.TRIANGLES }) {
+// mesh = { positions: number[], normals: number[], uvs?: number[], mode? }
+export function createMesh(gl, program, { positions, normals, uvs, mode = gl.TRIANGLES }) {
   const vao = gl.createVertexArray();
   gl.bindVertexArray(vao);
-  const attach = (name, data) => {
+  const attach = (name, data, size = 3) => {
     const loc = gl.getAttribLocation(program, name);
     const buf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data), gl.STATIC_DRAW);
     gl.enableVertexAttribArray(loc);
-    gl.vertexAttribPointer(loc, 3, gl.FLOAT, false, 0, 0);
+    gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 0, 0);
   };
   attach('aPosition', positions);
   attach('aNormal', normals);
+  if (uvs) attach('aUV', uvs, 2);
   gl.bindVertexArray(null);
   return { vao, count: positions.length / 3, mode };
 }
