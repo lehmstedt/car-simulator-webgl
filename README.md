@@ -1,7 +1,10 @@
 # Car Simulator (WebGL)
 
 Barebone car simulator in raw WebGL2 — no frameworks, no build step.
-Drive laps of a 1.25 km circuit with two hairpins; the grass is slippery and slow (about 50 km/h max) but you can drive back on.
+Drive laps of a 1.25 km circuit with two hairpins, through wooded hills under a cloudy sky.
+The grass is slippery and slow (about 45 km/h max) but you can drive back on.
+Sand traps on the outside of the bends catch cars that run wide: they bog you down fast and you crawl out at about 13 km/h.
+A paddock sits beside the start/finish straight: pit wall, garages, race control and team trucks (scenery only, no collisions).
 
 ## Handling
 
@@ -80,12 +83,16 @@ With the keyboard, holding A/D turns the wheel gradually; let go and it returns 
 ## Layout
 
 - `src/main.js` — setup, render loop, chase and cockpit cameras, lap timing, HUD
-- `src/track.js` — circuit spline, road/curb meshes, on-track test
+- `src/track.js` — circuit spline, road/curb/sand meshes, surface test
+- `src/paddock.js` — paddock apron, garages, tower, trucks, parked cars
+- `src/trees.js` — low-poly trees, merged into a few meshes
+- `src/sky.js` — sky dome with sun and clouds; its horizon color is the distance haze
 - `src/car.js` — car physics (dynamic bicycle model, tire grip, FWD/RWD)
 - `src/skids.js` — skid marks
 - `src/ghost.js` — best-lap recording and ghost replay
 - `src/gl.js` — shader/mesh helpers
-- `src/geometry.js` — cube, ground plane (grid is drawn in the shader)
+- `src/geometry.js` — cube, torus (ground grid is drawn in the shader)
+- `src/terrain.js` — rolling hills, levelled beside the start straight for the paddock
 - `src/math.js` — mat4 helpers
 - `src/input.js` — keyboard and touch controls
 - `scripts/bundle.mjs` — inlines everything into one HTML file

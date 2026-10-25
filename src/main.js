@@ -8,6 +8,9 @@ import { Skids } from './skids.js';
 import { Ghost } from './ghost.js';
 import { buildTrack, ROAD_HALF_WIDTH, ROAD_LIFT } from './track.js';
 import { Signs } from './signs.js';
+import { onPaddock, buildPaddock } from './paddock.js';
+import { buildTrees } from './trees.js';
+import { Sky, HORIZON } from './sky.js';
 
 const VS = `#version 300 es
 in vec3 aPosition;
@@ -27,7 +30,7 @@ void main() {
 }`;
 
 const FS = `#version 300 es
-precision mediump float;
+precision highp float;
 in vec3 vNormal;
 in vec3 vWorld;
 in vec2 vUV;
@@ -36,7 +39,11 @@ uniform sampler2D uTex;
 uniform bool uTextured; // color comes from uTex (sign faces), lit more evenly
 uniform float uGrid; // grid cell size in meters, 0 = off
 uniform float uAlpha;
+uniform float uGrain; // speckle strength (sand), 0 = off
+uniform vec3 uCam;
+uniform vec3 uFog;
 out vec4 outColor;
+float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 void main() {
   vec3 L = normalize(vec3(0.4, 1.0, 0.3));
   float d = max(dot(normalize(vNormal), L), 0.0);
@@ -49,7 +56,10 @@ void main() {
     float line = 1.0 - min(min(a.x, a.y), 1.0);
     c = mix(c, c * 0.85, line);
   }
-  outColor = vec4(c, uAlpha);
+  if (uGrain > 0.0) c *= 1.0 + uGrain * (hash(floor(vWorld.xz * 4.0)) - 0.5);
+  // Haze: far things fade into the sky's horizon color.
+  float fog = smoothstep(120.0, 750.0, distance(vWorld, uCam)) * 0.85;
+  outColor = vec4(mix(c, uFog, fog), uAlpha);
 }`;
 
 const canvas = document.getElementById('gl');
@@ -76,8 +86,13 @@ const uColor = gl.getUniformLocation(program, 'uColor');
 const uGrid = gl.getUniformLocation(program, 'uGrid');
 const uAlpha = gl.getUniformLocation(program, 'uAlpha');
 const uTextured = gl.getUniformLocation(program, 'uTextured');
+const uGrain = gl.getUniformLocation(program, 'uGrain');
+const uCam = gl.getUniformLocation(program, 'uCam');
+const uFog = gl.getUniformLocation(program, 'uFog');
+const sky = new Sky(gl);
 
-const track = buildTrack();
+const track = buildTrack((x, z) => onPaddock(x, z, 4));
+const paddock = buildPaddock();
 const meshes = {
   cube: createMesh(gl, program, cube()),
   wheelRim: createMesh(gl, program, torus(0.17, 0.018)),
@@ -86,19 +101,27 @@ const meshes = {
   curbRed: createMesh(gl, program, track.meshes.curbRed),
   curbWhite: createMesh(gl, program, track.meshes.curbWhite),
   startLine: createMesh(gl, program, track.meshes.startLine),
+  sand: createMesh(gl, program, track.meshes.sand),
+  apron: createMesh(gl, program, paddock.apron),
 };
 const signs = new Signs(gl, program, track.signs);
 const signParts = signs.parts().map(({ part, m }) => ({ color: part === 'post' ? [0.55, 0.57, 0.6] : [0.3, 0.32, 0.35], model: basis(...m) }));
 
-// Scenery blocks scattered around, kept well clear of the road.
-const props = [];
-for (let i = 0; props.length < 50 && i < 400; i++) {
-  const ang = i * 2.399; // golden-angle spiral
-  const r = 30 + i * 2.2;
-  const x = Math.cos(ang) * r, z = Math.sin(ang) * r;
-  // Sunk a little so they don't float on slopes.
-  if (track.locate(x, z).distance > ROAD_HALF_WIDTH + 14) props.push({ x, z, s: 2 + (i % 4), y: terrainHeight(x, z) - 0.6 });
-}
+const paddockBoxes = paddock.boxes.map(({ c, s, color }) => ({ color, model: basis(c, [1, 0, 0], [0, 1, 0], [0, 0, 1], ...s) }));
+
+// Trees: off the road and the sand, away from the signs and the paddock.
+const trees = buildTrees((x, z) => {
+  const at = track.locate(x, z);
+  if (at.distance < Math.max(ROAD_HALF_WIDTH + 8, at.sandEdge + 4)) return false;
+  if (onPaddock(x, z, 10)) return false;
+  return track.signs.every((s) => Math.hypot(s.x - x, s.z - z) > 6);
+}, terrainHeight);
+const treeMeshes = [
+  [createMesh(gl, program, trees.trunks), [0.36, 0.25, 0.16]],
+  [createMesh(gl, program, trees.pines), [0.13, 0.33, 0.18]],
+  [createMesh(gl, program, trees.leaves), [0.22, 0.45, 0.17]],
+  [createMesh(gl, program, trees.leavesLight), [0.36, 0.55, 0.2]],
+];
 
 // Grid starts a few meters before the line, facing along the track.
 function startPose() {
@@ -339,7 +362,8 @@ function frame(now) {
   if (controls.switchDrive) switchDrive();
   else if (controls.reset) resetRace();
   const where = track.locate(car.x, car.z);
-  car.update(dt, controls, !where.onTrack, terrainSample(car.x, car.z));
+  const surface = where.onTrack || onPaddock(car.x, car.z) ? 'road' : where.sand ? 'sand' : 'grass';
+  car.update(dt, controls, surface, terrainSample(car.x, car.z));
   updateLap(track.locate(car.x, car.z).index, now);
   if (lap.start !== null) ghost.record(now - lap.start, car);
   wheelPositions().forEach((w, i) => skids.track(i, w.x, w.y, w.z, w.sliding));
@@ -361,16 +385,14 @@ function frame(now) {
   cam.y = Math.max(cam.y, terrainHeight(cam.x, cam.z) + 1.2); // never inside a hill
 
   resize();
-  gl.clearColor(0.55, 0.75, 0.95, 1);
+  gl.clearColor(...HORIZON, 1);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-  gl.enable(gl.DEPTH_TEST);
-  gl.useProgram(program);
 
   const aspect = canvas.width / canvas.height;
   // Keep a usable horizontal view on tall (portrait phone) screens.
   const fovy = aspect < 1 ? 2 * Math.atan(Math.tan(Math.PI / 6) * 0.8 / aspect) : Math.PI / 3;
   const cockpit = view === 'cockpit';
-  let viewMat;
+  let viewMat, eyePos;
   if (cockpit) {
     // Eye rides the leaning body; it looks a touch down and glances into turns.
     glance += (Math.max(-0.25, Math.min(0.25, car.yawRate * 0.12)) - glance) * Math.min(1, dt * 3);
@@ -378,11 +400,18 @@ function frame(now) {
     const eye = toWorld(B, ...EYE);
     const dir = rotate(rotate(B.back.map((v) => -v), B.right, -0.08), B.up, glance);
     viewMat = lookAt(eye, [0, 1, 2].map((i) => eye[i] + dir[i]), B.up);
+    eyePos = eye;
   } else {
-    viewMat = lookAt([cam.x, cam.y, cam.z], [car.x, carY + 1, car.z], [0, 1, 0]);
+    eyePos = [cam.x, cam.y, cam.z];
+    viewMat = lookAt(eyePos, [car.x, carY + 1, car.z], [0, 1, 0]);
   }
   const proj = perspective(cockpit ? fovy * 1.1 : fovy, aspect, cockpit ? 0.05 : 0.1, 1000);
-  gl.uniformMatrix4fv(uViewProj, false, multiply(proj, viewMat));
+  const viewProj = multiply(proj, viewMat);
+  sky.draw(viewProj, eyePos, now / 1000);
+  gl.useProgram(program);
+  gl.uniformMatrix4fv(uViewProj, false, viewProj);
+  gl.uniform3fv(uCam, eyePos);
+  gl.uniform3fv(uFog, HORIZON);
 
   // Road layers sit a few cm above the ground; polygon offset keeps them from
   // z-fighting with it (and the start line and skids with the road) far away.
@@ -390,6 +419,10 @@ function frame(now) {
   draw(meshes.ground, identity(), [0.3, 0.55, 0.3], 10);
   gl.enable(gl.POLYGON_OFFSET_FILL);
   gl.polygonOffset(-1, -2);
+  draw(meshes.apron, identity(), [0.4, 0.41, 0.43]);
+  gl.uniform1f(uGrain, 0.22);
+  draw(meshes.sand, identity(), [0.86, 0.76, 0.52]);
+  gl.uniform1f(uGrain, 0);
   draw(meshes.road, identity(), [0.32, 0.33, 0.36]);
   draw(meshes.curbRed, identity(), [0.85, 0.15, 0.12]);
   draw(meshes.curbWhite, identity(), [0.95, 0.95, 0.95]);
@@ -397,6 +430,7 @@ function frame(now) {
   draw(meshes.startLine, identity(), [0.95, 0.95, 0.95]);
   if (skids.used) draw(skids.mesh, identity(), [0.12, 0.12, 0.13]);
   gl.disable(gl.POLYGON_OFFSET_FILL);
+  for (const [mesh, color] of treeMeshes) draw(mesh, identity(), color); // open cones: no culling
   gl.enable(gl.CULL_FACE);
 
   for (const p of signParts) draw(meshes.cube, p.model, p.color);
@@ -404,13 +438,14 @@ function frame(now) {
   gl.bindTexture(gl.TEXTURE_2D, signs.texture);
   draw(signs.faces, identity(), [1, 1, 1]);
   gl.uniform1i(uTextured, 0);
-  for (const p of props) draw(meshes.cube, basis([p.x, p.y + p.s / 2, p.z], [1, 0, 0], [0, 1, 0], [0, 0, 1], p.s, p.s, p.s), [0.7, 0.65, 0.5]);
+  for (const b of paddockBoxes) draw(meshes.cube, b.model, b.color);
+  for (const p of paddock.cars) drawCar(p, p.colors, 1, { pitch: 0, roll: 0 });
   drawCar(car, CAR_COLORS, 1, tilt, !cockpit);
   if (cockpit) drawCockpit();
   drawGhost(now);
 
   speedEl.textContent = Math.abs(car.speed * 3.6).toFixed(0).padStart(3, ' ');
-  speedEl.classList.toggle('grass', !where.onTrack);
+  speedEl.classList.toggle('grass', surface !== 'road');
   gearEl.textContent = car.speed < -0.3 ? 'R' : Math.abs(car.speed) < 0.3 ? 'N' : 'D';
   lapEl.textContent = fmt(lap.start === null ? null : now - lap.start);
   bestEl.textContent = fmt(lap.best[car.variant]);

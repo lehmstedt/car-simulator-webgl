@@ -3,9 +3,24 @@
 // that the car only goes light near top speed. Past the circuit the hills fade
 // to flat, so the far ground can be a few big cells (cheap to draw on phones).
 
+//
+// Beside the start straight the ground is levelled across the track for the
+// paddock: there it keeps the straight's own height, so the road is unchanged.
+
 const HILLS = 200, FLAT = 250; // fade from hills to flat between these (m, square radius)
+const LEVEL = { x0: -55, x1: 60, z0: 118, z1: 172, ref: 121, blend: 40 };
 
 export function terrainHeight(x, z) {
+  const h = hills(x, z);
+  const L = LEVEL;
+  const dx = Math.max(L.x0 - x, 0, x - L.x1), dz = Math.max(L.z0 - z, 0, z - L.z1);
+  const t = Math.min(1, Math.hypot(dx, dz) / L.blend);
+  if (t >= 1) return h;
+  const w = 1 - t * t * t * (t * (6 * t - 15) + 10); // smootherstep: no kink in the curvature
+  return h + (hills(x, L.ref) - h) * w;
+}
+
+function hills(x, z) {
   const r = Math.max(Math.abs(x), Math.abs(z));
   if (r >= FLAT) return 0;
   const t = Math.max(0, (r - HILLS) / (FLAT - HILLS));

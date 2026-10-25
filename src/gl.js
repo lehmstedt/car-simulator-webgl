@@ -27,6 +27,7 @@ export function createMesh(gl, program, { positions, normals, uvs, indices, mode
   gl.bindVertexArray(vao);
   const attach = (name, data, size = 3) => {
     const loc = gl.getAttribLocation(program, name);
+    if (loc < 0) return; // attribute unused by this program
     const buf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data), gl.STATIC_DRAW);

@@ -32,6 +32,14 @@ export const VARIANTS = {
   rwd: { label: 'RWD', drive: 'rear', cgToFront: 1.35, cgToRear: 1.25, muFront: 1.0, muRear: 1.16 },
 };
 
+// Off the asphalt: grip multiplier, extra linear drag (per second) and rolling
+// resistance (m/s^2). Sand traps bog the car down hard: it crawls out at ~10 km/h.
+export const SURFACES = {
+  road: { grip: 1, drag: 0, rolling: 0 },
+  grass: { grip: 0.75, drag: 0.2, rolling: 0.8 },  // top ~40 km/h
+  sand: { grip: 0.6, drag: 0.35, rolling: 1.6 },
+};
+
 const STEP = 1 / 240; // fixed physics step; tire forces are stiff
 
 export class Car {
@@ -49,9 +57,6 @@ export class Car {
     this.drag = 1.1;           // N per (m/s)^2, top speed ~50 m/s
     this.rolling = 150;        // N
     this.tractionControl = 0.85; // drive never uses more than this share of axle grip
-    this.grassGrip = 0.75;     // grip multiplier on grass
-    this.grassDrag = 0.2;      // extra linear drag per second on grass (top ~40 km/h)
-    this.grassRolling = 0.8;   // m/s^2
     this.pedalRate = 3;        // pedals reach full travel in ~1/3 s
     this.setVariant(variant);
     this.reset();
@@ -87,8 +92,9 @@ export class Car {
 
   get speed() { return this.vx; }
 
-  // `ground` is terrainSample() at the car's position.
-  update(dt, c, onGrass = false, ground = null) {
+  // `surface` is a SURFACES key; `ground` is terrainSample() at the car's position.
+  update(dt, c, surface = 'road', ground = null) {
+    const surf = SURFACES[surface] ?? SURFACES.road;
     if (ground) this.ground = ground;
     // The wheel input is already gradual (see input.js); map it to road-wheel
     // angle. Lock shrinks only a little with speed, so cranking the wheel at
@@ -103,7 +109,7 @@ export class Car {
     const pedals = { throttle: this.throttle, brake: this.brake, handbrake: c.handbrake };
 
     let front = { slip: 0, sliding: false }, rear = front;
-    for (let t = dt; t > 1e-6; t -= STEP) [front, rear] = this.step(Math.min(STEP, t), pedals, onGrass);
+    for (let t = dt; t > 1e-6; t -= STEP) [front, rear] = this.step(Math.min(STEP, t), pedals, surf);
 
     this.slipFront = front.slip;
     this.slipRear = rear.slip;
@@ -133,7 +139,7 @@ export class Car {
     return { fx, fy, slip, sliding: spinning || Math.abs(slip) > PEAK_SLIP * 1.15 };
   }
 
-  step(h, c, onGrass) {
+  step(h, c, surf) {
     const m = this.mass, a = this.cgToFront, b = this.cgToRear, L = this.wheelBase;
     const { vx, vy, yawRate: r } = this;
 
@@ -160,7 +166,7 @@ export class Car {
     const loadR = Math.max(minLoad, (normal * a) / L + transfer);
     this.loadFront = loadF;
     this.loadRear = loadR;
-    const grip = onGrass ? this.grassGrip : 1;
+    const grip = surf.grip;
 
     // Drive and brake demand.
     let drive = 0, brake = 0;
@@ -196,7 +202,7 @@ export class Car {
     // Resistance.
     fx -= this.drag * vx * Math.abs(vx);
     fx -= this.rolling * softSign(vx);
-    if (onGrass) fx -= m * (this.grassDrag * vx + this.grassRolling * softSign(vx));
+    fx -= m * (surf.drag * vx + surf.rolling * softSign(vx));
 
     // Rigid body in a rotating frame.
     this.vx += (fx / m + r * vy) * h;
