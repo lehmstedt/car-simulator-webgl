@@ -84,7 +84,7 @@ npm run bundle       # writes dist/car-simulator.html
 
 ## Controls
 
-On phones, drag the steering wheel (bottom-left) to turn, and use the brake/gas pedals bottom-right.
+On phones, slide the steering slider (bottom-left) left or right to turn — let go and it recenters, and use the brake/gas pedals bottom-right.
 With the keyboard, holding A/D turns the wheel gradually; let go and it returns to center.
 
 

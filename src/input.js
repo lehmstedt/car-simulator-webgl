@@ -1,5 +1,5 @@
 // Keyboard (WASD / arrows), on-screen touch pads (elements with .pad[data-ctl])
-// and an on-screen steering wheel (#wheel) you drag to turn.
+// and an on-screen steering slider (#steer) you drag sideways.
 
 const keys = new Set();
 addEventListener('keydown', (e) => keys.add(e.code));
@@ -62,47 +62,42 @@ addEventListener('keydown', (e) => {
 
 // Steering wheel position: -1 (full right) .. 1 (full left). Keys turn it
 // gradually and it springs back to center when released, like a real wheel.
-const WHEEL_TURNS = 135;   // degrees of on-screen wheel rotation at full lock
+const WHEEL_TURNS = 135;   // degrees the cockpit wheel turns at full lock
 const TURN_RATE = 1.8;     // per second while a key is held (~0.55 s to full lock)
 const COUNTER_RATE = 4;    // per second when steering against the current lock
 const CENTER_RATE = 2.5;   // per second self-centering when let go
 let wheel = 0;
 
-// Touch wheel: dragging around its center rotates it 1:1 with the finger.
-const wheelEl = document.getElementById('wheel');
-let grab = null; // { id, lastAngle } while a finger holds the wheel
-if (wheelEl) {
-  const angleOf = (e) => {
-    const r = wheelEl.getBoundingClientRect();
-    return Math.atan2(e.clientY - (r.top + r.height / 2), e.clientX - (r.left + r.width / 2)) * 180 / Math.PI;
-  };
-  wheelEl.addEventListener('pointerdown', (e) => {
+// Touch slider: drag sideways to steer. Movement is relative to where the
+// finger lands, so touching it never jerks the car; full lock is half the
+// track's width. Let go and it springs back to center.
+const sliderEl = document.getElementById('steer');
+const knobEl = sliderEl?.querySelector('.knob');
+let grab = null; // { id, x, start } while a finger holds the slider
+if (sliderEl) {
+  sliderEl.addEventListener('pointerdown', (e) => {
     e.preventDefault();
     if (grab) return;
-    try { wheelEl.setPointerCapture(e.pointerId); } catch {}
-    grab = { id: e.pointerId, lastAngle: angleOf(e) };
-    wheelEl.classList.add('on');
+    try { sliderEl.setPointerCapture(e.pointerId); } catch {}
+    grab = { id: e.pointerId, x: e.clientX, start: wheel };
+    sliderEl.classList.add('on');
   });
-  wheelEl.addEventListener('pointermove', (e) => {
+  sliderEl.addEventListener('pointermove', (e) => {
     if (!grab || e.pointerId !== grab.id) return;
-    const a = angleOf(e);
-    let d = a - grab.lastAngle;
-    if (d > 180) d -= 360;
-    if (d < -180) d += 360;
-    grab.lastAngle = a;
-    // Screen angles grow clockwise; clockwise = steer right = negative.
-    wheel = Math.max(-1, Math.min(1, wheel - d / WHEEL_TURNS));
+    const half = (knobEl?.parentElement.clientWidth ?? sliderEl.clientWidth) / 2;
+    // Slide right = steer right = negative.
+    wheel = Math.max(-1, Math.min(1, grab.start - (e.clientX - grab.x) / half));
   });
   const release = (e) => {
     if (!grab || e.pointerId !== grab.id) return;
     grab = null;
-    wheelEl.classList.remove('on');
+    sliderEl.classList.remove('on');
   };
-  wheelEl.addEventListener('pointerup', release);
-  wheelEl.addEventListener('pointercancel', release);
-  wheelEl.addEventListener('lostpointercapture', release);
-  wheelEl.addEventListener('contextmenu', (e) => e.preventDefault());
-  addEventListener('blur', () => { grab = null; wheelEl.classList.remove('on'); });
+  sliderEl.addEventListener('pointerup', release);
+  sliderEl.addEventListener('pointercancel', release);
+  sliderEl.addEventListener('lostpointercapture', release);
+  sliderEl.addEventListener('contextmenu', (e) => e.preventDefault());
+  addEventListener('blur', () => { grab = null; sliderEl.classList.remove('on'); });
 }
 
 const approach = (v, target, step) => (v < target ? Math.min(target, v + step) : Math.max(target, v - step));
@@ -114,7 +109,8 @@ function updateWheel(dt) {
     if (dir === 0) wheel = approach(wheel, 0, CENTER_RATE * dt);
     else wheel = approach(wheel, dir, (wheel * dir < 0 ? COUNTER_RATE : TURN_RATE) * dt);
   }
-  if (wheelEl) wheelEl.style.transform = `rotate(${-wheel * WHEEL_TURNS}deg)`;
+  if (knobEl) knobEl.style.left = `${50 - wheel * 50}%`;
+  sliderEl?.setAttribute('aria-valuenow', (-wheel).toFixed(2));
 }
 
 export function resetWheel() { wheel = 0; }
