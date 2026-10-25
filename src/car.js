@@ -37,6 +37,10 @@ const FLEX_HEAT = 1.1e-5;  // deg C per (N of tire force * m/s rolled)
 const ROLL_HEAT = 5e-6;    // deg C per (N of load * m/s): rolling alone, a little
 const SLIDE_HEAT = 4e-5;   // deg C per joule scrubbed off sliding
 const COOL = 0.006, COOL_SPEED = 0.0008; // per second, plus per (m/s)
+// Hot tires shed heat much faster: above HOT_FROM each extra degree is cooled
+// HOT_COOL per second on top (doubled at 20 m/s), so they hover near the top of
+// the window and only overheat when abused, and recover quickly when eased off.
+const HOT_FROM = 90, HOT_COOL = 0.03, HOT_SPEED = 20;
 // Grip multiplier for a temperature: 1 inside the window, then a loss that
 // starts gently (quadratic) and grows linearly further out.
 export function tempGrip(t) {
@@ -230,7 +234,8 @@ export class Car {
   heatTire(tire, scrub, force, load, u, h) {
     const speed = Math.abs(u);
     const gain = (FLEX_HEAT * force + ROLL_HEAT * load) * speed + SLIDE_HEAT * scrub;
-    const loss = (tire.temp - TIRE_TEMP.ambient) * (COOL + COOL_SPEED * speed);
+    const loss = (tire.temp - TIRE_TEMP.ambient) * (COOL + COOL_SPEED * speed)
+      + Math.max(0, tire.temp - HOT_FROM) * HOT_COOL * (1 + speed / HOT_SPEED);
     tire.heat = gain - loss;
     tire.temp += tire.heat * h;
   }

@@ -35,8 +35,9 @@ The car uses tire forces, so rough driving gets punished:
   100 °C and fades gradually outside it: cold tires (they start at 45 °C) give about
   5–10% less grip, and overheated ones lose more the hotter they get (−6% at 120 °C,
   −20% at 150 °C). Brisk laps bring both axles into the window (on the RWD car the
-  driven rears run a little warmer); long slides and donuts push them over, and a
-  calm straight cools them back. On the FWD car the fronts do the driving, braking
+  driven rears run a little warmer). Hot tires shed heat much faster, so they hover
+  near the top of the window; only sustained abuse (long slides, donuts) pushes them
+  over, to about 110–115 °C, and they recover quickly once you ease off. On the FWD car the fronts do the driving, braking
   and steering, so they run hotter and the rears stay cooler.
   The HUD shows a top view of the car with each tire colored blue (cold), green
   (in the window), amber then red (overheated), plus the grip lost.
