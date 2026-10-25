@@ -98,6 +98,18 @@
   #guse { font-size: 13px; }
   .gmeter.near #guse { color: var(--accent); }
   .gmeter.slide #guse { color: var(--brake); }
+  /* Tire temperatures: a top view of the car, each tire colored from blue (cold)
+     through green (in the grip window) to amber and red (overheated). */
+  .tires {
+    display: flex; flex-direction: row-reverse; align-items: center; gap: 10px;
+    background: var(--hud-bg); border-radius: 10px; padding: 8px 10px 8px 14px; pointer-events: none;
+  }
+  .tires svg { width: 46px; height: 72px; display: block; }
+  .tire-body { fill: rgba(0, 0, 0, 0.25); stroke: var(--hud-dim); stroke-opacity: .5; stroke-width: 1.5; }
+  .tire { fill: var(--gas); }
+  .tire-text { display: grid; gap: 2px; text-align: right; min-width: 7.5em; font-size: 13px; font-variant-numeric: tabular-nums; }
+  .tire-text b { font-weight: 700; }
+  #tire-state { font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
   .controls {
     position: fixed; left: 0; right: 0; bottom: 0;
     padding-left: max(16px, env(safe-area-inset-left, 0px));
@@ -172,6 +184,21 @@
     <div class="gm-text">
       <div><span id="gval">0.00</span> <span class="unit">g</span></div>
       <div title="Share of the tires' grip in use (busiest axle)"><span class="unit">Grip</span> <span id="guse">0%</span></div>
+    </div>
+  </div>
+  <div class="tires" id="tires" role="img" aria-label="Tire temperatures">
+    <svg viewBox="0 0 46 72" aria-hidden="true">
+      <rect class="tire-body" x="9" y="4" width="28" height="64" rx="9"/>
+      <rect class="tire" id="tire-fl" x="2" y="12" width="8" height="15" rx="2.5"/>
+      <rect class="tire" id="tire-fr" x="36" y="12" width="8" height="15" rx="2.5"/>
+      <rect class="tire" id="tire-rl" x="2" y="46" width="8" height="15" rx="2.5"/>
+      <rect class="tire" id="tire-rr" x="36" y="46" width="8" height="15" rx="2.5"/>
+    </svg>
+    <div class="tire-text" title="Tire temperature per axle. Best grip between 80 and 100 °C">
+      <div><span class="unit">Tires</span></div>
+      <div><span class="unit">F</span> <b id="tire-f">45°</b></div>
+      <div><span class="unit">R</span> <b id="tire-r">45°</b></div>
+      <div id="tire-state">Cold</div>
     </div>
   </div>
 </div>

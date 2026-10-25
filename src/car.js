@@ -25,6 +25,24 @@ const tireCurve = (alpha) => Math.abs(alpha) < PEAK_SLIP ? Math.sin(C * Math.ata
 // over ~0.1 s and takes ~0.3 s to bite again.
 const GRIP_LOSS_TIME = 0.1, GRIP_GAIN_TIME = 0.3;
 
+// Tire temperature (deg C, one value per axle). Grip is best in a window and
+// fades gradually outside it: cold tires feel a little greasy, overheated ones
+// go off faster. Heat comes from the work the tires do against the road
+// (sliding, wheelspin, braking, and a little from rolling), and the air cools
+// them, faster at speed.
+export const TIRE_TEMP = { ambient: 20, start: 45, optLo: 80, optHi: 100 };
+const HEAT = 2.2e-4;       // deg C per joule dissipated (per axle)
+const ROLL_HEAT = 0.015;   // share of load * speed that heats the tire by flexing
+const COOL = 0.006, COOL_SPEED = 0.0008; // per second, plus per (m/s)
+// Grip multiplier for a temperature: 1 inside the window, then a loss that
+// starts gently (quadratic) and grows linearly further out.
+export function tempGrip(t) {
+  const { optLo, optHi } = TIRE_TEMP;
+  const cold = Math.max(0, optLo - t), hot = Math.max(0, t - optHi);
+  const loss = (0.0035 * cold * cold) / (cold + 20) + (0.006 * hot * hot) / (hot + 20);
+  return Math.max(0.6, 1 - loss);
+}
+
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 // Sign that fades to 0 near zero, so forces don't chatter at standstill.
 const softSign = (v, eps = 0.3) => clamp(v / eps, -1, 1);
@@ -95,7 +113,9 @@ export class Car {
     this.balance = null;    // 'under' | 'over' | null
     // Per-axle tire state: share of peak cornering grip on hand right now,
     // whether it is sliding, and how much of its grip it is using (0..1+).
-    this.tires = { front: { grip: 1, sliding: false, use: 0 }, rear: { grip: 1, sliding: false, use: 0 } };
+    // `temp` is the tire temperature (deg C); `heat` how fast it is changing (deg C/s).
+    const tire = () => ({ grip: 1, sliding: false, use: 0, temp: TIRE_TEMP.start, heat: 0 });
+    this.tires = { front: tire(), rear: tire() };
     this.gLong = this.gLat = 0; // tire acceleration in g (forward, left), smoothed
     this.gripLimit = 1;     // what the tires can give in total, in g
     this._felt = null;
@@ -141,7 +161,7 @@ export class Car {
   // Forces from one axle's tires, in that axle's wheel frame (x along the wheel).
   // `tire` is that axle's state in this.tires; `h` the time step.
   axle(u, w, load, mu, fxDemand, locked, tire, h) {
-    const max = mu * load;
+    const max = mu * load * tempGrip(tire.temp);
     const slip = Math.atan2(w, Math.max(Math.abs(u), 3));
     const ease = (target) => {
       const tau = target < tire.grip ? GRIP_LOSS_TIME : GRIP_GAIN_TIME;
@@ -154,6 +174,8 @@ export class Car {
       const v = Math.max(Math.hypot(u, w), 0.5);
       tire.sliding = Math.hypot(u, w) > 1;
       tire.use = 1;
+      // All the friction work goes into the rubber: locked wheels heat fast.
+      this.heatTire(tire, 0.9 * max * Math.hypot(u, w), load, u, h);
       return { fx: -0.9 * max * u / v, fy: -0.9 * max * w / v, slip };
     }
     // Wheelspin or brake lock-up past the limit: drive eases down to 90%.
@@ -170,7 +192,20 @@ export class Car {
     // Hysteresis so the sliding state (orange wheels, skids) doesn't flicker.
     tire.sliding = spin > 0 || Math.abs(slip) > PEAK_SLIP * (tire.sliding ? 1 : 1.15);
     tire.use = Math.hypot(fx, fy) / Math.max(max, 1e-6);
+    // Work done against the road: cornering force times the patch's sideways
+    // speed, plus drive/brake force times the wheel's slip (a few % normally,
+    // a lot more when it spins or locks up).
+    const slipSpeed = Math.abs(u) * 0.05 * Math.min(demand, 1) + spin * 4;
+    this.heatTire(tire, Math.abs(fy * w) + Math.abs(fx) * slipSpeed, load, u, h);
     return { fx, fy, slip };
+  }
+
+  heatTire(tire, power, load, u, h) {
+    const speed = Math.abs(u);
+    const gain = (power + ROLL_HEAT * load * speed) * HEAT;
+    const loss = (tire.temp - TIRE_TEMP.ambient) * (COOL + COOL_SPEED * speed);
+    tire.heat = gain - loss;
+    tire.temp += tire.heat * h;
   }
 
   step(h, c, surf) {
@@ -219,7 +254,7 @@ export class Car {
     // Light traction control: forward drive is capped below the driven axle's
     // grip, so full throttle unsettles the car but leaves some grip for cornering.
     if (drive > 0) {
-      const driven = fwd ? this.muFront * loadF : this.muRear * loadR;
+      const driven = fwd ? this.muFront * loadF * tempGrip(this.tires.front.temp) : this.muRear * loadR * tempGrip(this.tires.rear.temp);
       drive = Math.min(drive, this.tractionControl * driven * grip);
     }
     const demandF = (fwd ? drive : 0) - brake * this.brakeFront * softSign(uF);
@@ -236,7 +271,7 @@ export class Car {
     this._felt = {
       long: (fxF + rear.fx) / (m * G),
       lat: (fyF + rear.fy) / (m * G),
-      limit: ((this.muFront * loadF + this.muRear * loadR) * grip) / (m * G),
+      limit: ((this.muFront * loadF * tempGrip(this.tires.front.temp) + this.muRear * loadR * tempGrip(this.tires.rear.temp)) * grip) / (m * G),
     };
 
     // Resistance.

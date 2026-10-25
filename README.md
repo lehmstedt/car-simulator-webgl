@@ -23,6 +23,14 @@ The car uses tire forces, so rough driving gets punished:
     dips press the car down and add grip.
   - The HUD shows the current grade and the weight on each axle (F / R, % of the car's
     weight; it turns blue when the car is going light). The handbrake holds the car on a hill.
+- **Tire temperature**: each axle's tires warm up from the work they do (cornering,
+  sliding, wheelspin, braking) and cool in the airflow, faster at speed. Grip is best
+  between 80 and 100 °C and fades gradually outside it: cold tires (they start at
+  45 °C) give about 5–10% less grip, and overheated ones lose more the hotter they
+  get (−6% at 120 °C, −20% at 150 °C). Smooth laps bring them into the window;
+  long slides, donuts and lock-ups cook them, and a calm straight cools them back.
+  The HUD shows a top view of the car with each tire colored blue (cold), green
+  (in the window), amber then red (overheated), plus the grip lost.
 - A light traction control stops full throttle from using all the grip of the driven wheels.
 - **Two drivetrains**, switched with **T** or the FWD/RWD button (best laps kept per car):
   - **FWD** — front-heavy, front wheels drive. Throttle in a corner makes it push wide.

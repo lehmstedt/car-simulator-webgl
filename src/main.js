@@ -3,7 +3,7 @@ import { cube, torus } from './geometry.js';
 import { perspective, lookAt, multiply, identity, basis, rotate } from './math.js';
 import { terrainHeight, terrainNormal, terrainSample, terrainMesh, setTerrain } from './terrain.js';
 import { readControls, resetWheel, wheelAngle } from './input.js';
-import { Car, VARIANTS } from './car.js';
+import { Car, VARIANTS, TIRE_TEMP, tempGrip } from './car.js';
 import { Skids } from './skids.js';
 import { Ghost } from './ghost.js';
 import { buildTrack, LAYOUTS, ROAD_LIFT } from './track.js';
@@ -82,6 +82,10 @@ const glimitEl = document.getElementById('glimit');
 const gtrailEl = document.getElementById('gtrail');
 const gvalEl = document.getElementById('gval');
 const guseEl = document.getElementById('guse');
+const tireEls = ['fl', 'fr', 'rl', 'rr'].map((k) => document.getElementById(`tire-${k}`));
+const tireTextEls = { front: document.getElementById('tire-f'), rear: document.getElementById('tire-r') };
+const tireStateEl = document.getElementById('tire-state');
+const tiresEl = document.getElementById('tires');
 const G_SCALE = 28; // px per g on the G-meter (grid rings at 0.5 g and 1 g)
 const gTrail = [];
 const gl = canvas.getContext('webgl2', { antialias: true });
@@ -458,6 +462,36 @@ function updateGMeter() {
   gmeterEl.classList.toggle('near', !sliding && use > 0.85);
 }
 
+// Tire color by temperature: blue when cold, green across the grip window,
+// then amber and red as they overheat. Blended between stops so the change is gradual.
+const TIRE_COLORS = [
+  [45, [108, 196, 255]], [TIRE_TEMP.optLo, [79, 209, 122]], [TIRE_TEMP.optHi, [79, 209, 122]],
+  [115, [255, 196, 61]], [130, [255, 107, 90]],
+];
+function tireColor(t) {
+  let i = 0;
+  while (i < TIRE_COLORS.length - 1 && t > TIRE_COLORS[i + 1][0]) i++;
+  const [t0, c0] = TIRE_COLORS[i], [t1, c1] = TIRE_COLORS[Math.min(i + 1, TIRE_COLORS.length - 1)];
+  const k = t1 > t0 ? Math.min(1, Math.max(0, (t - t0) / (t1 - t0))) : 0;
+  return `rgb(${c0.map((v, j) => Math.round(v + (c1[j] - v) * k)).join(',')})`;
+}
+function updateTires() {
+  const { front, rear } = car.tires;
+  const cf = tireColor(front.temp), cr = tireColor(rear.temp);
+  tireEls.forEach((el, i) => { el.style.fill = i < 2 ? cf : cr; });
+  tireTextEls.front.textContent = `${Math.round(front.temp)}°`;
+  tireTextEls.rear.textContent = `${Math.round(rear.temp)}°`;
+  tireTextEls.front.style.color = cf;
+  tireTextEls.rear.style.color = cr;
+  // The axle furthest from the window sets the label; grip lost shown as a %.
+  const worst = Math.abs(front.temp - 90) > Math.abs(rear.temp - 90) ? front.temp : rear.temp;
+  const lost = Math.round((1 - Math.min(tempGrip(front.temp), tempGrip(rear.temp))) * 100);
+  const state = worst < TIRE_TEMP.optLo ? 'Cold' : worst > TIRE_TEMP.optHi ? 'Hot' : 'Optimal';
+  tireStateEl.textContent = lost > 0 ? `${state} −${lost}%` : state;
+  tireStateEl.style.color = tireColor(worst);
+  tiresEl.setAttribute('aria-label', `Tire temperatures: front ${Math.round(front.temp)}, rear ${Math.round(rear.temp)} degrees, ${state.toLowerCase()}`);
+}
+
 let last = performance.now();
 function frame(now) {
   const dt = Math.min(0.05, (now - last) / 1000);
@@ -568,6 +602,7 @@ function frame(now) {
   loadEl.textContent = `${front} / ${rear}`;
   loadEl.classList.toggle('light', front + rear < 85);
   updateGMeter();
+  updateTires();
   const grade = Math.round(car.grade * 100);
   gradeEl.textContent = `${grade > 0 ? '+' : grade < 0 ? '−' : ''}${Math.abs(grade)}%`;
 
