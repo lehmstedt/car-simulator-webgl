@@ -144,6 +144,18 @@
     padding: 6px 10px; border-radius: 8px; pointer-events: none; white-space: nowrap;
   }
   @media (hover: none), (max-width: 1000px) { .hint { display: none; } }
+  /* Short screens (phones in landscape): the G-meter and tire panel sit side by side
+     and shrink, so the pedals don't cover them. */
+  @media (max-height: 500px) {
+    .top-right { display: grid; grid-template-columns: auto auto; justify-items: end; align-items: start; }
+    .top-bar, #settings { grid-column: 1 / -1; }
+    .gmeter, .tires { padding: 6px 8px 6px 10px; gap: 8px; }
+    .gmeter svg { width: 64px; height: 64px; }
+    .tires svg { width: 36px; height: 56px; }
+    .tire-text { min-width: 6.5em; }
+    .pad.pedal.gas { height: 100px; }
+    .pad.pedal.brake { height: 76px; }
+  }
   @media (prefers-reduced-motion: reduce) { .pad { transition: none; } }
 </style>
 </head>
