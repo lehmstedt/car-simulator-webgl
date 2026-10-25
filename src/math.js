@@ -56,3 +56,24 @@ export function trs(x, y, z, yaw, sx = 1, sy = 1, sz = 1) {
     x, y, z, 1,
   ]);
 }
+
+// Model matrix from an origin and a frame: local x -> right, y -> up, z -> back.
+export function basis(o, right, up, back, sx = 1, sy = 1, sz = 1) {
+  return new Float32Array([
+    right[0] * sx, right[1] * sx, right[2] * sx, 0,
+    up[0] * sy, up[1] * sy, up[2] * sy, 0,
+    back[0] * sz, back[1] * sz, back[2] * sz, 0,
+    o[0], o[1], o[2], 1,
+  ]);
+}
+
+// Rotate vector v around unit axis k by angle a (Rodrigues).
+export function rotate(v, k, a) {
+  const c = Math.cos(a), s = Math.sin(a);
+  const d = (k[0] * v[0] + k[1] * v[1] + k[2] * v[2]) * (1 - c);
+  return [
+    v[0] * c + (k[1] * v[2] - k[2] * v[1]) * s + k[0] * d,
+    v[1] * c + (k[2] * v[0] - k[0] * v[2]) * s + k[1] * d,
+    v[2] * c + (k[0] * v[1] - k[1] * v[0]) * s + k[2] * d,
+  ];
+}

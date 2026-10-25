@@ -7,6 +7,11 @@
 // - FWD: throttle in a corner uses up front grip -> understeer (the nose pushes wide).
 // - RWD: throttle in a corner uses up rear grip -> oversteer (the tail steps out).
 // - Lifting off or braking mid-corner moves weight forward -> the rear goes light.
+//
+// Elevation (see terrain.js) feeds the same model:
+// - Gravity pulls the car back uphill and speeds it up downhill, and sideways on cambers.
+// - Grade shifts weight: uphill loads the rear, downhill (worse: braking downhill) loads the front.
+// - Crests unload all four tires (less grip at the top), dips press them down (more grip).
 
 const G = 9.81;
 
@@ -71,6 +76,9 @@ export class Car {
     this.accel = 0;         // filtered longitudinal accel, drives weight transfer
     this.slipFront = 0;     // slip angles (rad), for HUD / visuals
     this.slipRear = 0;
+    this.ground = { gx: 0, gz: 0, hxx: 0, hxz: 0, hzz: 0 }; // terrain under the car
+    this.grade = 0;         // rise per meter driven forward (+ = uphill)
+    this.loadFront = this.loadRear = 0; // N, for the HUD
     this.frontSliding = false;
     this.rearSliding = false;
     this.balance = null;    // 'under' | 'over' | null
@@ -79,7 +87,9 @@ export class Car {
 
   get speed() { return this.vx; }
 
-  update(dt, c, onGrass = false) {
+  // `ground` is terrainSample() at the car's position.
+  update(dt, c, onGrass = false, ground = null) {
+    if (ground) this.ground = ground;
     // The wheel input is already gradual (see input.js); map it to road-wheel
     // angle. Lock shrinks only a little with speed, so cranking the wheel at
     // speed still overloads the tires: that's the punishment for rough steering.
@@ -127,11 +137,29 @@ export class Car {
     const m = this.mass, a = this.cgToFront, b = this.cgToRear, L = this.wheelBase;
     const { vx, vy, yawRate: r } = this;
 
-    // Weight transfer: accelerating loads the rear, braking loads the front.
-    const transfer = (m * this.accel * this.cgHeight) / L;
-    const minLoad = 0.1 * m * G;
-    const loadF = Math.max(minLoad, (m * G * b) / L - transfer);
-    const loadR = Math.max(minLoad, (m * G * a) / L + transfer);
+    // Slope under the car, in the body frame. forward = (-sin, -cos), left = (-cos, sin).
+    const g = this.ground;
+    const sh = Math.sin(this.heading), ch = Math.cos(this.heading);
+    const pitch = -(g.gx * sh + g.gz * ch); // rise per meter forward
+    const bank = -g.gx * ch + g.gz * sh;    // rise per meter to the left
+    const sinPitch = pitch / Math.hypot(1, pitch), sinBank = bank / Math.hypot(1, bank);
+    this.grade = pitch;
+
+    // Total load: the share of gravity pressing into the slope, plus the push from
+    // following the road's vertical curvature (v^2 * h''): crests go light, dips heavy.
+    const wx = -sh * vx - ch * vy, wz = -ch * vx + sh * vy; // world velocity
+    const bump = g.hxx * wx * wx + 2 * g.hxz * wx * wz + g.hzz * wz * wz;
+    const normal = m * G * clamp(1 / Math.hypot(1, pitch, bank) + bump / G, 0.15, 2.5);
+
+    // Weight transfer: whatever the tires push the car along with (accelerating,
+    // or holding it against gravity uphill) loads the rear; braking and going
+    // downhill load the front.
+    const transfer = (m * (this.accel + G * sinPitch) * this.cgHeight) / L;
+    const minLoad = 0.05 * m * G;
+    const loadF = Math.max(minLoad, (normal * b) / L - transfer);
+    const loadR = Math.max(minLoad, (normal * a) / L + transfer);
+    this.loadFront = loadF;
+    this.loadRear = loadR;
     const grip = onGrass ? this.grassGrip : 1;
 
     // Drive and brake demand.
@@ -162,8 +190,8 @@ export class Car {
     // Into the body frame.
     const fxF = front.fx * cs - front.fy * sn;
     const fyF = front.fx * sn + front.fy * cs;
-    let fx = fxF + rear.fx;
-    const fy = fyF + rear.fy;
+    let fx = fxF + rear.fx - m * G * sinPitch;
+    const fy = fyF + rear.fy - m * G * sinBank;
 
     // Resistance.
     fx -= this.drag * vx * Math.abs(vx);
@@ -176,8 +204,11 @@ export class Car {
     this.yawRate += ((a * fyF - b * rear.fy) / this.yawInertia) * h;
     this.accel += (fx / m - this.accel) * Math.min(1, h * 10);
 
-    // Let the car come to rest instead of creeping.
-    if (!c.throttle && !c.brake && Math.abs(this.vx) < 0.05 && Math.abs(this.vy) < 0.05) {
+    // Let the car come to rest instead of creeping, unless the slope is steep
+    // enough to roll it (the handbrake holds it on any hill).
+    const slow = (lim) => Math.abs(this.vx) < lim && Math.abs(this.vy) < lim;
+    const rests = c.handbrake ? slow(0.3) : m * G * Math.abs(sinPitch) <= this.rolling && slow(0.05);
+    if (rests && !c.throttle && !c.brake) {
       this.vx = this.vy = 0;
       if (Math.abs(this.yawRate) < 0.05) this.yawRate = 0;
     }

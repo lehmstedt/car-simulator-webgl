@@ -12,6 +12,14 @@ The car uses tire forces, so rough driving gets punished:
 - **Understeer** (front slides, car runs wide) and **oversteer** (rear slides, car
   rotates) are shown in the HUD. Sliding wheels turn orange and leave skid marks.
 - **Lifting off or braking mid-corner** shifts weight forward and lightens the rear.
+- **Hills**: the circuit rolls over terrain with grades up to about 14%.
+  - Gravity slows you uphill, speeds you up downhill and pushes you sideways on cambered bits.
+  - Grade moves weight between the axles: uphill loads the rear (good for RWD traction,
+    FWD loses front grip), downhill loads the front. Braking downhill makes the rear very light.
+  - Crests unload the tires, so there is less grip at the top of a rise taken fast;
+    dips press the car down and add grip.
+  - The HUD shows the current grade and the weight on each axle (F / R, % of the car's
+    weight; it turns blue when the car is going light). The handbrake holds the car on a hill.
 - A light traction control stops full throttle from using all the grip of the driven wheels.
 - **Two drivetrains**, switched with **T** or the FWD/RWD button (best laps kept per car):
   - **FWD** — front-heavy, front wheels drive. Throttle in a corner makes it push wide.

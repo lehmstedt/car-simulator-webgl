@@ -1,4 +1,7 @@
 // Closed circuit built from a Catmull-Rom spline through control points.
+// It drapes over the terrain; road surfaces sit a few cm above the ground.
+
+import { terrainHeight, terrainNormal } from './terrain.js';
 
 const CONTROL = [
   [0, 120], [80, 122], [140, 100], [160, 40], [128, -8], [150, -70],
@@ -8,6 +11,7 @@ const CONTROL = [
 
 export const ROAD_HALF_WIDTH = 7;   // m
 const CURB_WIDTH = 1.2;             // m
+export const ROAD_LIFT = 0.05;      // m above the ground mesh
 const SAMPLES = 400;
 
 function catmullRom(p0, p1, p2, p3, t) {
@@ -34,17 +38,23 @@ export function buildTrack() {
   });
   const nor = tan.map(([tx, tz]) => [-tz, tx]);
 
-  // A flat strip between offsets [inner, outer] from the centerline, at height y.
-  // `filter(i)` picks which segments to include (used for alternating curb colors).
-  function strip(inner, outer, y, filter = () => true) {
+  // A strip between offsets [inner, outer] from the centerline, draped over the
+  // terrain and lifted by `lift`. It's split into `lanes` across so it follows
+  // the ground's curvature. `filter(i)` picks segments (alternating curb colors).
+  function strip(inner, outer, lift, filter = () => true, lanes = 1) {
     const positions = [], normals = [];
-    const at = (i, o) => [pts[i][0] + nor[i][0] * o, y, pts[i][1] + nor[i][1] * o];
+    const at = (i, o) => {
+      const x = pts[i][0] + nor[i][0] * o, z = pts[i][1] + nor[i][1] * o;
+      positions.push(x, terrainHeight(x, z) + lift, z);
+      normals.push(...terrainNormal(x, z));
+    };
     for (let i = 0; i < pts.length; i++) {
       if (!filter(i)) continue;
       const k = (i + 1) % pts.length;
-      const a = at(i, inner), b = at(i, outer), c = at(k, outer), d = at(k, inner);
-      positions.push(...a, ...b, ...c, ...a, ...c, ...d);
-      for (let v = 0; v < 6; v++) normals.push(0, 1, 0);
+      for (let l = 0; l < lanes; l++) {
+        const o0 = inner + ((outer - inner) * l) / lanes, o1 = inner + ((outer - inner) * (l + 1)) / lanes;
+        for (const [s, o] of [[i, o0], [i, o1], [k, o1], [i, o0], [k, o1], [k, o0]]) at(s, o);
+      }
     }
     return { positions, normals };
   }
@@ -57,21 +67,15 @@ export function buildTrack() {
   const red = (i) => Math.floor(i / 2) % 2 === 0;
   const white = (i) => !red(i);
 
-  // Start/finish line: a 2 m band across the road at sample 0.
-  const [sx, sz] = pts[0], [tx, tz] = tan[0], [nx, nz] = nor[0];
-  const line = [];
-  for (const [o, f] of [[-w, -1], [w, -1], [w, 1], [-w, -1], [w, 1], [-w, 1]]) {
-    line.push(sx + nx * o + tx * f, 0, sz + nz * o + tz * f);
-  }
-
   return {
     points: pts,
     tangents: tan,
     meshes: {
-      road: strip(-w, w, 0),
-      curbRed: merge(strip(w, w + CURB_WIDTH, 0, red), strip(-w - CURB_WIDTH, -w, 0, red)),
-      curbWhite: merge(strip(w, w + CURB_WIDTH, 0, white), strip(-w - CURB_WIDTH, -w, 0, white)),
-      startLine: { positions: line, normals: Array(6).fill([0, 1, 0]).flat() },
+      road: strip(-w, w, ROAD_LIFT, undefined, 4),
+      curbRed: merge(strip(w, w + CURB_WIDTH, ROAD_LIFT, red), strip(-w - CURB_WIDTH, -w, ROAD_LIFT, red)),
+      curbWhite: merge(strip(w, w + CURB_WIDTH, ROAD_LIFT, white), strip(-w - CURB_WIDTH, -w, ROAD_LIFT, white)),
+      // Start/finish line: the first road segment, painted.
+      startLine: strip(-w, w, ROAD_LIFT + 0.02, (i) => i === 0, 4),
     },
     // Nearest centerline sample and distance to the centerline polyline.
     locate(x, z) {

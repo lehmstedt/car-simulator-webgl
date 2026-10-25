@@ -31,21 +31,21 @@ export class Skids {
     gl.bindVertexArray(null);
   }
 
-  // Call every frame for each wheel.
-  track(id, x, z, sliding) {
+  // Call every frame for each wheel; y is the road surface height there.
+  track(id, x, y, z, sliding) {
     if (!sliding) { this.last.delete(id); return; }
     const prev = this.last.get(id);
-    if (!prev) { this.last.set(id, [x, z]); return; }
+    if (!prev) { this.last.set(id, [x, z, y]); return; }
     const dx = x - prev[0], dz = z - prev[1], len = Math.hypot(dx, dz);
     if (len < MIN_STEP) return;
-    if (len < 5) this.segment(prev[0], prev[1], x, z, dx / len, dz / len);
-    this.last.set(id, [x, z]);
+    if (len < 5) this.segment(prev[0], prev[2], prev[1], x, y, z, dx / len, dz / len);
+    this.last.set(id, [x, z, y]);
   }
 
-  segment(x0, z0, x1, z1, dx, dz) {
+  segment(x0, y0, z0, x1, y1, z1, dx, dz) {
     const nx = -dz * WIDTH / 2, nz = dx * WIDTH / 2;
-    const a = [x0 + nx, 0, z0 + nz], b = [x0 - nx, 0, z0 - nz];
-    const c = [x1 - nx, 0, z1 - nz], d = [x1 + nx, 0, z1 + nz];
+    const a = [x0 + nx, y0, z0 + nz], b = [x0 - nx, y0, z0 - nz];
+    const c = [x1 - nx, y1, z1 - nz], d = [x1 + nx, y1, z1 + nz];
     const data = new Float32Array([...a, ...b, ...c, ...a, ...c, ...d]);
     const gl = this.gl;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.buf);

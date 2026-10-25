@@ -1,11 +1,12 @@
 import { createProgram, createMesh } from './gl.js';
-import { cube, plane } from './geometry.js';
-import { perspective, lookAt, multiply, trs, identity } from './math.js';
+import { cube } from './geometry.js';
+import { perspective, lookAt, multiply, identity, basis, rotate } from './math.js';
+import { terrainHeight, terrainNormal, terrainSample, terrainMesh } from './terrain.js';
 import { readControls, resetWheel } from './input.js';
 import { Car, VARIANTS } from './car.js';
 import { Skids } from './skids.js';
 import { Ghost } from './ghost.js';
-import { buildTrack, ROAD_HALF_WIDTH } from './track.js';
+import { buildTrack, ROAD_HALF_WIDTH, ROAD_LIFT } from './track.js';
 
 const VS = `#version 300 es
 in vec3 aPosition;
@@ -52,6 +53,8 @@ const bestEl = document.getElementById('best');
 const driveEl = document.getElementById('drive');
 const balanceEl = document.getElementById('balance');
 const ghostBtn = document.getElementById('ghost');
+const loadEl = document.getElementById('load');
+const gradeEl = document.getElementById('grade');
 const gl = canvas.getContext('webgl2', { antialias: true });
 if (!gl) {
   document.getElementById('hud').textContent = 'WebGL2 is not available in this browser.';
@@ -68,7 +71,7 @@ const uAlpha = gl.getUniformLocation(program, 'uAlpha');
 const track = buildTrack();
 const meshes = {
   cube: createMesh(gl, program, cube()),
-  ground: createMesh(gl, program, plane(600)),
+  ground: createMesh(gl, program, terrainMesh(600, 6)),
   road: createMesh(gl, program, track.meshes.road),
   curbRed: createMesh(gl, program, track.meshes.curbRed),
   curbWhite: createMesh(gl, program, track.meshes.curbWhite),
@@ -81,7 +84,8 @@ for (let i = 0; props.length < 50 && i < 400; i++) {
   const ang = i * 2.399; // golden-angle spiral
   const r = 30 + i * 2.2;
   const x = Math.cos(ang) * r, z = Math.sin(ang) * r;
-  if (track.locate(x, z).distance > ROAD_HALF_WIDTH + 14) props.push({ x, z, s: 2 + (i % 4) });
+  // Sunk a little so they don't float on slopes.
+  if (track.locate(x, z).distance > ROAD_HALF_WIDTH + 14) props.push({ x, z, s: 2 + (i % 4), y: terrainHeight(x, z) - 0.6 });
 }
 
 // Grid starts a few meters before the line, facing along the track.
@@ -106,6 +110,7 @@ function toggleGhost() {
   updateGhostBtn();
 }
 const cam = { x: 0, y: 4, z: 0 };
+const tilt = { pitch: 0, roll: 0 }; // body lean from weight transfer (visual only)
 // Laps: the track is split into 4 sectors; a lap counts only after visiting all of them.
 // Best laps are kept per drivetrain so FWD and RWD can be compared.
 const lap = { start: null, last: null, best: { fwd: ghost.best('fwd'), rwd: ghost.best('rwd') }, sector: 3, visited: new Set() };
@@ -121,6 +126,8 @@ function resetRace() {
   resetWheel();
   cam.x = car.x + Math.sin(car.heading) * 9;
   cam.z = car.z + Math.cos(car.heading) * 9;
+  cam.y = terrainHeight(car.x, car.z) + 3.5;
+  tilt.pitch = tilt.roll = 0;
   lap.start = null;
   lap.sector = 3;
   lap.visited.clear();
@@ -180,29 +187,51 @@ function draw(mesh, model, color, gridSize = 0, alpha = 1) {
 
 const WHEELS = [[-1, 1.3, true], [1, 1.3, true], [-1, -1.3, false], [1, -1.3, false]];
 
+// A car's frame, lying on the slope under it: origin on the road surface,
+// right / up (surface normal) / back axes.
+function carFrame({ x, z, heading: h }) {
+  const up = terrainNormal(x, z);
+  const f = [-Math.sin(h), 0, -Math.cos(h)];
+  const d = f[0] * up[0] + f[1] * up[1] + f[2] * up[2];
+  let fwd = [f[0] - up[0] * d, f[1] - up[1] * d, f[2] - up[2] * d];
+  const l = Math.hypot(...fwd);
+  fwd = fwd.map((v) => v / l);
+  const back = fwd.map((v) => -v);
+  const right = [up[1] * back[2] - up[2] * back[1], up[2] * back[0] - up[0] * back[2], up[0] * back[1] - up[1] * back[0]];
+  return { o: [x, terrainHeight(x, z) + ROAD_LIFT, z], right, up, back };
+}
+
+// World position of a point given in a car's frame (x right, y up, z back).
+const toWorld = (F, lx, ly, lz) => [0, 1, 2].map((i) => F.o[i] + F.right[i] * lx + F.up[i] * ly + F.back[i] * lz);
+
 function wheelPositions(pose = car) {
-  const { x, z, heading: h } = pose;
-  const fx = -Math.sin(h), fz = -Math.cos(h), rx = Math.cos(h), rz = -Math.sin(h);
-  return WHEELS.map(([side, fwd, front]) => ({
-    x: x + rx * side * 0.95 + fx * fwd,
-    z: z + rz * side * 0.95 + fz * fwd,
-    front,
-    sliding: front ? pose.frontSliding : pose.rearSliding,
-  }));
+  const F = carFrame(pose);
+  return WHEELS.map(([side, fwd, front]) => {
+    const [x, , z] = toWorld(F, side * 0.95, 0, -fwd);
+    return { x, z, y: terrainHeight(x, z) + ROAD_LIFT + 0.03, front, sliding: front ? pose.frontSliding : pose.rearSliding };
+  });
 }
 
 const CAR_COLORS = { body: [0.85, 0.15, 0.15], cabin: [0.2, 0.2, 0.25], wheel: [0.08, 0.08, 0.08] };
 const GHOST_COLORS = { body: [0.75, 0.9, 1], cabin: [0.55, 0.7, 0.85], wheel: [0.45, 0.55, 0.65] };
 
-function drawCar(pose = car, colors = CAR_COLORS, alpha = 1) {
-  const { x, z, heading: h, steer } = pose;
-  draw(meshes.cube, trs(x, 0.6, z, h, 1.8, 0.6, 4.2), colors.body, 0, alpha);
-  const fx = -Math.sin(h), fz = -Math.cos(h);
-  draw(meshes.cube, trs(x - fx * 0.3, 1.15, z - fz * 0.3, h, 1.5, 0.5, 2.0), colors.cabin, 0, alpha);
-  // Wheels glow orange when their tires are past the grip peak.
-  for (const w of wheelPositions(pose)) {
-    const color = w.sliding ? [0.95, 0.55, 0.1] : colors.wheel;
-    draw(meshes.cube, trs(w.x, 0.35, w.z, h + (w.front ? steer : 0), 0.3, 0.7, 0.7), color, 0, alpha);
+function drawCar(pose = car, colors = CAR_COLORS, alpha = 1, lean = tilt) {
+  const F = carFrame(pose);
+  // The body leans on its springs: nose dives under braking, squats under
+  // throttle, rolls toward the outside of a turn.
+  let { right, up, back } = F;
+  up = rotate(up, right, lean.pitch); back = rotate(back, right, lean.pitch);
+  up = rotate(up, back, lean.roll); right = rotate(right, back, lean.roll);
+  const body = { o: F.o, right, up, back };
+  draw(meshes.cube, basis(toWorld(body, 0, 0.6, 0), right, up, back, 1.8, 0.6, 4.2), colors.body, 0, alpha);
+  draw(meshes.cube, basis(toWorld(body, 0, 1.15, 0.3), right, up, back, 1.5, 0.5, 2.0), colors.cabin, 0, alpha);
+  // Wheels stay on the road frame and glow orange when past the grip peak.
+  for (const [side, fwd, front] of WHEELS) {
+    const sliding = front ? pose.frontSliding : pose.rearSliding;
+    const a = front ? pose.steer : 0;
+    const r = rotate(F.right, F.up, a), b = rotate(F.back, F.up, a);
+    const color = sliding ? [0.95, 0.55, 0.1] : colors.wheel;
+    draw(meshes.cube, basis(toWorld(F, side * 0.95, 0.35, -fwd), r, F.up, b, 0.3, 0.7, 0.7), color, 0, alpha);
   }
 }
 
@@ -218,7 +247,7 @@ function drawGhost(now) {
   gl.enable(gl.BLEND);
   gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE);
   gl.depthMask(false);
-  drawCar(pose, GHOST_COLORS, alpha);
+  drawCar(pose, GHOST_COLORS, alpha, { pitch: 0, roll: 0 });
   gl.depthMask(true);
   gl.disable(gl.BLEND);
 }
@@ -233,10 +262,16 @@ function frame(now) {
   if (controls.switchDrive) switchDrive();
   else if (controls.reset) resetRace();
   const where = track.locate(car.x, car.z);
-  car.update(dt, controls, !where.onTrack);
+  car.update(dt, controls, !where.onTrack, terrainSample(car.x, car.z));
   updateLap(track.locate(car.x, car.z).index, now);
   if (lap.start !== null) ghost.record(now - lap.start, car);
-  wheelPositions().forEach((w, i) => skids.track(i, w.x, w.z, w.sliding));
+  wheelPositions().forEach((w, i) => skids.track(i, w.x, w.y, w.z, w.sliding));
+
+  // Body lean follows the accelerations, smoothed like a damped spring.
+  const kt = Math.min(1, dt * 6);
+  tilt.pitch += (car.accel * 0.006 - tilt.pitch) * kt;
+  tilt.roll += (-car.vx * car.yawRate * 0.005 - tilt.roll) * kt;
+  const carY = terrainHeight(car.x, car.z);
 
   // Chase camera: lag behind the car, smoothed.
   const back = 9, height = 3.5;
@@ -245,7 +280,8 @@ function frame(now) {
   const k = Math.min(1, dt * 4);
   cam.x += (tx - cam.x) * k;
   cam.z += (tz - cam.z) * k;
-  cam.y += (height - cam.y) * k;
+  cam.y += (carY + height - cam.y) * k;
+  cam.y = Math.max(cam.y, terrainHeight(cam.x, cam.z) + 1.2); // never inside a hill
 
   resize();
   gl.clearColor(0.55, 0.75, 0.95, 1);
@@ -257,23 +293,25 @@ function frame(now) {
   // Keep a usable horizontal view on tall (portrait phone) screens.
   const fovy = aspect < 1 ? 2 * Math.atan(Math.tan(Math.PI / 6) * 0.8 / aspect) : Math.PI / 3;
   const proj = perspective(fovy, aspect, 0.1, 1000);
-  const view = lookAt([cam.x, cam.y, cam.z], [car.x, 1, car.z], [0, 1, 0]);
+  const view = lookAt([cam.x, cam.y, cam.z], [car.x, carY + 1, car.z], [0, 1, 0]);
   gl.uniformMatrix4fv(uViewProj, false, multiply(proj, view));
 
-  // Flat ground layers all sit at y = 0: draw them back to front without
-  // writing depth, so they never z-fight; everything after sits on top.
+  // Road layers sit a few cm above the ground; polygon offset keeps them from
+  // z-fighting with it (and the start line and skids with the road) far away.
   gl.disable(gl.CULL_FACE);
-  gl.depthMask(false);
   draw(meshes.ground, identity(), [0.3, 0.55, 0.3], 10);
+  gl.enable(gl.POLYGON_OFFSET_FILL);
+  gl.polygonOffset(-1, -2);
   draw(meshes.road, identity(), [0.32, 0.33, 0.36]);
   draw(meshes.curbRed, identity(), [0.85, 0.15, 0.12]);
   draw(meshes.curbWhite, identity(), [0.95, 0.95, 0.95]);
+  gl.polygonOffset(-2, -4);
   draw(meshes.startLine, identity(), [0.95, 0.95, 0.95]);
   if (skids.used) draw(skids.mesh, identity(), [0.12, 0.12, 0.13]);
-  gl.depthMask(true);
+  gl.disable(gl.POLYGON_OFFSET_FILL);
   gl.enable(gl.CULL_FACE);
 
-  for (const p of props) draw(meshes.cube, trs(p.x, p.s / 2, p.z, 0, p.s, p.s, p.s), [0.7, 0.65, 0.5]);
+  for (const p of props) draw(meshes.cube, basis([p.x, p.y + p.s / 2, p.z], [1, 0, 0], [0, 1, 0], [0, 0, 1], p.s, p.s, p.s), [0.7, 0.65, 0.5]);
   drawCar();
   drawGhost(now);
 
@@ -284,6 +322,14 @@ function frame(now) {
   bestEl.textContent = fmt(lap.best[car.variant]);
   balanceEl.textContent = car.balance === 'over' ? 'Oversteer' : car.balance === 'under' ? 'Understeer' : '';
   balanceEl.className = car.balance ?? '';
+  // Weight on each axle as a share of the car's weight: grade and braking move
+  // it between the axles, crests and dips change the total.
+  const weight = car.mass * 9.81;
+  const front = Math.round((car.loadFront / weight) * 100), rear = Math.round((car.loadRear / weight) * 100);
+  loadEl.textContent = `${front} / ${rear}`;
+  loadEl.classList.toggle('light', front + rear < 85);
+  const grade = Math.round(car.grade * 100);
+  gradeEl.textContent = `${grade > 0 ? '+' : grade < 0 ? '−' : ''}${Math.abs(grade)}%`;
 
   requestAnimationFrame(frame);
 }

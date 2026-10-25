@@ -3,7 +3,7 @@
 
 const INTERVAL = 50;  // ms between recorded samples
 const STRIDE = 4;     // t, x, z, heading
-const KEY = 'ghost';
+const KEY = 'ghost-hills'; // new key when the track changed: old laps aren't comparable
 
 export class Ghost {
   constructor() {
