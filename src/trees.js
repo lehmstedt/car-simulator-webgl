@@ -1,4 +1,4 @@
-// Low-poly trees around the circuit or along the stage: pines (stacked cones) and round broadleaf
+// Low-poly trees around the circuit or along the stage and the Nordschleife: pines (stacked cones) and round broadleaf
 // trees (icosahedra). All trees are merged into a few meshes, one per color,
 // so they cost a handful of draw calls. They grow in clumps, kept clear of the
 // road, the sand traps, the signs and the paddock.
@@ -58,9 +58,25 @@ function blob(m, T, r, cy) {
 
 // `clear(x, z)` says whether a tree may stand there; `height(x, z)` is the ground.
 // `road` (stage only): centerline points and tangents to line with woods.
-export function buildTrees(clear, height, road = null) {
+// `opts` (stage-style roads): how many trees at most, after how many tries,
+// and `chunk`, a size (m) to split the forest into square pieces so far ones
+// can be skipped when drawing (0: one piece).
+export function buildTrees(clear, height, road = null, opts = {}) {
+  const { count: most = 900, tries = 9000, chunk = 0 } = opts;
   const rand = rng(7);
-  const trunks = mesh(), pines = mesh(), leaves = mesh(), leavesLight = mesh();
+  const pieces = new Map(); // chunk key -> meshes
+  let trunks, pines, leaves, leavesLight;
+  const pick = (x, z) => {
+    const key = chunk ? `${Math.floor(x / chunk)},${Math.floor(z / chunk)}` : '0';
+    if (!pieces.has(key)) {
+      const [i, j] = key.split(',').map(Number);
+      pieces.set(key, {
+        trunks: mesh(), pines: mesh(), leaves: mesh(), leavesLight: mesh(),
+        x: chunk ? (i + 0.5) * chunk : 0, z: chunk ? (j + 0.5) * chunk : 0, radius: chunk ? chunk * 0.75 : Infinity,
+      });
+    }
+    ({ trunks, pines, leaves, leavesLight } = pieces.get(key));
+  };
   const taken = new Map(); // coarse grid, keeps trees a few meters apart
   const cellOf = (x, z) => `${Math.floor(x / 4)},${Math.floor(z / 4)}`;
   const free = (x, z) => {
@@ -72,6 +88,7 @@ export function buildTrees(clear, height, road = null) {
 
   let count = 0;
   const plant = (x, z) => {
+    pick(x, z);
     const T = { x, z, y: height(x, z) - 0.2, yaw: rand() * Math.PI * 2, s: 0.8 + rand() * 0.6, sy: 0.85 + rand() * 0.35 };
     if (rand() < 0.55) {
       cone(trunks, T, 0.28, 0.2, 0, 2, 5);
@@ -90,14 +107,14 @@ export function buildTrees(clear, height, road = null) {
   if (road) {
     // Stage: woods close along both sides of the road, gaps where the density dips.
     const { points, tangents } = road;
-    for (let i = 0; i < 9000 && count < 900; i++) {
+    for (let i = 0; i < tries && count < most; i++) {
       const k = Math.floor(rand() * points.length), [px, pz] = points[k], [tx, tz] = tangents[k];
       const off = (rand() < 0.5 ? -1 : 1) * (8 + rand() * rand() * 60);
       const x = px - tz * off, z = pz + tx * off;
       if (rand() > density(x, z) * 0.6 + 0.35 || !clear(x, z) || !free(x, z)) continue;
       plant(x, z);
     }
-    return { trunks, pines, leaves, leavesLight, count };
+    return { pieces: [...pieces.values()], count };
   }
 
   // Around the circuit.
@@ -113,5 +130,5 @@ export function buildTrees(clear, height, road = null) {
     if (rand() > density(x, z) || !free(x, z)) continue;
     plant(x, z);
   }
-  return { trunks, pines, leaves, leavesLight, count };
+  return { pieces: [...pieces.values()], count };
 }

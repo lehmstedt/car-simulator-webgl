@@ -2,7 +2,8 @@
 // circuit, or the point-to-point rally stage. They drape over the terrain;
 // road surfaces sit a few cm above the ground.
 
-import { terrainHeight, terrainNormal, terrainSample, groundHeight, setRoadBumps } from './terrain.js';
+import { terrainHeight, terrainNormal, terrainSlope, groundHeight, setRoadBumps, RING_VERGE } from './terrain.js';
+import { NORDSCHLEIFE } from './nordschleife.js';
 import { MONTREAL } from './montreal.js';
 
 export const LAYOUTS = {
@@ -48,6 +49,18 @@ export const LAYOUTS = {
     step: 3, // m between samples: the control points are dense, so sample by distance
     halfWidth: 6.5, edge: 1.8, sand: true, sausages: true, surface: 'road', edgeSurface: 'road',
     colors: { road: [0.3, 0.31, 0.34] },
+  },
+  // The Nürburgring Nordschleife: 20.7 km through the Eifel forest with ~290 m
+  // of climb, its path and heights from real map and elevation data
+  // (nordschleife.js). A 9 m asphalt road with white edge lines and grass
+  // verges; no kerbs or sand. Laps start and end at T13.
+  ring: {
+    closed: true,
+    control: NORDSCHLEIFE.road.map(([x, z]) => [x, z]),
+    step: 3, // m between road samples
+    halfWidth: 4.5, edge: 0.3, sand: false, sausages: false, surface: 'road', edgeSurface: 'road',
+    verge: true, sections: NORDSCHLEIFE.sections,
+    colors: { road: [0.3, 0.31, 0.33] },
   },
 };
 
@@ -125,6 +138,19 @@ export function buildTrack(layout, avoid = () => false) {
   const next = (i) => (closed ? (i + 1) % N : Math.min(N - 1, i + 1));
   const prev = (i) => (closed ? (i - 1 + N) % N : Math.max(0, i - 1));
   const segs = closed ? N : N - 1; // segment i joins samples i and i + 1
+  // Segments by grid cell, for nearest() on long roads.
+  const NEAR_CELL = 25, NEAR_LOOK = 6;
+  const near = segs > 3000 ? new Map() : null;
+  for (let i = 0; near && i < segs; i++) {
+    const a = pts[i], b = pts[(i + 1) % N];
+    for (let cx = Math.floor(Math.min(a[0], b[0]) / NEAR_CELL); cx <= Math.floor(Math.max(a[0], b[0]) / NEAR_CELL); cx++) {
+      for (let cz = Math.floor(Math.min(a[1], b[1]) / NEAR_CELL); cz <= Math.floor(Math.max(a[1], b[1]) / NEAR_CELL); cz++) {
+        const k = cx * 100003 + cz;
+        if (!near.has(k)) near.set(k, []);
+        near.get(k).push(i);
+      }
+    }
+  }
 
   // Unit tangent and left normal at each sample.
   const tan = pts.map((_, i) => {
@@ -229,18 +255,16 @@ export function buildTrack(layout, avoid = () => false) {
   // the ground's curvature. `filter(i, lane)` picks pieces (alternating curb colors).
   function strip(inner, outer, lift, filter = () => true, lanes = 1) {
     const positions = [], normals = [], uvs = [];
-    const at = (i, o) => {
+    const at = vertexCache((i, o) => {
       const x = pts[i][0] + nor[i][0] * o, z = pts[i][1] + nor[i][1] * o;
-      positions.push(x, groundHeight(x, z) + bump(along[i], o) + lift, z);
       // Slope of the ground plus the bumps' slope along and across the road.
-      const g = terrainSample(x, z, groundHeight), e = 0.25;
+      const g = terrainSlope(x, z, groundHeight), e = 0.25;
       const ds = (bump(along[i] + e, o) - bump(along[i] - e, o)) / (2 * e);
       const dn = (bump(along[i], o + e) - bump(along[i], o - e)) / (2 * e);
       const gx = g.gx + ds * tan[i][0] + dn * nor[i][0], gz = g.gz + ds * tan[i][1] + dn * nor[i][1];
       const l = Math.hypot(gx, 1, gz);
-      normals.push(-gx / l, 1 / l, -gz / l);
-      uvs.push(o, 0); // meters across, for the shader's wheel ruts
-    };
+      return [x, groundHeight(x, z) + bump(along[i], o) + lift, z, -gx / l, 1 / l, -gz / l];
+    }, positions, normals, (o) => uvs.push(o, 0)); // meters across, for the shader's wheel ruts
     for (let i = 0; i < segs; i++) {
       const k = (i + 1) % N;
       for (let l = 0; l < lanes; l++) {
@@ -250,6 +274,58 @@ export function buildTrack(layout, avoid = () => false) {
       }
     }
     return { positions, normals, uvs };
+  }
+
+  // Grass from the road's edge out to RING_VERGE on one side (1: right,
+  // -1: left), every other sample, in lanes that widen away from the road.
+  // Each sample's strip stops before it reaches another part of the road or
+  // folds over the inside of a bend.
+  function vergeStrip(side) {
+    const from = w + CURB_WIDTH, OFFS = [0, 1.5, 4, 8, 14, 22, 32, 44, RING_VERGE - from].map((o) => from + o);
+    const reachOf = (i) => {
+      const lim = Math.min(RING_VERGE, 0.9 / Math.max(1e-6, curv[i] * side > 0 ? Math.abs(curv[i]) : 0));
+      const own = (o) => {
+        const r = nearest(pts[i][0] + nor[i][0] * o * side, pts[i][1] + nor[i][1] * o * side);
+        return ahead(i, r.index) < 40 || ahead(r.index, i) < 40;
+      };
+      // Usually nothing else is near: a few probes tell. Otherwise step out.
+      if ([0.25, 0.5, 0.75, 1].every((f) => own(from + (lim - from) * f))) return lim;
+      let o = from;
+      while (o < lim && own(o)) o += 2;
+      return Math.max(from, Math.min(lim, o - 2));
+    };
+    const idx = [];
+    for (let i = 0; i < segs; i += 2) idx.push(i);
+    if (!closed) idx.push(N - 1); else idx.push(0);
+    const out = idx.map(reachOf);
+    const positions = [], normals = [];
+    const at = vertexCache((i, o) => {
+      const x = pts[i][0] + nor[i][0] * o * side, z = pts[i][1] + nor[i][1] * o * side;
+      return [x, groundHeight(x, z) + ROAD_LIFT * 0.5, z, ...terrainNormal(x, z, groundHeight)];
+    }, positions, normals);
+    for (let k = 0; k + 1 < idx.length; k++) {
+      const i = idx[k], j = idx[k + 1];
+      for (let l = 0; l + 1 < OFFS.length; l++) {
+        const oi = (m) => Math.min(OFFS[m], out[k]), oj = (m) => Math.min(OFFS[m], out[k + 1]);
+        if (oi(l) >= oi(l + 1) && oj(l) >= oj(l + 1)) continue;
+        for (const [p, o] of [[i, oi(l)], [i, oi(l + 1)], [j, oj(l + 1)], [i, oi(l)], [j, oj(l + 1)], [j, oj(l)]]) at(p, o);
+      }
+    }
+    return { positions, normals };
+  }
+
+  // Wraps `make(i, o)` -> [x, y, z, nx, ny, nz] (the vertex `o` meters right of
+  // sample i) so each vertex is worked out once, however many triangles share it.
+  function vertexCache(make, positions, normals, extra = () => {}) {
+    const cache = new Map();
+    return (i, o) => {
+      const key = i * 8192 + Math.round(o * 40) + 4096;
+      let v = cache.get(key);
+      if (!v) cache.set(key, (v = make(i, o)));
+      positions.push(v[0], v[1], v[2]);
+      normals.push(v[3], v[4], v[5]);
+      extra(o);
+    };
   }
 
   const merge = (...ms) => ({
@@ -387,7 +463,16 @@ export function buildTrack(layout, avoid = () => false) {
 
   // Surface layers, bottom to top; `top` ones need extra polygon offset over the road.
   let layers;
-  if (closed) {
+  if (layout.verge) {
+    // Nordschleife: asphalt with white edge lines, on grass verges that show
+    // the exact ground out to RING_VERGE (see terrain.js).
+    layers = [
+      { mesh: merge(vergeStrip(1), vergeStrip(-1)), color: [0.3, 0.55, 0.3], mat: 'grass' },
+      { mesh: strip(-w, w, ROAD_LIFT, undefined, 4), color: layout.colors.road, mat: 'asphalt' },
+      { mesh: edges(() => true), color: [0.92, 0.92, 0.9], mat: 'line' },
+      { mesh: line(startIndex, () => true), color: [0.95, 0.95, 0.95], mat: 'line', top: true },
+    ];
+  } else if (closed) {
     const red = (i) => Math.floor(i / 2) % 2 === 0;
     layers = [
       { mesh: merge(sandStrip(0), sandStrip(1)), color: [0.86, 0.76, 0.52], mat: 'sand' },
@@ -420,6 +505,7 @@ export function buildTrack(layout, avoid = () => false) {
     corners,
     signs,
     sausages,
+    sections: layout.sections ?? null, // [meters from the start, name], in order
     length,
     grid: mark(closed ? N - 4 : indexAt(12)), // where the car starts
     start: mark(startIndex),
@@ -461,15 +547,37 @@ export function buildTrack(layout, avoid = () => false) {
     return (x, z) => {
       const list = cells.get(key(Math.floor(x / CELL), Math.floor(z / CELL)));
       if (!list) return 0;
-      const r = nearest(x, z, list);
+      const r = nearestIn(x, z, list);
       if (r.distance >= reach) return 0;
       return bump(along[r.index] + (along[r.index + 1] - along[r.index]) * r.t, r.distance * r.side);
     };
   }
 
-  // Nearest centerline sample and distance to the centerline polyline
-  // (checking only the segments in `list`, if given).
-  function nearest(x, z, list = null) {
+  // Nearest centerline sample and distance to the centerline polyline. Long
+  // roads look in a grid of cells around (x, z) first, ring by ring, and only
+  // check every segment when nothing is within LOOK cells.
+  function nearest(x, z) {
+    if (!near) return nearestIn(x, z);
+    const cx = Math.floor(x / NEAR_CELL), cz = Math.floor(z / NEAR_CELL);
+    let best = null;
+    for (let r = 0; r <= NEAR_LOOK; r++) {
+      for (let dx = -r; dx <= r; dx++) {
+        for (let dz = -r; dz <= r; dz++) {
+          if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
+          const list = near.get((cx + dx) * 100003 + cz + dz);
+          if (!list) continue;
+          const q = nearestIn(x, z, list);
+          if (!best || q.distance < best.distance) best = q;
+        }
+      }
+      // Anything in a further ring is at least r cells away.
+      if (best && best.distance <= r * NEAR_CELL) return best;
+    }
+    return best ?? nearestIn(x, z);
+  }
+
+  // Nearest among the segments in `list` (all of them if null).
+  function nearestIn(x, z, list = null) {
     let best = Infinity, index = 0, frac = 0, side = 1;
     for (let j = 0, n = list ? list.length : segs; j < n; j++) {
       const i = list ? list[j] : j;

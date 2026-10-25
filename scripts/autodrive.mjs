@@ -4,7 +4,7 @@
 // itself, then writes its best run to src/bot-lap.js, which the game replays
 // as Claude's ghost.
 //
-//   node scripts/autodrive.mjs [circuit|stage|montreal] [fwd|rwd|gt3|both|all] [iterations]
+//   node scripts/autodrive.mjs [circuit|stage|montreal|ring] [fwd|rwd|gt3|both|all] [iterations]
 import { writeFileSync, readFileSync } from 'node:fs';
 import { Car, VARIANTS } from '../src/car.js';
 import { buildTrack, LAYOUTS } from '../src/track.js';
@@ -14,7 +14,9 @@ import { onPaddock } from '../src/paddock.js';
 const DT = 1 / 60;            // one game frame
 const STEER_RATE = 4;         // wheel travel per second (the keyboard's counter-steer rate)
 const kind = process.argv[2] ?? 'circuit';
-const circuit = kind === 'circuit';
+const circuit = kind === 'circuit', asphalt = circuit || kind === 'ring';
+// Laps per try: the Nordschleife's one lap (from the standing start) is long enough.
+const LAPS = kind === 'ring' ? 1 : 2;
 setTerrain(kind);
 const paddockAt = circuit ? onPaddock : () => false;
 const track = buildTrack(LAYOUTS[kind], (x, z) => paddockAt(x, z, 4));
@@ -103,7 +105,7 @@ const pose = (car) => [Math.round(car.x * 100) / 100, Math.round(car.z * 100) / 
 
 // Drive from the grid. Circuit: up to `laps` timed laps, keeps the best flying
 // lap. Stage: one run, start line to finish. `off` counts frames off the road.
-function run(variant, p, laps = 2, record = false) {
+function run(variant, p, laps = LAPS, record = false) {
   const line = racingLine(p.margin);
   const car = new Car(variant);
   const vt = profile(line, p, car);
@@ -111,7 +113,7 @@ function run(variant, p, laps = 2, record = false) {
   let wheel = 0, hint = nearestOnLine(line, car.x, car.z, track.locate(car.x, car.z).index);
   const lap = { start: null, sector: 3, visited: new Set(), along: track.locate(car.x, car.z).along };
   let kerbWheels = [0, 0, 0, 0], rec = null, next = 0, done = 0, best = null, off = 0;
-  const maxFrames = circuit ? 60 * 75 * (laps + 1) : 60 * 300;
+  const maxFrames = closed ? 60 * Math.max(75, track.length / 20) * (laps + 1) : 60 * 300;
   for (let frame = 0; frame < maxFrames; frame++) {
     const t = frame * (1000 / 60);
     hint = nearestOnLine(line, car.x, car.z, hint);
@@ -196,7 +198,7 @@ const BOUNDS = {
   damp: [0, 3], slipK: [-3, 3], pre: [0, 0.6], gas: [0.9, 1.05], over: [1, 1.15],
 };
 function tune(variant, iters) {
-  let p = { margin: 1.5, lat: circuit ? 9 : 6, brake: circuit ? 6 : 4, look0: 5, lookK: 0.3, damp: 1, slipK: 1, pre: 0.1, gas: 1, over: 1.05 };
+  let p = { margin: 1.5, lat: asphalt ? 9 : 6, brake: asphalt ? 6 : 4, look0: 5, lookK: 0.3, damp: 1, slipK: 1, pre: 0.1, gas: 1, over: 1.05 };
   let best = score(variant, p);
   // Find something that stays on the road first by backing off.
   while (best === Infinity && p.lat > 2.5) { p.lat -= 0.5; p.brake = Math.max(3, p.brake - 0.3); best = score(variant, p); }
@@ -222,7 +224,7 @@ const file = new URL('../src/bot-lap.js', import.meta.url);
 const read = () => { try { return JSON.parse(readFileSync(file, 'utf8').match(/BOT_LAPS = (.*);/s)[1]); } catch { return {}; } };
 for (const v of which === 'all' ? Object.keys(VARIANTS) : which === 'both' ? ['fwd', 'rwd'] : [which]) {
   const p = tune(v, iters);
-  const lap = run(v, p, 3, true);
+  const lap = run(v, p, kind === 'ring' ? 1 : 3, true);
   if (!lap || lap.off) { console.log(`${kind} ${v}: no clean run`); continue; }
   console.log(`${kind} ${v}: ${(lap.time / 1000).toFixed(2)} s`, JSON.stringify(p));
   // Re-read so parallel runs for other layouts / drivetrains aren't lost; keep the faster run.
