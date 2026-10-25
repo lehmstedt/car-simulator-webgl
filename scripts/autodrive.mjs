@@ -4,9 +4,9 @@
 // itself, then writes its best run to src/bot-lap.js, which the game replays
 // as Claude's ghost.
 //
-//   node scripts/autodrive.mjs [circuit|stage] [fwd|rwd|both] [iterations]
+//   node scripts/autodrive.mjs [circuit|stage] [fwd|rwd|gt3|both|all] [iterations]
 import { writeFileSync, readFileSync } from 'node:fs';
-import { Car } from '../src/car.js';
+import { Car, VARIANTS } from '../src/car.js';
 import { buildTrack, LAYOUTS } from '../src/track.js';
 import { terrainSample, terrainNormal, setTerrain } from '../src/terrain.js';
 import { onPaddock } from '../src/paddock.js';
@@ -25,7 +25,6 @@ const wrap = (i) => (closed ? (i + N) % N : Math.max(0, Math.min(N - 1, i)));
 const startPose = () => { const { x, z, tangent: [tx, tz] } = track.grid; return [x, z, Math.atan2(-tx, -tz)]; };
 
 // Wheel contact points, as main.js wheelPositions() (car frame lying on the slope).
-const WHEELS = [[-1, 1.3, true], [1, 1.3, true], [-1, -1.3, false], [1, -1.3, false]];
 function wheelXZ(car) {
   const up = terrainNormal(car.x, car.z), h = car.heading;
   const f = [-Math.sin(h), 0, -Math.cos(h)], d = f[0] * up[0] + f[1] * up[1] + f[2] * up[2];
@@ -33,7 +32,7 @@ function wheelXZ(car) {
   const l = Math.hypot(...fwd); fwd = fwd.map((v) => v / l);
   const back = fwd.map((v) => -v);
   const right = [up[1] * back[2] - up[2] * back[1], up[2] * back[0] - up[0] * back[2], up[0] * back[1] - up[1] * back[0]];
-  return WHEELS.map(([side, ahead]) => [car.x + right[0] * side * 0.95 + fwd[0] * ahead, car.z + right[2] * side * 0.95 + fwd[2] * ahead]);
+  return car.wheels.map(([side, ahead]) => [car.x + right[0] * side + fwd[0] * ahead, car.z + right[2] * side + fwd[2] * ahead]);
 }
 
 // Racing line: lateral offsets from the centerline, relaxed toward minimum
@@ -61,7 +60,7 @@ function racingLine(margin) {
 
 // Target speed along the line: lateral-grip limit in corners, then braking and
 // acceleration limits passed backward and forward.
-function profile(line, p) {
+function profile(line, p, car) {
   const M = line.length;
   const seg = line.map((a, i) => { const b = line[wrap(i + 1)]; return Math.hypot(b[0] - a[0], b[1] - a[1]); });
   const mean = seg.reduce((s, v) => s + v, 0) / M, s = Math.max(1, Math.round(10 / mean));
@@ -80,7 +79,7 @@ function profile(line, p) {
     }
     for (let i = 0; i < M; i++) {
       if (!closed && i === M - 1) continue;
-      const j = wrap(i + 1), acc = Math.min(5500, 140000 / Math.max(v[i], 1)) / 1200 - 1.1 * v[i] ** 2 / 1200;
+      const j = wrap(i + 1), acc = Math.min(car.maxDrive, car.power / Math.max(v[i], 1)) / car.mass - car.drag * v[i] ** 2 / car.mass;
       v[j] = Math.min(v[j], Math.sqrt(v[i] ** 2 + 2 * Math.max(0.1, acc) * seg[i]));
     }
   }
@@ -106,8 +105,8 @@ const pose = (car) => [Math.round(car.x * 100) / 100, Math.round(car.z * 100) / 
 // lap. Stage: one run, start line to finish. `off` counts frames off the road.
 function run(variant, p, laps = 2, record = false) {
   const line = racingLine(p.margin);
-  const vt = profile(line, p);
   const car = new Car(variant);
+  const vt = profile(line, p, car);
   car.reset(...startPose());
   let wheel = 0, hint = nearestOnLine(line, car.x, car.z, track.locate(car.x, car.z).index);
   const lap = { start: null, sector: 3, visited: new Set(), along: track.locate(car.x, car.z).along };
@@ -138,7 +137,7 @@ function run(variant, p, laps = 2, record = false) {
     const on = [];
     const hs = wheelXZ(car).map(([x, z], i) => {
       const h = track.sausageHeight(x, z);
-      if (h > 0) on.push({ front: WHEELS[i][2], side: WHEELS[i][0], hit: kerbWheels[i] === 0 });
+      if (h > 0) on.push({ front: car.wheels[i][2], side: Math.sign(car.wheels[i][0]), hit: kerbWheels[i] === 0 });
       return h;
     });
     car.kerbs(on);
@@ -221,7 +220,7 @@ function tune(variant, iters) {
 const which = process.argv[3] ?? 'both', iters = +(process.argv[4] ?? 1500);
 const file = new URL('../src/bot-lap.js', import.meta.url);
 const read = () => { try { return JSON.parse(readFileSync(file, 'utf8').match(/BOT_LAPS = (.*);/s)[1]); } catch { return {}; } };
-for (const v of which === 'both' ? ['fwd', 'rwd'] : [which]) {
+for (const v of which === 'all' ? Object.keys(VARIANTS) : which === 'both' ? ['fwd', 'rwd'] : [which]) {
   const p = tune(v, iters);
   const lap = run(v, p, 3, true);
   if (!lap || lap.off) { console.log(`${kind} ${v}: no clean run`); continue; }

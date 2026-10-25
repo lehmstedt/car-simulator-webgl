@@ -47,9 +47,39 @@ The car uses tire forces, so rough driving gets punished:
   The HUD shows a top view of the car with each tire colored blue (cold), green
   (in the window), amber then red (overheated), plus the grip lost.
 - A light traction control stops full throttle from using all the grip of the driven wheels.
-- **Two drivetrains**, switched with **T** or the FWD/RWD button (best laps kept per car):
+- **Three cars**, switched with **T** or the Car button (best laps kept per car):
   - **FWD** — front-heavy, front wheels drive. Throttle in a corner makes it push wide.
   - **RWD** — balanced, rear wheels drive. Throttle in a slow corner kicks the tail out.
+  - **GT3** — a Porsche 911 GT3 (992), modeled from published data (see below).
+
+## Porsche 911 GT3 (992)
+
+The physics and the drawn car come from the same numbers (`VARIANTS.gt3` in `src/car.js`;
+the body is lofted from them in `src/bodies.js`), so the wheels sit where the tires push,
+kerbs and skids line up with them, and the cockpit sits where the driver does.
+
+| | Data used |
+| --- | --- |
+| Size | 4573 × 1852 × 1279 mm, 2457 mm wheelbase, 1600 / 1553 mm track |
+| Weight | 1435 kg (DIN, PDK) + 75 kg driver, ~39 / 61 % front / rear |
+| Engine | 4.0 L flat-six behind the rear axle, 375 kW (510 PS), 470 Nm, rear-wheel drive |
+| Tires | 255/35 ZR20 front, 315/30 ZR21 rear (Cup 2) |
+| Aero | Cd 0.34, 144 kg of downforce at 200 km/h (wing in its track setting) |
+| Claimed | 0–100 km/h 3.4 s, 318 km/h |
+
+In the game it does 0–100 km/h in 3.35 s and tops out at 318 km/h, corners at about
+1.3 g, and stops from 100 km/h in about 35 m (pedal travel included).
+
+How the rear engine shows up:
+- **Traction**: 61% of the weight sits on the driven wheels, so it launches and
+  powers out of slow corners with little wheelspin.
+- **Steady-state understeer**: the light nose runs out of grip first at a constant throttle.
+- **Lift-off and trail-brake oversteer**: tire grip grows less than the load on it
+  (load sensitivity, on for this car), so when weight comes off the heavy tail it
+  lets go quickly. Lift or brake mid-corner and the car rotates; overdo it and the
+  tail swings like a pendulum (high yaw inertia from the engine's overhang).
+- **Downforce** grows with speed squared, so fast corners have more grip than slow ones.
+- **Stiffer body**: it pitches and rolls less than the other two cars.
 
 ## Corner boards
 
@@ -59,15 +89,15 @@ the track's curvature, so boards follow any change to the layout.
 
 ## Ghost car
 
-Your best lap for each drivetrain is replayed as a see-through ghost car, so you
+Your best lap for each car is replayed as a see-through ghost car, so you
 can race it. It starts when you cross the line and is saved in the browser along
 with your best time. Toggle it with **G** or the Ghost button.
 
-An amber ghost replays Claude's run on the same layout and drivetrain; its time
+An amber ghost replays Claude's run on the same layout and car; its time
 shows as **Claude** in the HUD. `scripts/autodrive.mjs` drove it with the game's
 own physics at 60 fps, using only what a player has (steering wheel, on/off
 pedals) and never leaving the road. Re-run it after physics or track changes:
-`node scripts/autodrive.mjs circuit both` (or `stage`).
+`node scripts/autodrive.mjs circuit all` (or `stage`; `both` = FWD and RWD, or name one car).
 
 ## Cockpit view
 
@@ -104,7 +134,7 @@ With the keyboard, holding A/D turns the wheel gradually; let go and it returns 
 | S / ↓          | Brake / reverse |
 | A / D, ← / →   | Steer           |
 | Space          | Handbrake       |
-| T              | Switch FWD/RWD  |
+| T              | Switch car (FWD/RWD/GT3) |
 | G              | Toggle ghost    |
 | C              | Chase / cockpit view |
 | R              | Reset           |
@@ -123,6 +153,7 @@ With the keyboard, holding A/D turns the wheel gradually; let go and it returns 
 - `src/gl.js` — shader/mesh helpers
 - `src/geometry.js` — cube, torus (ground grid is drawn in the shader)
 - `src/terrain.js` — rolling hills, levelled beside the start straight for the paddock
+- `src/bodies.js` — lofted car bodies (the GT3), built from the physics dimensions
 - `src/math.js` — mat4 helpers
 - `src/input.js` — keyboard and touch controls
 - `scripts/autodrive.mjs` — self-driving bot that sets Claude's ghost runs

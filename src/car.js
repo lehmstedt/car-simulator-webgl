@@ -12,6 +12,10 @@
 // - Gravity pulls the car back uphill and speeds it up downhill, and sideways on cambers.
 // - Grade shifts weight: uphill loads the rear, downhill (worse: braking downhill) loads the front.
 // - Crests unload all four tires (less grip at the top), dips press them down (more grip).
+//
+// Per car (VARIANTS): aero downforce (grip grows with speed squared) and tire
+// load sensitivity (a tire's grip grows less than its load), which makes a
+// tail-heavy car like the 911 let go at the rear when weight comes off it.
 
 const G = 9.81;
 
@@ -54,12 +58,94 @@ const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 // Sign that fades to 0 near zero, so forces don't chatter at standstill.
 const softSign = (v, eps = 0.3) => clamp(v / eps, -1, 1);
 
+// Shared by every car unless its variant overrides it.
+const BASE = {
+  mass: 1200,          // kg
+  yawInertia: 2100,    // kg m^2
+  cgHeight: 0.45,      // m, sets how much weight shifts under accel/brake
+  maxSteer: 0.6,       // rad at standstill
+  maxDrive: 5500,      // N at the tires (low speed)
+  power: 140000,       // W at the tires, caps drive force at speed
+  reverseForce: 4000,  // N
+  maxReverse: 8,       // m/s
+  brakeForce: 10000,   // N total
+  brakeFront: 0.8,     // brake bias
+  drag: 1.1,           // N per (m/s)^2, top speed ~50 m/s
+  rolling: 150,        // N
+  tractionControl: 0.85, // drive never uses more than this share of axle grip
+  downforce: 0,        // N per (m/s)^2
+  aeroFront: 0.5,      // share of the downforce on the front axle
+  // Tire load sensitivity: a tire pressed harder grips less per newton,
+  // mu * (load / ref)^-loadSens, with ref the load per tire that its width is
+  // made for (N per mm of tread). 0 = off.
+  loadSens: 0, refLoadPerMm: 13,
+  // Visual body lean per unit of accel (pitch) and of lateral accel (roll).
+  pitchGain: 0.006, rollGain: 0.005,
+  // Geometry (m), shared by physics (kerb hits, skids) and the drawn car.
+  trackFront: 1.9, trackRear: 1.9,
+  wheelRadiusFront: 0.35, wheelRadiusRear: 0.35,
+  tireWidthFront: 0.3, tireWidthRear: 0.3,
+  length: 4.2, width: 1.8,
+  overhangFront: null, // m ahead of the front axle; null = centered between the bumpers
+  body: 'box',
+};
+
 export const VARIANTS = {
   // Front-heavy (60% front), front wheels drive and steer.
   fwd: { label: 'FWD', drive: 'front', cgToFront: 1.04, cgToRear: 1.56, muFront: 1.06, muRear: 1.2 },
   // Near 50/50, rear wheels drive.
   rwd: { label: 'RWD', drive: 'rear', cgToFront: 1.35, cgToRear: 1.25, muFront: 1.0, muRear: 1.16 },
+  // Porsche 911 GT3 (992, 2021, PDK), from published data: 4573 x 1852 x 1279 mm,
+  // 2457 mm wheelbase, 1600 / 1553 mm track, 1435 kg DIN (+75 kg driver),
+  // ~39 / 61 front / rear (the flat-six hangs behind the rear axle),
+  // 375 kW (510 PS), Cd 0.34, 255/35 ZR20 front and 315/30 ZR21 rear Cup 2 tires,
+  // 144 kg of downforce at 200 km/h with the wing in its track setting.
+  // Claimed 0-100 km/h 3.4 s, top speed 318 km/h.
+  gt3: {
+    label: 'GT3', drive: 'rear', body: 'gt3',
+    mass: 1510,
+    cgToFront: 0.61 * 2.457, cgToRear: 0.39 * 2.457,
+    // Iz ~ m * a * b * 1.1: the engine mass sits far out behind the rear axle,
+    // so the car is slower to start and to stop rotating (the pendulum).
+    yawInertia: 2400,
+    cgHeight: 0.43,
+    maxDrive: 14000,     // 470 Nm through 1st gear is more than the rears can take
+    power: 340000,       // 375 kW at the crank, ~10% lost on the way to the tires
+    brakeForce: 20000,   // ~1.35 g: 100-0 km/h in ~32 m, about what the tires hold
+    brakeFront: 0.62,    // the light nose takes less of the braking than a front-engined car
+    // 0.5 rho Cd A with A ~2.0 m^2 gives 0.41; the wing in its track setting
+    // adds drag, and 0.47 lands the top speed on the claimed 318 km/h.
+    drag: 0.47,
+    rolling: 180,
+    tractionControl: 0.92, // launch and traction control let the rears work harder
+    downforce: (144 * 9.81) / (200 / 3.6) ** 2,
+    aeroFront: 0.4,
+    // Cup 2 tires grip more than the road cars' (~1.3 g). The wider rears get a
+    // little more friction, but carry 61% of the weight, so at the limit the
+    // heavy tail is the first to let go, and lifting off makes it worse.
+    muFront: 1.3, muRear: 1.36, loadSens: 0.15,
+    pitchGain: 0.004, rollGain: 0.003, // stiff springs and anti-roll bars
+    trackFront: 1.6, trackRear: 1.553,
+    wheelRadiusFront: 0.343, wheelRadiusRear: 0.361, // 20" and 21" with their sidewalls
+    tireWidthFront: 0.255, tireWidthRear: 0.315,
+    length: 4.573, width: 1.852, overhangFront: 0.99,
+  },
 };
+
+// Wheel centers in the car frame, as [side (+ right), ahead of the CG (m), front?, radius, width].
+export function wheelLayout(v) {
+  return [
+    [-v.trackFront / 2, v.cgToFront, true, v.wheelRadiusFront, v.tireWidthFront],
+    [v.trackFront / 2, v.cgToFront, true, v.wheelRadiusFront, v.tireWidthFront],
+    [-v.trackRear / 2, -v.cgToRear, false, v.wheelRadiusRear, v.tireWidthRear],
+    [v.trackRear / 2, -v.cgToRear, false, v.wheelRadiusRear, v.tireWidthRear],
+  ];
+}
+export function variantSpec(name) {
+  const v = { ...BASE, ...VARIANTS[name] };
+  v.overhangFront ??= (v.length - v.cgToFront - v.cgToRear) / 2;
+  return v;
+}
 
 // Off the asphalt: grip multiplier, extra linear drag (per second) and rolling
 // resistance (m/s^2). Sand traps bog the car down hard: it crawls out at ~10 km/h.
@@ -84,19 +170,6 @@ const STEP = 1 / 240; // fixed physics step; tire forces are stiff
 
 export class Car {
   constructor(variant = 'rwd') {
-    this.mass = 1200;          // kg
-    this.yawInertia = 2100;    // kg m^2
-    this.cgHeight = 0.45;      // m, sets how much weight shifts under accel/brake
-    this.maxSteer = 0.6;       // rad at standstill
-    this.maxDrive = 5500;      // N at the tires (low speed)
-    this.power = 140000;       // W, caps drive force at speed
-    this.reverseForce = 4000;  // N
-    this.maxReverse = 8;       // m/s
-    this.brakeForce = 10000;   // N total
-    this.brakeFront = 0.8;     // brake bias
-    this.drag = 1.1;           // N per (m/s)^2, top speed ~50 m/s
-    this.rolling = 150;        // N
-    this.tractionControl = 0.85; // drive never uses more than this share of axle grip
     this.pedalRate = 3;        // pedals reach full travel in ~1/3 s
     this.setVariant(variant);
     this.reset();
@@ -104,8 +177,12 @@ export class Car {
 
   setVariant(name) {
     this.variant = name;
-    Object.assign(this, VARIANTS[name]);
+    Object.assign(this, variantSpec(name));
     this.wheelBase = this.cgToFront + this.cgToRear;
+    this.wheels = wheelLayout(this);
+    // Load per tire each axle's tread width is made for.
+    this.refLoadFront = this.refLoadPerMm * this.tireWidthFront * 1000;
+    this.refLoadRear = this.refLoadPerMm * this.tireWidthRear * 1000;
   }
 
   reset(x = 0, z = 0, heading = 0) {
@@ -193,8 +270,8 @@ export class Car {
 
   // Forces from one axle's tires, in that axle's wheel frame (x along the wheel).
   // `tire` is that axle's state in this.tires; `h` the time step.
-  axle(u, w, load, mu, fxDemand, locked, tire, h) {
-    const max = mu * load * tempGrip(tire.temp);
+  axle(u, w, load, mu, fxDemand, locked, tire, h, ref) {
+    const max = mu * load * tempGrip(tire.temp) * this.loadGrip(load, ref);
     const slip = Math.atan2(w, Math.max(Math.abs(u), 3));
     const ease = (target) => {
       const tau = target < tire.grip ? GRIP_LOSS_TIME : GRIP_GAIN_TIME;
@@ -233,6 +310,18 @@ export class Car {
     return { fx, fy, slip };
   }
 
+  // Friction multiplier from load sensitivity, for an axle carrying `load` (two tires).
+  loadGrip(load, ref) {
+    return this.loadSens ? Math.pow(Math.max(load, 1) / (2 * ref), -this.loadSens) : 1;
+  }
+
+  // Peak force an axle's tires can give on asphalt (N).
+  axleGrip(axle, load) {
+    const front = axle === 'front';
+    return (front ? this.muFront : this.muRear) * load * tempGrip(this.tires[axle].temp)
+      * this.loadGrip(load, front ? this.refLoadFront : this.refLoadRear);
+  }
+
   // `scrub`: power lost sliding (W); `force`: total tire force (N).
   heatTire(tire, scrub, force, load, u, h) {
     const speed = Math.abs(u);
@@ -266,8 +355,10 @@ export class Car {
     // downhill load the front.
     const transfer = (m * (this.accel + G * sinPitch) * this.cgHeight) / L;
     const minLoad = 0.05 * m * G;
-    const loadF = Math.max(minLoad, (normal * b) / L - transfer);
-    const loadR = Math.max(minLoad, (normal * a) / L + transfer);
+    // Aero downforce grows with the square of speed, split by the wing's balance.
+    const aero = this.downforce * vx * vx;
+    const loadF = Math.max(minLoad, (normal * b) / L - transfer + aero * this.aeroFront);
+    const loadR = Math.max(minLoad, (normal * a) / L + transfer + aero * (1 - this.aeroFront));
     this.loadFront = loadF;
     this.loadRear = loadR;
     const grip = surf.grip;
@@ -289,14 +380,14 @@ export class Car {
     // Light traction control: forward drive is capped below the driven axle's
     // grip, so full throttle unsettles the car but leaves some grip for cornering.
     if (drive > 0) {
-      const driven = fwd ? this.muFront * loadF * tempGrip(this.tires.front.temp) : this.muRear * loadR * tempGrip(this.tires.rear.temp);
+      const driven = fwd ? this.axleGrip('front', loadF) : this.axleGrip('rear', loadR);
       drive = Math.min(drive, this.tractionControl * driven * grip);
     }
     const demandF = (fwd ? drive : 0) - brake * this.brakeFront * softSign(uF);
     const demandR = (fwd ? 0 : drive) - brake * (1 - this.brakeFront) * softSign(vx);
     const kF = this.onKerb.front ? KERB_GRIP : 1, kR = this.onKerb.rear ? KERB_GRIP : 1;
-    const front = this.axle(uF, wF, loadF, this.muFront * grip * kF, demandF, false, this.tires.front, h);
-    const rear = this.axle(vx, vyR, loadR, this.muRear * grip * kR, demandR, !!c.handbrake, this.tires.rear, h);
+    const front = this.axle(uF, wF, loadF, this.muFront * grip * kF, demandF, false, this.tires.front, h, this.refLoadFront);
+    const rear = this.axle(vx, vyR, loadR, this.muRear * grip * kR, demandR, !!c.handbrake, this.tires.rear, h, this.refLoadRear);
 
     // Into the body frame.
     const fxF = front.fx * cs - front.fy * sn;
@@ -307,7 +398,7 @@ export class Car {
     this._felt = {
       long: (fxF + rear.fx) / (m * G),
       lat: (fyF + rear.fy) / (m * G),
-      limit: ((this.muFront * loadF * tempGrip(this.tires.front.temp) + this.muRear * loadR * tempGrip(this.tires.rear.temp)) * grip) / (m * G),
+      limit: ((this.axleGrip('front', loadF) + this.axleGrip('rear', loadR)) * grip) / (m * G),
     };
 
     // Resistance.

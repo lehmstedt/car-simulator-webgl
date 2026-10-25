@@ -46,3 +46,21 @@ export function torus(R, r, segs = 32, sides = 8) {
   }
   return { positions, normals };
 }
+
+// Closed cylinder along x (a wheel): diameter 1, width 1, centered at origin.
+export function cylinder(segs = 24) {
+  const positions = [], normals = [];
+  const p = (i) => { const a = (i / segs) * Math.PI * 2; return [Math.cos(a) * 0.5, Math.sin(a) * 0.5]; };
+  for (let i = 0; i < segs; i++) {
+    const [y0, z0] = p(i), [y1, z1] = p(i + 1);
+    const n0 = [0, y0 * 2, z0 * 2], n1 = [0, y1 * 2, z1 * 2];
+    // Tread, wound counter-clockwise seen from outside.
+    for (const [v, n] of [[[-.5, y0, z0], n0], [[.5, y1, z1], n1], [[.5, y0, z0], n0], [[-.5, y0, z0], n0], [[-.5, y1, z1], n1], [[.5, y1, z1], n1]]) {
+      positions.push(...v); normals.push(...n);
+    }
+    // Side walls.
+    positions.push(.5, 0, 0, .5, y0, z0, .5, y1, z1, -.5, 0, 0, -.5, y1, z1, -.5, y0, z0);
+    normals.push(1, 0, 0, 1, 0, 0, 1, 0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0);
+  }
+  return { positions, normals };
+}
