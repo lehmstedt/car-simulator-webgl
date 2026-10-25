@@ -15,11 +15,13 @@
 const LANDS = {
   circuit: { hills: 200, flat: 250, valley: 0, level: { x0: -55, x1: 60, z0: 118, z1: 172, ref: 121, blend: 40 } },
   stage: { hills: 470, flat: 530, valley: 7, level: null },
+  // Île Notre-Dame is flat (about 13 m above sea level all over).
+  montreal: { hills: 0, flat: 1300, valley: 0, level: null, allFlat: true },
 };
 let land = LANDS.circuit;
 let bumps = null; // (x, z) -> extra height (m, >= 0) on the road, or null
 
-// Picks the ground for a layout ('circuit' or 'stage'); call before building anything on it.
+// Picks the ground for a layout ('circuit', 'stage' or 'montreal'); call before building anything on it.
 export function setTerrain(kind) {
   land = LANDS[kind];
   bumps = null;
@@ -48,6 +50,7 @@ export function groundHeight(x, z) {
 }
 
 function hills(x, z) {
+  if (land.allFlat) return 0;
   const r = Math.max(Math.abs(x), Math.abs(z));
   if (r >= land.flat) return 0;
   const t = Math.max(0, (r - land.hills) / (land.flat - land.hills));

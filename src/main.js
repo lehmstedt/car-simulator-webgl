@@ -62,10 +62,13 @@ const uSun = gl.getUniformLocation(program, 'uSun');
 const SUN = (() => { const l = Math.hypot(...SUN_DIR); return SUN_DIR.map((v) => v / l); })();
 const sky = new Sky(gl);
 
-// Everything that depends on the layout ('circuit' or 'stage'): the ground,
-// the road, signs, trees and buildings. Rebuilt when the layout changes.
+// Everything that depends on the layout ('circuit', 'stage' or 'montreal'): the
+// ground, the road, signs, trees and buildings. Rebuilt when the layout changes.
+// M / the Track button cycles through them in this order.
+const LAYOUT_ORDER = ['circuit', 'stage', 'montreal'];
+const LAYOUT_NAMES = { circuit: 'Circuit', stage: 'Stage', montreal: 'Montréal' };
 let layout = 'circuit';
-try { layout = localStorage.getItem('layout') === 'stage' ? 'stage' : 'circuit'; } catch {}
+try { const v = localStorage.getItem('layout'); if (LAYOUT_ORDER.includes(v)) layout = v; } catch {}
 let world = null, track = null;
 
 function buildWorld(kind) {
@@ -74,7 +77,7 @@ function buildWorld(kind) {
     gl.deleteTexture(world.signs.texture);
   }
   setTerrain(kind);
-  const circuit = kind === 'circuit';
+  const circuit = kind === 'circuit', stage = kind === 'stage';
   const paddockAt = circuit ? onPaddock : () => false;
   const t = buildTrack(LAYOUTS[kind], (x, z) => paddockAt(x, z, 4));
   const paddock = circuit ? buildPaddock() : { apron: null, boxes: [], cars: [] };
@@ -85,20 +88,21 @@ function buildWorld(kind) {
   // Trees: off the road and the sand, away from the signs and the paddock.
   const trees = buildTrees((x, z) => {
     const at = t.locate(x, z);
-    if (at.distance < Math.max(t.halfWidth + (circuit ? 8 : t.edgeWidth + 4), at.sandEdge + 4)) return false;
+    if (at.distance < Math.max(t.halfWidth + (stage ? t.edgeWidth + 4 : 8), at.sandEdge + 4)) return false;
     if (paddockAt(x, z, 10)) return false;
     return t.signs.every((s) => Math.hypot(s.x - x, s.z - z) > 6);
   }, terrainHeight, circuit ? null : { points: t.points, tangents: t.tangents });
   const boxes = [
     ...paddock.boxes.map(({ c, s, color, mat }) => ({ color, mat, model: basis(c, [1, 0, 0], [0, 1, 0], [0, 0, 1], ...s) })),
-    ...(circuit ? [] : buildGates(t)).map(({ c, axes, s, color, mat }) => ({ color, mat, model: basis(c, ...axes, ...s) })),
+    ...(stage ? buildGates(t) : []).map(({ c, axes, s, color, mat }) => ({ color, mat, model: basis(c, ...axes, ...s) })),
   ];
   return {
     kind,
     track: t,
     onPaddock: paddockAt,
     // The stage covers more ground: a wider hill mesh, in slightly bigger cells.
-    ground: upload(circuit ? terrainMesh(600, 8) : terrainMesh(800, 11)),
+    // Montreal is ~2 km long but flat, so a few big cells do.
+    ground: upload(circuit ? terrainMesh(600, 8) : stage ? terrainMesh(800, 11) : terrainMesh(1600, 100)),
     apron: paddock.apron && upload(paddock.apron),
     layers: t.layers.map((l) => ({ ...l, mesh: upload(l.mesh) })),
     signs,
@@ -194,7 +198,7 @@ function setLayout(kind) {
   ghost = new Ghost(kind);
   lap.best = Object.fromEntries(Object.keys(VARIANTS).map((v) => [v, ghost.best(v)]));
   lap.last = null;
-  const b = layoutBtn?.querySelector('b'); if (b) b.textContent = kind === 'stage' ? 'Stage' : 'Circuit';
+  const b = layoutBtn?.querySelector('b'); if (b) b.textContent = LAYOUT_NAMES[kind];
   if (lapLabelEl) lapLabelEl.textContent = kind === 'stage' ? 'Stage' : 'Lap';
 }
 setLayout(layout);
@@ -226,7 +230,7 @@ function resetRace() {
 resetRace();
 
 function switchLayout() {
-  setLayout(layout === 'stage' ? 'circuit' : 'stage');
+  setLayout(LAYOUT_ORDER[(LAYOUT_ORDER.indexOf(layout) + 1) % LAYOUT_ORDER.length]);
   resetRace();
 }
 

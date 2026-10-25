@@ -3,6 +3,7 @@
 // road surfaces sit a few cm above the ground.
 
 import { terrainHeight, terrainNormal, terrainSample, groundHeight, setRoadBumps } from './terrain.js';
+import { MONTREAL } from './montreal.js';
 
 export const LAYOUTS = {
   // Asphalt circuit: two hairpins (~10 m radius) and a few tight corners among
@@ -37,6 +38,16 @@ export const LAYOUTS = {
     halfWidth: 2.4, edge: 1.2, sand: false, surface: 'gravel', edgeSurface: 'dirt', bumps: true,
     start: 40, finish: 120, // m: start line from point A, finish line before the road ends at B
     colors: { road: [0.6, 0.53, 0.42] },
+  },
+  // Circuit Gilles-Villeneuve, Montreal: the real 4.36 km layout on the flat
+  // Île Notre-Dame, from open data (montreal.js). Clockwise: the Senna S, long
+  // bends down the island, the hairpin, the Casino straight and the final chicane.
+  montreal: {
+    closed: true,
+    control: MONTREAL,
+    step: 3, // m between samples: the control points are dense, so sample by distance
+    halfWidth: 6.5, edge: 1.8, sand: true, sausages: true, surface: 'road', edgeSurface: 'road',
+    colors: { road: [0.3, 0.31, 0.34] },
   },
 };
 
@@ -95,9 +106,9 @@ export function buildTrack(layout, avoid = () => false) {
   const n = CONTROL.length;
   const pts = [];
   if (closed) {
-    const per = SAMPLES / n;
     for (let i = 0; i < n; i++) {
       const p0 = CONTROL[(i - 1 + n) % n], p1 = CONTROL[i], p2 = CONTROL[(i + 1) % n], p3 = CONTROL[(i + 2) % n];
+      const per = layout.step ? Math.max(1, Math.round(Math.hypot(p2[0] - p1[0], p2[1] - p1[1]) / layout.step)) : SAMPLES / n;
       for (let j = 0; j < per; j++) pts.push(catmullRom(p0, p1, p2, p3, j / per));
     }
   } else {

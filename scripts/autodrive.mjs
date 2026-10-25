@@ -4,7 +4,7 @@
 // itself, then writes its best run to src/bot-lap.js, which the game replays
 // as Claude's ghost.
 //
-//   node scripts/autodrive.mjs [circuit|stage] [fwd|rwd|gt3|both|all] [iterations]
+//   node scripts/autodrive.mjs [circuit|stage|montreal] [fwd|rwd|gt3|both|all] [iterations]
 import { writeFileSync, readFileSync } from 'node:fs';
 import { Car, VARIANTS } from '../src/car.js';
 import { buildTrack, LAYOUTS } from '../src/track.js';

@@ -5,7 +5,7 @@
 const INTERVAL = 50;  // ms between recorded samples
 const STRIDE = 4;     // t, x, z, heading
 // New key when a layout changes: old laps aren't comparable.
-const KEYS = { circuit: 'ghost-hairpins', stage: 'ghost-stage-2' };
+const KEYS = { circuit: 'ghost-hairpins', stage: 'ghost-stage-2', montreal: 'ghost-montreal' };
 
 export class Ghost {
   constructor(layout = 'circuit') {
