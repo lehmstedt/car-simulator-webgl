@@ -103,11 +103,11 @@ function buildWorld(kind) {
   const roadside = city ? t.halfWidth + t.edgeWidth + 1.5 : t.halfWidth + (stage ? t.edgeWidth + 4 : 8);
   const trees = buildTrees((x, z) => {
     const at = t.locate(x, z);
-    if (at.distance < Math.max(roadside, at.sandEdge + 4)) return false;
+    if (at.distance < Math.max(at.rail ? at.rail + 1.2 : roadside, at.sandEdge + 4)) return false;
     if (paddockAt(x, z, 10)) return false;
     return t.signs.every((s) => Math.hypot(s.x - x, s.z - z) > 6);
   }, terrainHeight, circuit || city ? null : { points: t.points, tangents: t.tangents },
-  ring ? { count: 6000, tries: 70000, chunk: 500 } : city ? { spots: city.treeSpots(t.points, t.halfWidth + t.edgeWidth + 2.4) } : {});
+  ring ? { count: 20000, tries: 400000, chunk: 400, near: 7.5, spread: 70, thick: true } : city ? { spots: city.treeSpots(t.points, t.halfWidth + t.edgeWidth + 2.4) } : {});
   const boxes = [
     ...paddock.boxes.map(({ c, s, color, mat }) => ({ color, mat, model: basis(c, [1, 0, 0], [0, 1, 0], [0, 0, 1], ...s) })),
     ...(stage ? buildGates(t) : []).map(({ c, axes, s, color, mat }) => ({ color, mat, model: basis(c, ...axes, ...s) })),
