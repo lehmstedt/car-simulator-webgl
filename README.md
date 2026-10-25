@@ -1,7 +1,7 @@
 # Car Simulator (WebGL)
 
 Barebone car simulator in raw WebGL2 — no frameworks, no build step.
-Drive laps of a 1 km circuit; leaving the road onto the grass slows you down hard.
+Drive laps of a 1 km circuit; the grass is slippery and slow (about 50 km/h max) but you can drive back on.
 
 ## Handling
 
@@ -12,6 +12,7 @@ The car uses tire forces, so rough driving gets punished:
 - **Understeer** (front slides, car runs wide) and **oversteer** (rear slides, car
   rotates) are shown in the HUD. Sliding wheels turn orange and leave skid marks.
 - **Lifting off or braking mid-corner** shifts weight forward and lightens the rear.
+- A light traction control stops full throttle from using all the grip of the driven wheels.
 - **Two drivetrains**, switched with **T** or the FWD/RWD button (best laps kept per car):
   - **FWD** — front-heavy, front wheels drive. Throttle in a corner makes it push wide.
   - **RWD** — balanced, rear wheels drive. Throttle in a slow corner kicks the tail out.

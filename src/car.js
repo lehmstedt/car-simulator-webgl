@@ -10,10 +10,10 @@
 
 const G = 9.81;
 
-// Tire curve (simplified Pacejka): peaks near 7 deg of slip, then drops to
-// about 80% of peak grip when fully sliding.
-const B = 14, C = 1.5;
-export const PEAK_SLIP = Math.tan(Math.PI / (2 * C)) / B; // ~0.124 rad
+// Tire curve (simplified Pacejka): peaks near 8 deg of slip, then drops to
+// about 90% of peak grip when fully sliding.
+const B = 17, C = 1.3;
+export const PEAK_SLIP = Math.tan(Math.PI / (2 * C)) / B; // ~0.156 rad
 const tireCurve = (alpha) => Math.sin(C * Math.atan(B * alpha));
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -22,9 +22,9 @@ const softSign = (v, eps = 0.3) => clamp(v / eps, -1, 1);
 
 export const VARIANTS = {
   // Front-heavy (60% front), front wheels drive and steer.
-  fwd: { label: 'FWD', drive: 'front', cgToFront: 1.04, cgToRear: 1.56, muFront: 1.0, muRear: 1.1 },
+  fwd: { label: 'FWD', drive: 'front', cgToFront: 1.04, cgToRear: 1.56, muFront: 1.06, muRear: 1.2 },
   // Near 50/50, rear wheels drive.
-  rwd: { label: 'RWD', drive: 'rear', cgToFront: 1.35, cgToRear: 1.25, muFront: 1.0, muRear: 1.08 },
+  rwd: { label: 'RWD', drive: 'rear', cgToFront: 1.35, cgToRear: 1.25, muFront: 1.0, muRear: 1.16 },
 };
 
 const STEP = 1 / 240; // fixed physics step; tire forces are stiff
@@ -32,8 +32,8 @@ const STEP = 1 / 240; // fixed physics step; tire forces are stiff
 export class Car {
   constructor(variant = 'rwd') {
     this.mass = 1200;          // kg
-    this.yawInertia = 1800;    // kg m^2
-    this.cgHeight = 0.5;       // m, sets how much weight shifts under accel/brake
+    this.yawInertia = 2100;    // kg m^2
+    this.cgHeight = 0.45;      // m, sets how much weight shifts under accel/brake
     this.maxSteer = 0.6;       // rad at standstill
     this.maxDrive = 5500;      // N at the tires (low speed)
     this.power = 140000;       // W, caps drive force at speed
@@ -43,9 +43,10 @@ export class Car {
     this.brakeFront = 0.8;     // brake bias
     this.drag = 1.1;           // N per (m/s)^2, top speed ~50 m/s
     this.rolling = 150;        // N
-    this.grassGrip = 0.6;      // grip multiplier on grass
-    this.grassDrag = 0.7;      // extra linear drag per second on grass
-    this.grassRolling = 3.0;   // m/s^2
+    this.tractionControl = 0.85; // drive never uses more than this share of axle grip
+    this.grassGrip = 0.75;     // grip multiplier on grass
+    this.grassDrag = 0.2;      // extra linear drag per second on grass (top ~40 km/h)
+    this.grassRolling = 0.8;   // m/s^2
     this.pedalRate = 3;        // pedals reach full travel in ~1/3 s
     this.setVariant(variant);
     this.reset();
@@ -82,7 +83,7 @@ export class Car {
     // The wheel input is already gradual (see input.js); map it to road-wheel
     // angle. Lock shrinks only a little with speed, so cranking the wheel at
     // speed still overloads the tires: that's the punishment for rough steering.
-    const lock = this.maxSteer / (1 + Math.abs(this.vx) * 0.03);
+    const lock = this.maxSteer / (1 + Math.abs(this.vx) * 0.05);
     this.steer = c.steer * lock;
 
     // Pedals ramp in (keys are on/off) but release twice as fast.
@@ -117,7 +118,7 @@ export class Car {
       spinning = true;
     }
     // Friction circle: whatever grip drive/brake uses is gone from cornering.
-    const latMax = spinning ? 0.35 * max : max * Math.sqrt(Math.max(0.12, 1 - (fx / max) ** 2));
+    const latMax = spinning ? 0.5 * max : max * Math.sqrt(Math.max(0.25, 1 - (fx / max) ** 2));
     const fy = -latMax * tireCurve(slip);
     return { fx, fy, slip, sliding: spinning || Math.abs(slip) > PEAK_SLIP * 1.15 };
   }
@@ -147,6 +148,12 @@ export class Car {
     const uF = vx * cs + vyF * sn, wF = -vx * sn + vyF * cs;
 
     const fwd = this.drive === 'front';
+    // Light traction control: forward drive is capped below the driven axle's
+    // grip, so full throttle unsettles the car but leaves some grip for cornering.
+    if (drive > 0) {
+      const driven = fwd ? this.muFront * loadF : this.muRear * loadR;
+      drive = Math.min(drive, this.tractionControl * driven * grip);
+    }
     const demandF = (fwd ? drive : 0) - brake * this.brakeFront * softSign(uF);
     const demandR = (fwd ? 0 : drive) - brake * (1 - this.brakeFront) * softSign(vx);
     const front = this.axle(uF, wF, loadF, this.muFront * grip, demandF, false);
