@@ -64,6 +64,12 @@ export const SURFACES = {
   sand: { grip: 0.6, drag: 0.35, rolling: 1.6 },
 };
 
+// Sausage kerbs: a wheel that hits one skips off it, so its axle's tires lose
+// grip for a moment and the car is slowed and tugged toward that side. While
+// riding on top, that axle has less grip.
+const KERB_GRIP = 0.7;      // grip multiplier for an axle on a sausage
+const KERB_SPEED = 25;      // m/s at which a hit is at full strength
+
 const STEP = 1 / 240; // fixed physics step; tire forces are stiff
 
 export class Car {
@@ -118,11 +124,28 @@ export class Car {
     this.tires = { front: tire(), rear: tire() };
     this.gLong = this.gLat = 0; // tire acceleration in g (forward, left), smoothed
     this.gripLimit = 1;     // what the tires can give in total, in g
+    this.onKerb = { front: false, rear: false };
     this._felt = null;
     this._sinceUnder = this._sinceOver = 1;
   }
 
   get speed() { return this.vx; }
+
+  // Wheels on a sausage kerb right now, as [{ front, side, hit }]: side is -1
+  // left / +1 right, `hit` marks a wheel that just climbed onto one.
+  kerbs(wheels) {
+    const s = clamp(Math.abs(this.vx) / KERB_SPEED, 0, 1), dir = Math.sign(this.vx);
+    this.onKerb = { front: false, rear: false };
+    for (const w of wheels) {
+      const axle = w.front ? 'front' : 'rear';
+      this.onKerb[axle] = true;
+      if (!w.hit) continue;
+      const tire = this.tires[axle];
+      tire.grip = Math.min(tire.grip, 1 - 0.5 * s);
+      this.vx -= dir * 0.5 * s;
+      this.yawRate -= dir * w.side * 0.12 * s; // that side is held back
+    }
+  }
 
   // `surface` is a SURFACES key; `ground` is terrainSample() at the car's position.
   update(dt, c, surface = 'road', ground = null) {
@@ -259,8 +282,9 @@ export class Car {
     }
     const demandF = (fwd ? drive : 0) - brake * this.brakeFront * softSign(uF);
     const demandR = (fwd ? 0 : drive) - brake * (1 - this.brakeFront) * softSign(vx);
-    const front = this.axle(uF, wF, loadF, this.muFront * grip, demandF, false, this.tires.front, h);
-    const rear = this.axle(vx, vyR, loadR, this.muRear * grip, demandR, !!c.handbrake, this.tires.rear, h);
+    const kF = this.onKerb.front ? KERB_GRIP : 1, kR = this.onKerb.rear ? KERB_GRIP : 1;
+    const front = this.axle(uF, wF, loadF, this.muFront * grip * kF, demandF, false, this.tires.front, h);
+    const rear = this.axle(vx, vyR, loadR, this.muRear * grip * kR, demandR, !!c.handbrake, this.tires.rear, h);
 
     // Into the body frame.
     const fxF = front.fx * cs - front.fy * sn;

@@ -202,6 +202,10 @@ function toggleView() {
 }
 let glance = 0; // cockpit head turn into corners (rad), smoothed
 const tilt = { pitch: 0, roll: 0 }; // body lean from weight transfer (visual only)
+// Bounce over sausage kerbs: the body springs up, pitches and rolls with the
+// wheels it rides on (visual only), and the wheels lift onto the humps.
+const kerb = { lift: 0, vlift: 0, pitch: 0, vpitch: 0, roll: 0, vroll: 0, wheels: [0, 0, 0, 0] };
+let lean = { pitch: 0, roll: 0, lift: 0, wheels: kerb.wheels }; // tilt + kerb, used to draw the car
 // Laps: the track is split into 4 sectors; a lap counts only after visiting all of them.
 // On the stage the clock starts at the start line and stops at the finish, once
 // the three middle quarters were driven. Best times are kept per layout and
@@ -234,6 +238,7 @@ function resetRace() {
   cam.z = car.z + Math.cos(car.heading) * 9;
   cam.y = terrainHeight(car.x, car.z) + 3.5;
   tilt.pitch = tilt.roll = glance = 0;
+  Object.assign(kerb, { lift: 0, vlift: 0, pitch: 0, vpitch: 0, roll: 0, vroll: 0, wheels: [0, 0, 0, 0] });
   lap.start = null;
   lap.done = false;
   lap.sector = 3;
@@ -357,25 +362,60 @@ const GHOST_COLORS = { body: [0.75, 0.9, 1], cabin: [0.55, 0.7, 0.85], wheel: [0
 // throttle, rolls toward the outside of a turn.
 function bodyFrame(F, lean) {
   let { right, up, back } = F;
+  const o = F.o.map((v, i) => v + up[i] * (lean.lift ?? 0));
   up = rotate(up, right, lean.pitch); back = rotate(back, right, lean.pitch);
   up = rotate(up, back, lean.roll); right = rotate(right, back, lean.roll);
-  return { o: F.o, right, up, back };
+  return { o, right, up, back };
 }
 
-function drawCar(pose = car, colors = CAR_COLORS, alpha = 1, lean = tilt, cabin = true) {
+// Wheels on sausage kerbs: feeds the car's grip and kicks the body's bounce.
+function updateKerbs(dt) {
+  const on = [];
+  const hs = wheelPositions().map((w, i) => {
+    const h = track.sausageHeight(w.x, w.z);
+    if (h > 0) on.push({ front: WHEELS[i][2], side: WHEELS[i][0], hit: kerb.wheels[i] === 0 });
+    return h;
+  });
+  const s = Math.min(1, Math.abs(car.vx) / 25);
+  for (const w of on) {
+    if (!w.hit) continue;
+    kerb.vlift += 0.9 * s;                                   // thump up
+    kerb.vroll += w.side * 1.6 * s;                          // and toward the other side
+    kerb.vpitch += (w.front ? 1 : -1) * 0.8 * s;
+  }
+  car.kerbs(on);
+  kerb.wheels = hs;
+  // Spring-damper toward resting on the wheels: ~3 Hz, well damped.
+  const target = {
+    lift: (hs[0] + hs[1] + hs[2] + hs[3]) / 4,
+    roll: (hs[1] + hs[3] - hs[0] - hs[2]) / (2 * 1.9),
+    pitch: (hs[0] + hs[1] - hs[2] - hs[3]) / (2 * 2.6),
+  };
+  const n = Math.ceil(dt / 0.005), h = dt / n;
+  for (let k = 0; k < n; k++) {
+    for (const q of ['lift', 'roll', 'pitch']) {
+      const v = 'v' + q;
+      kerb[v] += (400 * (target[q] - kerb[q]) - 16 * kerb[v]) * h;
+      kerb[q] += kerb[v] * h;
+    }
+  }
+}
+
+function drawCar(pose = car, colors = CAR_COLORS, alpha = 1, lean = { pitch: 0, roll: 0 }, cabin = true) {
   const F = carFrame(pose);
   const body = bodyFrame(F, lean);
   const { right, up, back } = body;
   draw(meshes.cube, basis(toWorld(body, 0, 0.6, 0), right, up, back, 1.8, 0.6, 4.2), colors.body, 0, alpha);
   if (cabin) draw(meshes.cube, basis(toWorld(body, 0, 1.15, 0.3), right, up, back, 1.5, 0.5, 2.0), colors.cabin, 0, alpha);
   // Wheels stay on the road frame and glow orange when past the grip peak.
-  for (const [side, fwd, front] of WHEELS) {
+  WHEELS.forEach(([side, fwd, front], i) => {
     const sliding = front ? pose.frontSliding : pose.rearSliding;
     const a = front ? pose.steer : 0;
     const r = rotate(F.right, F.up, a), b = rotate(F.back, F.up, a);
     const color = sliding ? [0.95, 0.55, 0.1] : colors.wheel;
-    draw(meshes.cube, basis(toWorld(F, side * 0.95, 0.35, -fwd), r, F.up, b, 0.3, 0.7, 0.7), color, 0, alpha);
-  }
+    const y = 0.35 + (lean.wheels?.[i] ?? 0);
+    draw(meshes.cube, basis(toWorld(F, side * 0.95, y, -fwd), r, F.up, b, 0.3, 0.7, 0.7), color, 0, alpha);
+  });
 }
 
 // Driver's seat, left-hand drive, in the body frame (x right, y up, z back).
@@ -398,7 +438,7 @@ function drawBeam(B, a, b, w, h, color) {
 
 // Dashboard, pillars, roof edge, mirror and a steering wheel that follows the input.
 function drawCockpit() {
-  const B = bodyFrame(carFrame(car), tilt);
+  const B = bodyFrame(carFrame(car), lean);
   const box = (x, y, z, sx, sy, sz, c) => draw(meshes.cube, basis(toWorld(B, x, y, z), B.right, B.up, B.back, sx, sy, sz), c);
   box(0, 0.905, -0.2, 1.56, 0.05, 1.3, TRIM);          // floor, hides the body's top
   box(0, 0.9, -0.8, 1.56, 0.16, 0.5, INTERIOR);        // dashboard
@@ -505,6 +545,7 @@ function frame(now) {
   else if (controls.reset) resetRace();
   const where = track.locate(car.x, car.z);
   const surface = where.onTrack ? track.surface : world.onPaddock(car.x, car.z) ? 'road' : where.sand ? 'sand' : 'grass';
+  updateKerbs(dt);
   car.update(dt, controls, surface, terrainSample(car.x, car.z));
   const after = track.locate(car.x, car.z);
   if (track.closed) updateLap(after.index, now);
@@ -516,6 +557,7 @@ function frame(now) {
   const kt = Math.min(1, dt * 6);
   tilt.pitch += (car.accel * 0.006 - tilt.pitch) * kt;
   tilt.roll += (-car.vx * car.yawRate * 0.005 - tilt.roll) * kt;
+  lean = { pitch: tilt.pitch + kerb.pitch, roll: tilt.roll + kerb.roll, lift: kerb.lift, wheels: kerb.wheels };
   const carY = terrainHeight(car.x, car.z);
 
   // Chase camera: lag behind the car, smoothed.
@@ -540,7 +582,7 @@ function frame(now) {
   if (cockpit) {
     // Eye rides the leaning body; it looks a touch down and glances into turns.
     glance += (Math.max(-0.25, Math.min(0.25, car.yawRate * 0.12)) - glance) * Math.min(1, dt * 3);
-    const B = bodyFrame(carFrame(car), tilt);
+    const B = bodyFrame(carFrame(car), lean);
     const eye = toWorld(B, ...EYE);
     const dir = rotate(rotate(B.back.map((v) => -v), B.right, -0.08), B.up, glance);
     viewMat = lookAt(eye, [0, 1, 2].map((i) => eye[i] + dir[i]), B.up);
@@ -584,7 +626,7 @@ function frame(now) {
   gl.uniform1i(uTextured, 0);
   for (const b of world.boxes) draw(meshes.cube, b.model, b.color);
   for (const p of world.cars) drawCar(p, p.colors, 1, { pitch: 0, roll: 0 });
-  drawCar(car, CAR_COLORS, 1, tilt, !cockpit);
+  drawCar(car, CAR_COLORS, 1, lean, !cockpit);
   if (cockpit) drawCockpit();
   drawGhost(now);
 

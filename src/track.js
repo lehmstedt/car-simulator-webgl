@@ -15,7 +15,7 @@ export const LAYOUTS = {
       [40, -115], [8, -70], [-10, -16], [-36, -12], [-52, -56], [-90, -110],
       [-140, -112], [-166, -70], [-165, 40], [-140, 90], [-95, 98], [-60, 120],
     ],
-    halfWidth: 7, edge: 2.4, sand: true, surface: 'road',
+    halfWidth: 7, edge: 2.4, sand: true, sausages: true, surface: 'road',
     colors: { road: [0.32, 0.33, 0.36] },
   },
   // Rally stage, A to B: a narrow gravel road through the woods, ~2.9 km. Fast
@@ -60,9 +60,18 @@ function catmullRom(p0, p1, p2, p3, t) {
 const SAND_FROM = 80;               // m: bends tighter than this radius get a trap
 const SAND_BEFORE = 10, SAND_AFTER = 45; // m of trap before / after each tight sample
 
+// Sausage kerbs: raised yellow humps just past the flat kerb on the inside of
+// tight corners, so cutting the apex costs grip and time.
+const SAUSAGE_RADIUS = 0.3, SAUSAGE_HEIGHT = 0.14; // m: half width across, height
+const SAUSAGE_GAP = 0.08;           // m between the flat kerb and the sausage
+const SAUSAGE_BEFORE = 5, SAUSAGE_AFTER = 8; // m of sausages before / after the apex
+const PIECE = 2, PIECE_GAP = 0.35;  // m: length of each piece, gap between them
+const PIECE_ROUND = 0.35;           // m over which each end rounds down
+
 // `avoid(x, z)` marks ground that must stay clear of sand (the paddock).
 export function buildTrack(layout, avoid = () => false) {
   const { control: CONTROL, closed, halfWidth: w, edge: CURB_WIDTH } = layout;
+  const SAUSAGE_CENTER = w + CURB_WIDTH + SAUSAGE_GAP + SAUSAGE_RADIUS; // m from the centerline
   const SIGN_OFFSET = w + CURB_WIDTH + 2.5; // m from the centerline
   const n = CONTROL.length;
   const pts = [];
@@ -224,6 +233,107 @@ export function buildTrack(layout, avoid = () => false) {
     return { positions, normals };
   }
 
+  // Sausage pieces, each a center line of points with its across direction
+  // (pointing away from the road), laid out by length along that line: on the
+  // inside of a hairpin it is much shorter than the road beside it.
+  const sausages = [];
+  for (const c of layout.sausages ? corners : []) {
+    let apex = c.entry;
+    for (let i = c.entry; i !== c.exit; i = next(i)) if (Math.abs(curv[i]) > Math.abs(curv[apex])) apex = i;
+    const side = c.right ? 1 : -1; // the inside
+    const at = (d) => {
+      const f = frameAt(d);
+      // Inside a very tight bend, pull in so the line never folds over the bend's center.
+      const off = Math.min(SAUSAGE_CENTER, 0.85 / Math.max(1e-6, Math.abs(f.curv)) - SAUSAGE_RADIUS);
+      const n = [f.n[0] * side, f.n[1] * side];
+      return { p: [f.p[0] + n[0] * off, f.p[1] + n[1] * off], n };
+    };
+    // Walk the sausage line both ways from the apex in small road steps.
+    const walk = (dir, len) => {
+      const out = [{ ...at(along[apex]), s: 0 }];
+      for (let d = along[apex], s = 0; s < len;) {
+        d += dir * 0.1;
+        const q = at(d), last = out[out.length - 1];
+        s += Math.hypot(q.p[0] - last.p[0], q.p[1] - last.p[1]);
+        out.push({ ...q, s: dir * s });
+      }
+      return out;
+    };
+    const line = [...walk(-1, SAUSAGE_BEFORE).reverse(), ...walk(1, SAUSAGE_AFTER).slice(1)];
+    const s0 = line[0].s, total = line[line.length - 1].s - s0;
+    const count = Math.floor((total + PIECE_GAP) / (PIECE + PIECE_GAP));
+    for (let k = 0; k < count; k++) {
+      const from = s0 + k * (PIECE + PIECE_GAP);
+      const ALONG = 10, pts = [];
+      let j = 0;
+      for (let a = 0; a <= ALONG; a++) {
+        const want = from + (PIECE * a) / ALONG;
+        while (j < line.length - 2 && line[j + 1].s < want) j++;
+        const A = line[j], B = line[j + 1], t = Math.max(0, Math.min(1, (want - A.s) / (B.s - A.s)));
+        const nx = A.n[0] + (B.n[0] - A.n[0]) * t, nz = A.n[1] + (B.n[1] - A.n[1]) * t, l = Math.hypot(nx, nz);
+        pts.push({ p: [A.p[0] + (B.p[0] - A.p[0]) * t, A.p[1] + (B.p[1] - A.p[1]) * t], n: [nx / l, nz / l], e: (PIECE * a) / ALONG });
+      }
+      const xs = pts.map((q) => q.p[0]), zs = pts.map((q) => q.p[1]), m = SAUSAGE_RADIUS + 0.1;
+      sausages.push({ pts, side, box: [Math.min(...xs) - m, Math.max(...xs) + m, Math.min(...zs) - m, Math.max(...zs) + m] });
+    }
+  }
+  // Point, right normal and curvature `d` meters along the road, between samples.
+  function frameAt(d) {
+    d = closed ? ((d % length) + length) % length : Math.max(0, Math.min(length, d));
+    let i = Math.max(0, along.findIndex((a) => a > d) - 1);
+    i = Math.min(i, segs - 1);
+    const k = (i + 1) % N, t = (d - along[i]) / Math.max(1e-6, along[i + 1] - along[i]);
+    const nx = nor[i][0] + (nor[k][0] - nor[i][0]) * t, nz = nor[i][1] + (nor[k][1] - nor[i][1]) * t, l = Math.hypot(nx, nz);
+    return { p: [pts[i][0] + (pts[k][0] - pts[i][0]) * t, pts[i][1] + (pts[k][1] - pts[i][1]) * t], n: [nx / l, nz / l], curv: curv[i] };
+  }
+  // A piece's cross-section `e` meters from its nearest end: a half round,
+  // scaled down toward each end so the piece rounds off.
+  const endScale = (e) => Math.sqrt(Math.max(0.02, 1 - Math.max(0, 1 - e / PIECE_ROUND) ** 2));
+  function sausageMesh() {
+    const positions = [], normals = [], ACROSS = 8;
+    for (const s of sausages) {
+      const rows = s.pts.map(({ p, n, e }) => {
+        const k = endScale(Math.min(e, PIECE - e)), row = [];
+        for (let c = 0; c <= ACROSS; c++) {
+          const th = Math.PI * (c / ACROSS);          // around the half round, road side first
+          const u = -Math.cos(th) * SAUSAGE_RADIUS * k, h = Math.sin(th) * SAUSAGE_HEIGHT * k;
+          const x = p[0] + n[0] * u, z = p[1] + n[1] * u;
+          const up = terrainNormal(x, z);
+          // Ellipse normal: up and across.
+          const cu = Math.sin(th) / SAUSAGE_HEIGHT, cx = -Math.cos(th) / SAUSAGE_RADIUS, l = Math.hypot(cu, cx);
+          row.push([[x, terrainHeight(x, z) + ROAD_LIFT + h, z], [(n[0] * cx + up[0] * cu) / l, (up[1] * cu) / l, (n[1] * cx + up[2] * cu) / l]]);
+        }
+        return row;
+      });
+      for (let a = 0; a < rows.length - 1; a++) {
+        for (let c = 0; c < ACROSS; c++) {
+          for (const [i, j] of [[a, c], [a + 1, c], [a + 1, c + 1], [a, c], [a + 1, c + 1], [a, c + 1]]) {
+            positions.push(...rows[i][j][0]);
+            normals.push(...rows[i][j][1]);
+          }
+        }
+      }
+    }
+    return { positions, normals };
+  }
+  // Height of a sausage's top above the ground at (x, z), 0 where there is none.
+  function sausageHeight(x, z) {
+    for (const { pts: q, box } of sausages) {
+      if (x < box[0] || x > box[1] || z < box[2] || z > box[3]) continue;
+      for (let j = 0; j < q.length - 1; j++) {
+        const A = q[j].p, B = q[j + 1].p, ex = B[0] - A[0], ez = B[1] - A[1];
+        let t = ((x - A[0]) * ex + (z - A[1]) * ez) / (ex * ex + ez * ez);
+        if (t < -0.1 || t > 1.1) continue; // a little overlap covers the outside of each joint
+        t = Math.max(0, Math.min(1, t));
+        const u = Math.hypot(x - A[0] - ex * t, z - A[1] - ez * t);
+        const e = q[j].e + (q[j + 1].e - q[j].e) * t, k = endScale(Math.min(e, PIECE - e));
+        const r = SAUSAGE_RADIUS * k;
+        if (u < r) return SAUSAGE_HEIGHT * k * Math.sqrt(1 - (u / r) ** 2);
+      }
+    }
+    return 0;
+  }
+
   // Sample index `d` meters along the road.
   const indexAt = (d) => Math.max(0, along.findIndex((a) => a >= d));
   // Start and finish lines: the same line on a circuit, at each end of a stage.
@@ -242,6 +352,7 @@ export function buildTrack(layout, avoid = () => false) {
       { mesh: edges(red), color: [0.85, 0.15, 0.12] },
       { mesh: edges((i) => !red(i)), color: [0.95, 0.95, 0.95] },
       { mesh: line(startIndex, () => true), color: [0.95, 0.95, 0.95], top: true },
+      { mesh: sausageMesh(), color: [0.98, 0.8, 0.08], raised: true },
     ];
   } else {
     // Gravel with a darker, rutted verge; a white start line and a chequered finish.
@@ -265,6 +376,7 @@ export function buildTrack(layout, avoid = () => false) {
     layers,
     corners,
     signs,
+    sausages,
     length,
     grid: mark(closed ? N - 4 : indexAt(12)), // where the car starts
     start: mark(startIndex),
@@ -280,6 +392,8 @@ export function buildTrack(layout, avoid = () => false) {
       const dist = along[r.index] + (along[r.index + 1] - along[r.index]) * r.t;
       return { ...r, along: dist, onTrack, sand: !onTrack && r.distance < edge, sandEdge: edge };
     },
+    // Height of a sausage kerb at (x, z), 0 where there is none.
+    sausageHeight,
   };
 
   // Nearest centerline sample and distance to the centerline polyline.

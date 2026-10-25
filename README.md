@@ -4,6 +4,8 @@ Barebone car simulator in raw WebGL2 — no frameworks, no build step.
 Drive laps of a 1.25 km circuit with two hairpins, through wooded hills under a cloudy sky.
 The grass is slippery and slow (about 45 km/h max) but you can drive back on.
 Sand traps on the outside of the bends catch cars that run wide: they bog you down fast and you crawl out at about 13 km/h.
+Yellow sausage kerbs sit just past the flat kerb on the inside of each tight corner. Cut the apex
+over them and the car thumps up and rolls, the wheels that hit skip and lose grip for a moment, and you lose a little speed.
 A paddock sits beside the start/finish straight: pit wall, garages, race control and team trucks (scenery only, no collisions).
 
 ## Handling
