@@ -13,7 +13,7 @@
 export const MAT = {
   matte: 0, grass: 1, asphalt: 2, sand: 3, gravel: 4, paint: 5, glass: 6, rubber: 7,
   line: 8, metal: 9, concrete: 10, leaves: 11, bark: 12, kerb: 13, straw: 14,
-  facade: 15, curtain: 16,
+  facade: 15, curtain: 16, water: 17,
 };
 
 export const SCENE_VS = `#version 300 es
@@ -157,6 +157,11 @@ void main() {
     mull = mix(mull, 0.14, smoothstep(0.1, 0.35, fp / 1.6));
     alb = mix(alb * (0.85 + 0.25 * hash(floor(g))), vec3(0.6, 0.62, 0.65), mull);
     gloss = mix(0.96, 0.4, mull); refl = mix(0.9, 0.2, mull); f0 = 0.05; fmin = mix(0.2, 0.0, mull);
+  } else if (uMat == M_WATER) {
+    // The river: small ripples, a mirror of the sky.
+    float r = tn(p + vec2(3.0, 1.0), 0.35) + 0.5 * tn(p * 1.7 + 11.0, 0.9);
+    alb *= 0.85 + 0.2 * tn(p, 0.02);
+    h = 0.06 * r; gloss = 0.85; f0 = 0.03; refl = 0.75;
   } else if (uMat == M_STRAW) {
     alb *= 0.72 + 0.5 * tn(p, 7.0) * (0.7 + 0.3 * tc(p, 30.0));
     gloss = 0.05; refl = 0.0;

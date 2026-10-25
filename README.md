@@ -2,7 +2,8 @@
 
 Barebone car simulator in raw WebGL2 — no frameworks, no build step.
 Drive laps of a 1.25 km circuit with two hairpins, through wooded hills under a cloudy sky,
-run a gravel rally stage, or lap the Nürburgring Nordschleife (switch in settings or with **M**).
+run a gravel rally stage, lap the Nürburgring Nordschleife, or drive freely around the streets of Verdun, Montreal
+(switch in settings or with **M**).
 The grass is slippery and slow (about 45 km/h max) but you can drive back on.
 Sand traps on the outside of the bends catch cars that run wide: they bog you down fast and you crawl out at about 13 km/h.
 Yellow sausage kerbs sit just past the flat kerb on the inside of each tight corner. Cut the apex
@@ -32,7 +33,7 @@ from public, open data: the centerline GeoJSON from [bacinger/f1-circuits](https
 fast bends down the island, the tight hairpin, the long Casino straight and the final chicane. The
 island is flat, so there are no hills here. `scripts/montreal.mjs` turns the GeoJSON into `src/montreal.js`.
 
-Switch tracks with **M** or the Track button (Circuit → Stage → Montréal → Downtown MTL → Nordschleife).
+Switch tracks with **M** or the Track button (Circuit → Stage → Montréal → Downtown MTL → Nordschleife → Verdun).
 
 ## Nordschleife
 
@@ -50,6 +51,26 @@ start/finish at T13, built from public geographic data:
 
 `scripts/nordschleife.py` rebuilds `src/nordschleife.js` from those sources. It reads only the parts of
 the OSM planet file (AWS Open Data) it needs, using HTTP range requests.
+
+## Verdun (open map)
+
+The sixth map isn't a track: it's mainland Verdun, the Montreal borough between the aqueduct canal and
+the St. Lawrence (about 4.5 km by 1.5 km), to drive around freely. No laps or timers; the HUD shows the
+street you're on and a heading-up minimap. You start on Rue Wellington, by Rue de l'Église.
+
+- **Data**: [Overture Maps](https://overturemaps.org) (release 2026-10-21; mostly OpenStreetMap data,
+  © OpenStreetMap contributors, ODbL): the borough boundary, ~130 km of streets with their names, ~12,600
+  building footprints and heights, ~11,000 individually mapped trees, and the river and canal.
+- **Streets**: asphalt by road class (main streets wider, back lanes narrow), sidewalks on the bigger ones
+  (they drive like road; lawns and yards are grass), and a yellow center line on the main streets.
+- **Buildings**: footprints pushed up to their height (from the data, or the number of floors, or the
+  building type: mostly two- and three-storey brick plexes), in four brick colors with windows. You can't
+  drive through them: hit one and the car stops against it.
+- **Edges**: the river and the canal, and a low concrete barrier where the borough ends on land. Nuns'
+  Island is left out (it's reached by bridges). The ground is flat.
+
+`scripts/verdun.py` rebuilds `src/verdun.js` from Overture's GeoParquet files on AWS Open Data, reading only
+the parts that cover Verdun with HTTP range requests.
 
 ## Handling
 

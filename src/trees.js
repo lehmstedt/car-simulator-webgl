@@ -138,3 +138,22 @@ export function buildTrees(clear, height, road = null, opts = {}) {
   }
   return { pieces: [...pieces.values()], count };
 }
+
+// Trees standing at given spots (Verdun's mapped street and park trees):
+// broadleaf only, a little leaner than the forest's, in square pieces of
+// `chunk` meters so far ones can be skipped.
+export function buildTreesAt(spots, height, chunk = 400) {
+  const rand = rng(11), pieces = new Map();
+  for (const [x, z] of spots) {
+    const k = `${Math.floor(x / chunk)},${Math.floor(z / chunk)}`;
+    if (!pieces.has(k)) {
+      const [i, j] = k.split(',').map(Number);
+      pieces.set(k, { trunks: mesh(), pines: mesh(), leaves: mesh(), leavesLight: mesh(), x: (i + 0.5) * chunk, z: (j + 0.5) * chunk, radius: chunk * 0.75 });
+    }
+    const p = pieces.get(k);
+    const T = { x, z, y: height(x, z) - 0.1, yaw: rand() * Math.PI * 2, s: 0.7 + rand() * 0.6, sy: 0.9 + rand() * 0.4 };
+    cone(p.trunks, T, 0.25, 0.18, 0, 3.4, 4);
+    blob(rand() < 0.5 ? p.leaves : p.leavesLight, T, 2.5, 5.2);
+  }
+  return { pieces: [...pieces.values()], count: spots.length };
+}

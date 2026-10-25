@@ -11,7 +11,9 @@ import { BOT_LAPS } from './bot-lap.js';
 import { buildTrack, LAYOUTS, ROAD_LIFT } from './track.js';
 import { Signs } from './signs.js';
 import { onPaddock, buildPaddock } from './paddock.js';
-import { buildTrees } from './trees.js';
+import { buildTrees, buildTreesAt } from './trees.js';
+import { buildOpenMap, BRICKS } from './openmap.js';
+import { Minimap } from './minimap.js';
 import { buildGates } from './gates.js';
 import { buildCity } from './city.js';
 import { Sky, HORIZON, ZENITH, SUN_DIR } from './sky.js';
@@ -43,6 +45,7 @@ const tireEls = ['fl', 'fr', 'rl', 'rr'].map((k) => document.getElementById(`tir
 const tireTextEls = { front: document.getElementById('tire-f'), rear: document.getElementById('tire-r') };
 const tireStateEl = document.getElementById('tire-state');
 const tiresEl = document.getElementById('tires');
+const minimap = new Minimap(document.getElementById('minimap'));
 const G_SCALE = 28; // px per g on the G-meter (grid rings at 0.5 g and 1 g)
 const gTrail = [];
 const gl = canvas.getContext('webgl2', { antialias: true });
@@ -66,11 +69,12 @@ const SUN = (() => { const l = Math.hypot(...SUN_DIR); return SUN_DIR.map((v) =>
 const sky = new Sky(gl);
 
 // Everything that depends on the layout ('circuit', 'stage', 'montreal' (Circuit
-// Gilles-Villeneuve), 'downtown' (Montreal's streets) or 'ring', the Nordschleife):
-// the ground, the road, signs, trees and buildings. Rebuilt when the layout changes.
+// Gilles-Villeneuve), 'downtown' (Montreal's streets), 'ring', the Nordschleife, or
+// 'verdun', the open map of Verdun): the ground, the road, signs, trees and
+// buildings. Rebuilt when the layout changes.
 // M / the Track button cycles through them in this order.
-const LAYOUT_ORDER = ['circuit', 'stage', 'montreal', 'downtown', 'ring'];
-const LAYOUT_NAMES = { circuit: 'Circuit', stage: 'Stage', montreal: 'Montréal', downtown: 'Downtown MTL', ring: 'Nordschleife' };
+const LAYOUT_ORDER = ['circuit', 'stage', 'montreal', 'downtown', 'ring', 'verdun'];
+const LAYOUT_NAMES = { circuit: 'Circuit', stage: 'Stage', montreal: 'Montréal', downtown: 'Downtown MTL', ring: 'Nordschleife', verdun: 'Verdun' };
 let layout = 'circuit';
 try { const v = localStorage.getItem('layout'); if (LAYOUT_ORDER.includes(v)) layout = v; } catch {}
 // Scenery further than this (m) isn't drawn: past the far plane, or lost in the haze.
@@ -83,6 +87,7 @@ function buildWorld(kind) {
     gl.deleteTexture(world.signs.texture);
   }
   setTerrain(kind);
+  if (kind === 'verdun') return buildVerdunWorld();
   const circuit = kind === 'circuit', stage = kind === 'stage', ring = kind === 'ring';
   const paddockAt = circuit ? onPaddock : () => false;
   const t = buildTrack(LAYOUTS[kind], (x, z) => paddockAt(x, z, 4));
@@ -141,6 +146,51 @@ function buildWorld(kind) {
       parts: [
         [upload(p.trunks), [0.36, 0.25, 0.16], 'bark'],
         [upload(p.pines), [0.13, 0.33, 0.18], 'leaves'],
+        [upload(p.leaves), [0.22, 0.45, 0.17], 'leaves'],
+        [upload(p.leavesLight), [0.36, 0.55, 0.2], 'leaves'],
+      ],
+    })),
+    gpu,
+  };
+}
+
+// Verdun: streets, buildings, trees and the river from map data (openmap.js).
+function buildVerdunWorld() {
+  const t = buildOpenMap();
+  const gpu = [];
+  const upload = (m) => { const mesh = createMesh(gl, program, m); gpu.push(mesh); return mesh; };
+  const signs = new Signs(gl, program, []);
+  gpu.push(signs.faces);
+  const trees = buildTreesAt(t.trees, terrainHeight);
+  return {
+    kind: 'verdun',
+    track: t,
+    // Lots of buildings and trees: far ones (mostly lost in the haze) aren't drawn.
+    drawDistance: 800,
+    treeDistance: 500,
+    ground: [{ mesh: upload(terrainMesh(6000, 250)), x: 0, z: 0, radius: Infinity }],
+    groundLook: [[0.3, 0.55, 0.3], 'grass'],
+    far: 1000,
+    offTrack: () => 'grass', // lawns and yards
+    apron: null,
+    layers: t.layers.map((l) => ({ ...l, mesh: upload(l.mesh) })),
+    signs,
+    signParts: [],
+    boxes: [],
+    cars: [],
+    barriers: upload(t.barriers),
+    buildings: t.buildingChunks().map((c) => ({
+      x: c.x, z: c.z, radius: c.radius,
+      parts: [
+        ...c.walls.map((m, i) => [m.positions.length && upload(m), BRICKS[i][0], 'facade']),
+        [c.sheds.positions.length && upload(c.sheds), [0.55, 0.5, 0.44], 'concrete'],
+        [c.roofs.positions.length && upload(c.roofs), [0.27, 0.27, 0.28], 'concrete'],
+      ].filter(([m]) => m),
+    })),
+    trees: trees.pieces.map((p) => ({
+      x: p.x, z: p.z, radius: p.radius,
+      parts: [
+        [upload(p.trunks), [0.36, 0.25, 0.16], 'bark'],
         [upload(p.leaves), [0.22, 0.45, 0.17], 'leaves'],
         [upload(p.leavesLight), [0.36, 0.55, 0.2], 'leaves'],
       ],
@@ -228,7 +278,10 @@ function setLayout(kind) {
   lap.last = null;
   const b = layoutBtn?.querySelector('b'); if (b) b.textContent = LAYOUT_NAMES[kind];
   if (lapLabelEl) lapLabelEl.textContent = kind === 'stage' ? 'Stage' : 'Lap';
-  if (sectionRowEl) sectionRowEl.hidden = !track.sections;
+  if (sectionRowEl) sectionRowEl.hidden = !track.sections && !track.open;
+  // The open map has no laps: no timers, a minimap instead.
+  for (const el of document.querySelectorAll('.lap-only')) el.hidden = !!track.open;
+  minimap.set(track.open ? track : null);
 }
 setLayout(layout);
 
@@ -594,6 +647,40 @@ function updateTires() {
   tiresEl.setAttribute('aria-label', `Tire temperatures: front ${Math.round(front.temp)}, rear ${Math.round(rear.temp)} degrees, ${state.toLowerCase()}`);
 }
 
+// Buildings and the map's edge (open map only): points around the car's
+// outline that end up inside one push it back out, and the speed into the
+// wall is lost (a little bounce, some scrub along it).
+function collide() {
+  if (!track.blocked) return;
+  const v = model(car.variant).spec;
+  const f = v.cgToFront + v.overhangFront, r = v.length - f, hw = v.width / 2;
+  const outline = [];
+  for (const a of [f, f / 2, 0, -r / 2, -r]) for (const b of [-hw, hw]) outline.push([a, b]);
+  outline.push([f, 0], [-r, 0]);
+  for (let pass = 0; pass < 3; pass++) {
+    const s = Math.sin(car.heading), c = Math.cos(car.heading);
+    let hit = null;
+    for (const [a, b] of outline) {
+      // forward = (-sin, -cos), right = (cos, -sin)
+      const h = track.blocked(car.x - s * a + c * b, car.z - c * a - s * b);
+      if (h && (!hit || h.depth > hit.depth)) hit = h;
+    }
+    if (!hit) return;
+    car.x += hit.nx * (hit.depth + 0.02);
+    car.z += hit.nz * (hit.depth + 0.02);
+    const wx = -s * car.vx - c * car.vy, wz = -c * car.vx + s * car.vy;
+    const vn = wx * hit.nx + wz * hit.nz;
+    if (vn < 0) {
+      // Remove the push into the wall (plus a 20% bounce), scrub 30% of the slide along it.
+      const tx = (wx - vn * hit.nx) * 0.7, tz = (wz - vn * hit.nz) * 0.7;
+      const ux = tx - vn * 0.2 * hit.nx, uz = tz - vn * 0.2 * hit.nz;
+      car.vx = -s * ux - c * uz;
+      car.vy = -c * ux + s * uz;
+      car.yawRate *= 0.5;
+    }
+  }
+}
+
 let last = performance.now();
 function frame(now) {
   const dt = Math.min(0.05, (now - last) / 1000);
@@ -610,8 +697,10 @@ function frame(now) {
   updateKerbs(dt);
   car.update(dt, controls, surface, terrainSample(car.x, car.z));
   if (world.city) world.city.collide(car);
+  collide();
   const after = track.locate(car.x, car.z);
-  if (track.closed) updateLap(after.index, now);
+  if (track.open) { /* free roaming: no clock */ }
+  else if (track.closed) updateLap(after.index, now);
   else updateStage(after, now);
   if (lap.start !== null && !lap.done) ghost.record(now - lap.start, car);
   wheelPositions().forEach((w, i) => skids.track(i, w.x, w.y, w.z, w.sliding));
@@ -667,7 +756,7 @@ function frame(now) {
   // Road layers sit a few cm above the ground; polygon offset keeps them from
   // z-fighting with it (and the start line and skids with the road) far away.
   gl.disable(gl.CULL_FACE);
-  const seen = (c) => Math.hypot(c.x - eyePos[0], c.z - eyePos[2]) - c.radius < DRAW_DISTANCE;
+  const seen = (c, far = world.drawDistance ?? DRAW_DISTANCE) => Math.hypot(c.x - eyePos[0], c.z - eyePos[2]) - c.radius < far;
   for (const g of world.ground) if (seen(g)) draw(g.mesh, identity(), ...world.groundLook);
   gl.enable(gl.POLYGON_OFFSET_FILL);
   gl.polygonOffset(-1, -2);
@@ -682,7 +771,7 @@ function frame(now) {
   if (skids.used) draw(skids.mesh, identity(), [0.12, 0.12, 0.13], 'rubber');
   gl.disable(gl.POLYGON_OFFSET_FILL);
   for (const t of world.trees) {
-    if (!seen(t)) continue;
+    if (!seen(t, world.treeDistance)) continue;
     for (const [mesh, color, mat] of t.parts) draw(mesh, identity(), color, mat); // open cones: no culling
   }
   if (world.city) {
@@ -690,6 +779,11 @@ function frame(now) {
     draw(world.city.roofs, identity(), [0.36, 0.37, 0.38], 'concrete');
   }
   gl.enable(gl.CULL_FACE);
+  for (const b of world.buildings ?? []) {
+    if (!seen(b)) continue;
+    for (const [mesh, color, mat] of b.parts) draw(mesh, identity(), color, mat);
+  }
+  if (world.barriers) draw(world.barriers, identity(), [0.7, 0.7, 0.68], 'concrete');
 
   for (const p of world.signParts) draw(meshes.cube, p.model, p.color, p.mat);
   gl.uniform1i(uTextured, 1);
@@ -718,7 +812,12 @@ function frame(now) {
   loadEl.classList.toggle('light', front + rear < 85);
   updateGMeter();
   updateTires();
-  if (track.sections) {
+  if (track.open) {
+    // The street the car is on (or beside).
+    const name = after.name || ' ';
+    if (sectionEl.textContent !== name) sectionEl.textContent = name;
+    minimap.draw(car);
+  } else if (track.sections) {
     // Name of the corner or stretch the car is in (the last one started).
     const s = track.sections;
     let k = s.length - 1;

@@ -32,11 +32,13 @@ const LANDS = {
   montreal: { hills: 0, flat: 1300, valley: 0, level: null, allFlat: true },
   ring: { real: true },
   downtown: { grid: DOWNTOWN.ground, level: null },
+  // Verdun is flat too (about 20 m above sea level), and wide.
+  verdun: { hills: 0, flat: 3000, valley: 0, level: null, allFlat: true },
 };
 let land = LANDS.circuit;
 let bumps = null; // (x, z) -> extra height (m, >= 0) on the road, or null
 
-// Picks the ground for a layout ('circuit', 'stage', 'montreal', 'downtown' or 'ring'); call before building anything on it.
+// Picks the ground for a layout ('circuit', 'stage', 'montreal', 'downtown', 'ring' or 'verdun'); call before building anything on it.
 export function setTerrain(kind) {
   land = LANDS[kind];
   bumps = null;
