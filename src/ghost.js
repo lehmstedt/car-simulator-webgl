@@ -1,16 +1,19 @@
-// Records the car's path during each lap and replays the best lap (one per
-// drivetrain) as a see-through ghost car. Best laps are saved in localStorage.
+// Records the car's path during each lap (or stage run) and replays the best
+// one (per drivetrain) as a see-through ghost car. Best runs are saved in
+// localStorage, under a key per layout.
 
 const INTERVAL = 50;  // ms between recorded samples
 const STRIDE = 4;     // t, x, z, heading
-const KEY = 'ghost-hairpins'; // new key when the track changed: old laps aren't comparable
+// New key when a layout changes: old laps aren't comparable.
+const KEYS = { circuit: 'ghost-hairpins', stage: 'ghost-stage' };
 
 export class Ghost {
-  constructor() {
+  constructor(layout = 'circuit') {
+    this.key = KEYS[layout];
     this.laps = {};   // variant -> { time, samples: [t, x, z, heading, ...] }
     this.rec = null;  // samples of the lap in progress
     this.next = 0;
-    try { this.laps = JSON.parse(localStorage.getItem(KEY)) ?? {}; } catch { this.laps = {}; }
+    try { this.laps = JSON.parse(localStorage.getItem(this.key)) ?? {}; } catch { this.laps = {}; }
   }
 
   best(variant) { return this.laps[variant]?.time ?? null; }
@@ -30,7 +33,7 @@ export class Ghost {
     if (!this.rec) return;
     this.record(time, car, true);
     this.laps[variant] = { time, samples: this.rec };
-    try { localStorage.setItem(KEY, JSON.stringify(this.laps)); } catch {}
+    try { localStorage.setItem(this.key, JSON.stringify(this.laps)); } catch {}
   }
 
   // Interpolated pose t ms into the lap, or null once the ghost has finished.

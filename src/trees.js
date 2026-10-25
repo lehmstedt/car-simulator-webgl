@@ -1,4 +1,4 @@
-// Low-poly trees around the circuit: pines (stacked cones) and round broadleaf
+// Low-poly trees around the circuit or along the stage: pines (stacked cones) and round broadleaf
 // trees (icosahedra). All trees are merged into a few meshes, one per color,
 // so they cost a handful of draw calls. They grow in clumps, kept clear of the
 // road, the sand traps, the signs and the paddock.
@@ -57,7 +57,8 @@ function blob(m, T, r, cy) {
 }
 
 // `clear(x, z)` says whether a tree may stand there; `height(x, z)` is the ground.
-export function buildTrees(clear, height) {
+// `road` (stage only): centerline points and tangents to line with woods.
+export function buildTrees(clear, height, road = null) {
   const rand = rng(7);
   const trunks = mesh(), pines = mesh(), leaves = mesh(), leavesLight = mesh();
   const taken = new Map(); // coarse grid, keeps trees a few meters apart
@@ -85,6 +86,19 @@ export function buildTrees(clear, height) {
     taken.set(cellOf(x, z), true);
     count++;
   };
+
+  if (road) {
+    // Stage: woods close along both sides of the road, gaps where the density dips.
+    const { points, tangents } = road;
+    for (let i = 0; i < 9000 && count < 900; i++) {
+      const k = Math.floor(rand() * points.length), [px, pz] = points[k], [tx, tz] = tangents[k];
+      const off = (rand() < 0.5 ? -1 : 1) * (8 + rand() * rand() * 60);
+      const x = px - tz * off, z = pz + tx * off;
+      if (rand() > density(x, z) * 0.6 + 0.35 || !clear(x, z) || !free(x, z)) continue;
+      plant(x, z);
+    }
+    return { trunks, pines, leaves, leavesLight, count };
+  }
 
   // Around the circuit.
   for (let i = 0; i < 6000 && count < 340; i++) {

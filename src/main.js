@@ -1,15 +1,16 @@
-import { createProgram, createMesh } from './gl.js';
+import { createProgram, createMesh, deleteMesh } from './gl.js';
 import { cube, torus } from './geometry.js';
 import { perspective, lookAt, multiply, identity, basis, rotate } from './math.js';
-import { terrainHeight, terrainNormal, terrainSample, terrainMesh } from './terrain.js';
+import { terrainHeight, terrainNormal, terrainSample, terrainMesh, setTerrain } from './terrain.js';
 import { readControls, resetWheel, wheelAngle } from './input.js';
 import { Car, VARIANTS } from './car.js';
 import { Skids } from './skids.js';
 import { Ghost } from './ghost.js';
-import { buildTrack, ROAD_HALF_WIDTH, ROAD_LIFT } from './track.js';
+import { buildTrack, LAYOUTS, ROAD_LIFT } from './track.js';
 import { Signs } from './signs.js';
 import { onPaddock, buildPaddock } from './paddock.js';
 import { buildTrees } from './trees.js';
+import { buildGates } from './gates.js';
 import { Sky, HORIZON } from './sky.js';
 
 const VS = `#version 300 es
@@ -71,6 +72,8 @@ const driveEl = document.getElementById('drive');
 const balanceEl = document.getElementById('balance');
 const ghostBtn = document.getElementById('ghost');
 const viewBtn = document.getElementById('view');
+const layoutBtn = document.getElementById('layout');
+const lapLabelEl = document.getElementById('lap-label');
 const loadEl = document.getElementById('load');
 const gradeEl = document.getElementById('grade');
 const gmeterEl = document.getElementById('gmeter');
@@ -99,42 +102,67 @@ const uCam = gl.getUniformLocation(program, 'uCam');
 const uFog = gl.getUniformLocation(program, 'uFog');
 const sky = new Sky(gl);
 
-const track = buildTrack((x, z) => onPaddock(x, z, 4));
-const paddock = buildPaddock();
+// Everything that depends on the layout ('circuit' or 'stage'): the ground,
+// the road, signs, trees and buildings. Rebuilt when the layout changes.
+let layout = 'circuit';
+try { layout = localStorage.getItem('layout') === 'stage' ? 'stage' : 'circuit'; } catch {}
+let world = null, track = null;
+
+function buildWorld(kind) {
+  if (world) {
+    for (const m of world.gpu) deleteMesh(gl, m);
+    gl.deleteTexture(world.signs.texture);
+  }
+  setTerrain(kind);
+  const circuit = kind === 'circuit';
+  const paddockAt = circuit ? onPaddock : () => false;
+  const t = buildTrack(LAYOUTS[kind], (x, z) => paddockAt(x, z, 4));
+  const paddock = circuit ? buildPaddock() : { apron: null, boxes: [], cars: [] };
+  const gpu = [];
+  const upload = (m) => { const mesh = createMesh(gl, program, m); gpu.push(mesh); return mesh; };
+  const signs = new Signs(gl, program, t.signs);
+  gpu.push(signs.faces);
+  // Trees: off the road and the sand, away from the signs and the paddock.
+  const trees = buildTrees((x, z) => {
+    const at = t.locate(x, z);
+    if (at.distance < Math.max(t.halfWidth + (circuit ? 8 : t.edgeWidth + 4), at.sandEdge + 4)) return false;
+    if (paddockAt(x, z, 10)) return false;
+    return t.signs.every((s) => Math.hypot(s.x - x, s.z - z) > 6);
+  }, terrainHeight, circuit ? null : { points: t.points, tangents: t.tangents });
+  const boxes = [
+    ...paddock.boxes.map(({ c, s, color }) => ({ color, model: basis(c, [1, 0, 0], [0, 1, 0], [0, 0, 1], ...s) })),
+    ...(circuit ? [] : buildGates(t)).map(({ c, axes, s, color }) => ({ color, model: basis(c, ...axes, ...s) })),
+  ];
+  return {
+    kind,
+    track: t,
+    onPaddock: paddockAt,
+    // The stage covers more ground: a wider hill mesh, in slightly bigger cells.
+    ground: upload(circuit ? terrainMesh(600, 8) : terrainMesh(800, 11)),
+    apron: paddock.apron && upload(paddock.apron),
+    layers: t.layers.map((l) => ({ ...l, mesh: upload(l.mesh) })),
+    signs,
+    signParts: signs.parts().map(({ part, m }) => ({ color: part === 'post' ? [0.55, 0.57, 0.6] : [0.3, 0.32, 0.35], model: basis(...m) })),
+    boxes,
+    cars: paddock.cars,
+    trees: [
+      [upload(trees.trunks), [0.36, 0.25, 0.16]],
+      [upload(trees.pines), [0.13, 0.33, 0.18]],
+      [upload(trees.leaves), [0.22, 0.45, 0.17]],
+      [upload(trees.leavesLight), [0.36, 0.55, 0.2]],
+    ],
+    gpu,
+  };
+}
+
 const meshes = {
   cube: createMesh(gl, program, cube()),
   wheelRim: createMesh(gl, program, torus(0.17, 0.018)),
-  ground: createMesh(gl, program, terrainMesh(600, 8)),
-  road: createMesh(gl, program, track.meshes.road),
-  curbRed: createMesh(gl, program, track.meshes.curbRed),
-  curbWhite: createMesh(gl, program, track.meshes.curbWhite),
-  startLine: createMesh(gl, program, track.meshes.startLine),
-  sand: createMesh(gl, program, track.meshes.sand),
-  apron: createMesh(gl, program, paddock.apron),
 };
-const signs = new Signs(gl, program, track.signs);
-const signParts = signs.parts().map(({ part, m }) => ({ color: part === 'post' ? [0.55, 0.57, 0.6] : [0.3, 0.32, 0.35], model: basis(...m) }));
-
-const paddockBoxes = paddock.boxes.map(({ c, s, color }) => ({ color, model: basis(c, [1, 0, 0], [0, 1, 0], [0, 0, 1], ...s) }));
-
-// Trees: off the road and the sand, away from the signs and the paddock.
-const trees = buildTrees((x, z) => {
-  const at = track.locate(x, z);
-  if (at.distance < Math.max(ROAD_HALF_WIDTH + 8, at.sandEdge + 4)) return false;
-  if (onPaddock(x, z, 10)) return false;
-  return track.signs.every((s) => Math.hypot(s.x - x, s.z - z) > 6);
-}, terrainHeight);
-const treeMeshes = [
-  [createMesh(gl, program, trees.trunks), [0.36, 0.25, 0.16]],
-  [createMesh(gl, program, trees.pines), [0.13, 0.33, 0.18]],
-  [createMesh(gl, program, trees.leaves), [0.22, 0.45, 0.17]],
-  [createMesh(gl, program, trees.leavesLight), [0.36, 0.55, 0.2]],
-];
 
 // Grid starts a few meters before the line, facing along the track.
 function startPose() {
-  const n = track.points.length, i = n - 4;
-  const [x, z] = track.points[i], [tx, tz] = track.tangents[i];
+  const { x, z, tangent: [tx, tz] } = track.grid;
   return [x, z, Math.atan2(-tx, -tz)];
 }
 
@@ -142,7 +170,7 @@ let savedDrive = 'rwd';
 try { savedDrive = localStorage.getItem('drive') in VARIANTS ? localStorage.getItem('drive') : 'rwd'; } catch {}
 const car = new Car(savedDrive);
 const skids = new Skids(gl, program);
-const ghost = new Ghost();
+let ghost = null;
 let showGhost = true;
 try { showGhost = localStorage.getItem('showGhost') !== 'off'; } catch {}
 const updateGhostBtn = () => {
@@ -171,8 +199,23 @@ function toggleView() {
 let glance = 0; // cockpit head turn into corners (rad), smoothed
 const tilt = { pitch: 0, roll: 0 }; // body lean from weight transfer (visual only)
 // Laps: the track is split into 4 sectors; a lap counts only after visiting all of them.
-// Best laps are kept per drivetrain so FWD and RWD can be compared.
-const lap = { start: null, last: null, best: { fwd: ghost.best('fwd'), rwd: ghost.best('rwd') }, sector: 3, visited: new Set() };
+// On the stage the clock starts at the start line and stops at the finish, once
+// the three middle quarters were driven. Best times are kept per layout and
+// drivetrain so FWD and RWD can be compared.
+const lap = { start: null, last: null, done: false, best: {}, sector: 3, visited: new Set(), along: 0 };
+
+function setLayout(kind) {
+  layout = kind;
+  try { localStorage.setItem('layout', kind); } catch {}
+  world = buildWorld(kind);
+  track = world.track;
+  ghost = new Ghost(kind);
+  lap.best = { fwd: ghost.best('fwd'), rwd: ghost.best('rwd') };
+  lap.last = null;
+  const b = layoutBtn?.querySelector('b'); if (b) b.textContent = kind === 'stage' ? 'Stage' : 'Circuit';
+  if (lapLabelEl) lapLabelEl.textContent = kind === 'stage' ? 'Stage' : 'Lap';
+}
+setLayout(layout);
 
 function switchDrive() {
   car.setVariant(car.variant === 'fwd' ? 'rwd' : 'fwd');
@@ -188,13 +231,44 @@ function resetRace() {
   cam.y = terrainHeight(car.x, car.z) + 3.5;
   tilt.pitch = tilt.roll = glance = 0;
   lap.start = null;
+  lap.done = false;
   lap.sector = 3;
+  lap.along = track.locate(car.x, car.z).along;
   lap.visited.clear();
   ghost.stop();
   skids.clear();
   driveEl.querySelector('b').textContent = VARIANTS[car.variant].label;
 }
 resetRace();
+
+function switchLayout() {
+  setLayout(layout === 'stage' ? 'circuit' : 'stage');
+  resetRace();
+}
+
+// Stage clock. Only small steps along the road count as crossing a line, so the
+// nearest-road lookup jumping to another part of the stage doesn't.
+function updateStage(at, now) {
+  const prev = lap.along;
+  lap.along = at.along;
+  if (lap.done || Math.abs(at.along - prev) > 20) return;
+  const s = track.start.along, f = track.finish.along;
+  if (lap.start === null) {
+    if (prev < s && at.along >= s) { lap.start = now; ghost.start(); lap.visited.clear(); }
+    return;
+  }
+  const quarter = Math.floor(((at.along - s) / (f - s)) * 4);
+  if (quarter >= 1 && quarter <= 3) lap.visited.add(quarter);
+  if (prev < f && at.along >= f && lap.visited.size === 3) {
+    lap.last = now - lap.start;
+    lap.done = true;
+    const v = car.variant;
+    if (lap.best[v] === null || lap.last < lap.best[v]) {
+      lap.best[v] = lap.last;
+      ghost.save(v, lap.last, car);
+    }
+  }
+}
 
 function updateLap(index, now) {
   const sector = Math.floor((index / track.points.length) * 4);
@@ -392,13 +466,16 @@ function frame(now) {
   const controls = readControls(dt);
   if (controls.toggleGhost) toggleGhost();
   if (controls.toggleView) toggleView();
-  if (controls.switchDrive) switchDrive();
+  if (controls.switchLayout) switchLayout();
+  else if (controls.switchDrive) switchDrive();
   else if (controls.reset) resetRace();
   const where = track.locate(car.x, car.z);
-  const surface = where.onTrack || onPaddock(car.x, car.z) ? 'road' : where.sand ? 'sand' : 'grass';
+  const surface = where.onTrack ? track.surface : world.onPaddock(car.x, car.z) ? 'road' : where.sand ? 'sand' : 'grass';
   car.update(dt, controls, surface, terrainSample(car.x, car.z));
-  updateLap(track.locate(car.x, car.z).index, now);
-  if (lap.start !== null) ghost.record(now - lap.start, car);
+  const after = track.locate(car.x, car.z);
+  if (track.closed) updateLap(after.index, now);
+  else updateStage(after, now);
+  if (lap.start !== null && !lap.done) ghost.record(now - lap.start, car);
   wheelPositions().forEach((w, i) => skids.track(i, w.x, w.y, w.z, w.sliding));
 
   // Body lean follows the accelerations, smoothed like a damped spring.
@@ -449,38 +526,38 @@ function frame(now) {
   // Road layers sit a few cm above the ground; polygon offset keeps them from
   // z-fighting with it (and the start line and skids with the road) far away.
   gl.disable(gl.CULL_FACE);
-  draw(meshes.ground, identity(), [0.3, 0.55, 0.3], 10);
+  draw(world.ground, identity(), [0.3, 0.55, 0.3], 10);
   gl.enable(gl.POLYGON_OFFSET_FILL);
   gl.polygonOffset(-1, -2);
-  draw(meshes.apron, identity(), [0.4, 0.41, 0.43]);
-  gl.uniform1f(uGrain, 0.22);
-  draw(meshes.sand, identity(), [0.86, 0.76, 0.52]);
+  if (world.apron) draw(world.apron, identity(), [0.4, 0.41, 0.43]);
+  for (const l of world.layers) {
+    if (l.top) continue;
+    gl.uniform1f(uGrain, l.grain ?? 0);
+    draw(l.mesh, identity(), l.color);
+  }
   gl.uniform1f(uGrain, 0);
-  draw(meshes.road, identity(), [0.32, 0.33, 0.36]);
-  draw(meshes.curbRed, identity(), [0.85, 0.15, 0.12]);
-  draw(meshes.curbWhite, identity(), [0.95, 0.95, 0.95]);
   gl.polygonOffset(-2, -4);
-  draw(meshes.startLine, identity(), [0.95, 0.95, 0.95]);
+  for (const l of world.layers) if (l.top) draw(l.mesh, identity(), l.color);
   if (skids.used) draw(skids.mesh, identity(), [0.12, 0.12, 0.13]);
   gl.disable(gl.POLYGON_OFFSET_FILL);
-  for (const [mesh, color] of treeMeshes) draw(mesh, identity(), color); // open cones: no culling
+  for (const [mesh, color] of world.trees) draw(mesh, identity(), color); // open cones: no culling
   gl.enable(gl.CULL_FACE);
 
-  for (const p of signParts) draw(meshes.cube, p.model, p.color);
+  for (const p of world.signParts) draw(meshes.cube, p.model, p.color);
   gl.uniform1i(uTextured, 1);
-  gl.bindTexture(gl.TEXTURE_2D, signs.texture);
-  draw(signs.faces, identity(), [1, 1, 1]);
+  gl.bindTexture(gl.TEXTURE_2D, world.signs.texture);
+  draw(world.signs.faces, identity(), [1, 1, 1]);
   gl.uniform1i(uTextured, 0);
-  for (const b of paddockBoxes) draw(meshes.cube, b.model, b.color);
-  for (const p of paddock.cars) drawCar(p, p.colors, 1, { pitch: 0, roll: 0 });
+  for (const b of world.boxes) draw(meshes.cube, b.model, b.color);
+  for (const p of world.cars) drawCar(p, p.colors, 1, { pitch: 0, roll: 0 });
   drawCar(car, CAR_COLORS, 1, tilt, !cockpit);
   if (cockpit) drawCockpit();
   drawGhost(now);
 
   speedEl.textContent = Math.abs(car.speed * 3.6).toFixed(0).padStart(3, ' ');
-  speedEl.classList.toggle('grass', surface !== 'road');
+  speedEl.classList.toggle('grass', surface !== 'road' && surface !== 'gravel');
   gearEl.textContent = car.speed < -0.3 ? 'R' : Math.abs(car.speed) < 0.3 ? 'N' : 'D';
-  lapEl.textContent = fmt(lap.start === null ? null : now - lap.start);
+  lapEl.textContent = fmt(lap.done ? lap.last : lap.start === null ? null : now - lap.start);
   bestEl.textContent = fmt(lap.best[car.variant]);
   balanceEl.textContent = car.balance === 'over' ? 'Oversteer' : car.balance === 'under' ? 'Understeer' : '';
   balanceEl.className = car.balance ?? '';

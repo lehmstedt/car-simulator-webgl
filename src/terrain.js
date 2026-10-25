@@ -2,17 +2,29 @@
 // car physics. Long wavelengths keep grades under ~14% and crests gentle enough
 // that the car only goes light near top speed. Past the circuit the hills fade
 // to flat, so the far ground can be a few big cells (cheap to draw on phones).
-
 //
 // Beside the start straight the ground is levelled across the track for the
 // paddock: there it keeps the straight's own height, so the road is unchanged.
+//
+// The rally stage (track.js) has its own, wider ground: a long valley wave on
+// top of the same rolling hills, and no paddock levelling.
 
-const HILLS = 200, FLAT = 250; // fade from hills to flat between these (m, square radius)
-const LEVEL = { x0: -55, x1: 60, z0: 118, z1: 172, ref: 121, blend: 40 };
+// hills / flat: fade from hills to flat between these (m, square radius).
+const LANDS = {
+  circuit: { hills: 200, flat: 250, valley: 0, level: { x0: -55, x1: 60, z0: 118, z1: 172, ref: 121, blend: 40 } },
+  stage: { hills: 470, flat: 530, valley: 7, level: null },
+};
+let land = LANDS.circuit;
+
+// Picks the ground for a layout ('circuit' or 'stage'); call before building anything on it.
+export function setTerrain(kind) {
+  land = LANDS[kind];
+}
 
 export function terrainHeight(x, z) {
   const h = hills(x, z);
-  const L = LEVEL;
+  const L = land.level;
+  if (!L) return h;
   const dx = Math.max(L.x0 - x, 0, x - L.x1), dz = Math.max(L.z0 - z, 0, z - L.z1);
   const t = Math.min(1, Math.hypot(dx, dz) / L.blend);
   if (t >= 1) return h;
@@ -22,13 +34,14 @@ export function terrainHeight(x, z) {
 
 function hills(x, z) {
   const r = Math.max(Math.abs(x), Math.abs(z));
-  if (r >= FLAT) return 0;
-  const t = Math.max(0, (r - HILLS) / (FLAT - HILLS));
+  if (r >= land.flat) return 0;
+  const t = Math.max(0, (r - land.hills) / (land.flat - land.hills));
   const fade = 1 - t * t * (3 - 2 * t);
   return fade * (
     6.0 * Math.sin(x / 55 + 0.6) * Math.cos(z / 62 - 0.3) +
     3.0 * Math.sin((x + z) / 47 + 1.7) +
-    1.2 * Math.cos((x - 0.6 * z) / 40)
+    1.2 * Math.cos((x - 0.6 * z) / 40) +
+    land.valley * Math.sin(x / 140 + 0.4) * Math.cos(z / 120 - 1.1)
   );
 }
 
@@ -57,7 +70,7 @@ export function terrainNormal(x, z) {
 // hills, then a few wide cells out to the flat edge. Rows and columns share the
 // same coordinates everywhere, so there are no cracks between the two.
 export function terrainMesh(half, cell) {
-  const fine = Math.ceil((2 * FLAT) / cell), coarse = 6;
+  const FLAT = land.flat, fine = Math.ceil((2 * FLAT) / cell), coarse = 6;
   const axis = [];
   for (let i = 0; i < coarse; i++) axis.push(-half + ((half - FLAT) * i) / coarse);
   for (let i = 0; i <= fine; i++) axis.push(-FLAT + (2 * FLAT * i) / fine);

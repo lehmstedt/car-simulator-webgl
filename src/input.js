@@ -33,11 +33,12 @@ addEventListener('blur', () => {
 });
 const pressed = (k) => (pads.get(k)?.ids.size ?? 0) > 0;
 
-let resetQueued = false, driveQueued = false, ghostQueued = false, viewQueued = false;
+let resetQueued = false, driveQueued = false, ghostQueued = false, viewQueued = false, layoutQueued = false;
 document.getElementById('reset')?.addEventListener('click', () => { resetQueued = true; });
 document.getElementById('drive')?.addEventListener('click', () => { driveQueued = true; });
 document.getElementById('ghost')?.addEventListener('click', () => { ghostQueued = true; });
 document.getElementById('view')?.addEventListener('click', () => { viewQueued = true; });
+document.getElementById('layout')?.addEventListener('click', () => { layoutQueued = true; });
 // Settings panel: the gear button toggles it; tapping elsewhere closes it.
 const settingsBtn = document.getElementById('settings-btn');
 const settingsEl = document.getElementById('settings');
@@ -56,6 +57,7 @@ addEventListener('keydown', (e) => {
   if (e.code === 'KeyT') driveQueued = true;
   if (e.code === 'KeyG') ghostQueued = true;
   if (e.code === 'KeyC') viewQueued = true;
+  if (e.code === 'KeyM') layoutQueued = true;
 });
 
 // Steering wheel position: -1 (full right) .. 1 (full left). Keys turn it
@@ -122,8 +124,8 @@ export const wheelAngle = () => wheel * WHEEL_TURNS * Math.PI / 180;
 
 export function readControls(dt) {
   const reset = any('KeyR') || resetQueued;
-  const switchDrive = driveQueued, toggleGhost = ghostQueued, toggleView = viewQueued;
-  resetQueued = driveQueued = ghostQueued = viewQueued = false;
+  const switchDrive = driveQueued, toggleGhost = ghostQueued, toggleView = viewQueued, switchLayout = layoutQueued;
+  resetQueued = driveQueued = ghostQueued = viewQueued = layoutQueued = false;
   updateWheel(dt);
   return {
     throttle: any('ArrowUp', 'KeyW') || pressed('gas') ? 1 : 0,
@@ -134,5 +136,6 @@ export function readControls(dt) {
     switchDrive,
     toggleGhost,
     toggleView,
+    switchLayout,
   };
 }
