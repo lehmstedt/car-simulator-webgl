@@ -507,7 +507,7 @@ function frame(now) {
   else if (controls.switchDrive) switchDrive();
   else if (controls.reset) resetRace();
   const where = track.locate(car.x, car.z);
-  const surface = where.onTrack ? track.surface : world.onPaddock(car.x, car.z) ? 'road' : where.sand ? 'sand' : 'grass';
+  const surface = where.surface ?? (world.onPaddock(car.x, car.z) ? 'road' : where.sand ? 'sand' : 'grass');
   updateKerbs(dt);
   car.update(dt, controls, surface, terrainSample(car.x, car.z));
   const after = track.locate(car.x, car.z);
@@ -591,7 +591,7 @@ function frame(now) {
   drawGhost(now);
 
   speedEl.textContent = Math.abs(car.speed * 3.6).toFixed(0).padStart(3, ' ');
-  speedEl.classList.toggle('grass', surface !== 'road' && surface !== 'gravel');
+  speedEl.classList.toggle('grass', !where.onTrack && surface !== 'road');
   gearEl.textContent = car.speed < -0.3 ? 'R' : Math.abs(car.speed) < 0.3 ? 'N' : 'D';
   lapEl.textContent = fmt(lap.done ? lap.last : lap.start === null ? null : now - lap.start);
   bestEl.textContent = fmt(lap.best[car.variant]);

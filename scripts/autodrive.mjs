@@ -133,7 +133,7 @@ function run(variant, p, laps = 2, record = false) {
 
     // One game frame, in main.js order.
     const where = track.locate(car.x, car.z);
-    const surface = where.onTrack ? track.surface : paddockAt(car.x, car.z) ? 'road' : where.sand ? 'sand' : 'grass';
+    const surface = where.surface ?? (paddockAt(car.x, car.z) ? 'road' : where.sand ? 'sand' : 'grass');
     if (!where.onTrack) off++;
     const on = [];
     const hs = wheelXZ(car).map(([x, z], i) => {

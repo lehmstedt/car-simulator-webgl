@@ -7,7 +7,9 @@
 // paddock: there it keeps the straight's own height, so the road is unchanged.
 //
 // The rally stage (track.js) has its own, wider ground: a long valley wave on
-// top of the same rolling hills, and no paddock levelling.
+// top of the same rolling hills, and no paddock levelling. Its road also has
+// bumps (track.js registers them with setRoadBumps): they raise the road only,
+// so the physics and the road mesh feel them but the ground mesh does not.
 
 // hills / flat: fade from hills to flat between these (m, square radius).
 const LANDS = {
@@ -15,13 +17,26 @@ const LANDS = {
   stage: { hills: 470, flat: 530, valley: 7, level: null },
 };
 let land = LANDS.circuit;
+let bumps = null; // (x, z) -> extra height (m, >= 0) on the road, or null
 
 // Picks the ground for a layout ('circuit' or 'stage'); call before building anything on it.
 export function setTerrain(kind) {
   land = LANDS[kind];
+  bumps = null;
 }
 
+// Road bumps on top of the ground; null for none.
+export function setRoadBumps(fn) {
+  bumps = fn;
+}
+
+// Ground plus road bumps: what the car drives on.
 export function terrainHeight(x, z) {
+  return groundHeight(x, z) + (bumps ? bumps(x, z) : 0);
+}
+
+// The ground alone, without road bumps.
+export function groundHeight(x, z) {
   const h = hills(x, z);
   const L = land.level;
   if (!L) return h;
@@ -46,8 +61,8 @@ function hills(x, z) {
 }
 
 // Height, gradient (gx = dh/dx, gz = dh/dz) and second derivatives at (x, z).
-export function terrainSample(x, z) {
-  const e = 0.5, f = terrainHeight;
+export function terrainSample(x, z, f = terrainHeight) {
+  const e = 0.5;
   const h = f(x, z);
   const xp = f(x + e, z), xm = f(x - e, z), zp = f(x, z + e), zm = f(x, z - e);
   return {
@@ -60,8 +75,8 @@ export function terrainSample(x, z) {
   };
 }
 
-export function terrainNormal(x, z) {
-  const { gx, gz } = terrainSample(x, z);
+export function terrainNormal(x, z, f = terrainHeight) {
+  const { gx, gz } = terrainSample(x, z, f);
   const l = Math.hypot(gx, 1, gz);
   return [-gx / l, 1 / l, -gz / l];
 }
@@ -80,8 +95,8 @@ export function terrainMesh(half, cell) {
   const n = axis.length, positions = [], normals = [], indices = [];
   for (const x of axis) {
     for (const z of axis) {
-      positions.push(x, terrainHeight(x, z), z);
-      normals.push(...terrainNormal(x, z));
+      positions.push(x, groundHeight(x, z), z);
+      normals.push(...terrainNormal(x, z, groundHeight));
     }
   }
   const at = (i, j) => i * n + j;

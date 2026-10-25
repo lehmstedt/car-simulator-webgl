@@ -63,10 +63,13 @@ export const VARIANTS = {
 
 // Off the asphalt: grip multiplier, extra linear drag (per second) and rolling
 // resistance (m/s^2). Sand traps bog the car down hard: it crawls out at ~10 km/h.
-// The stage's gravel is loose: less grip, so the car slides and drifts, but it stays fast.
+// The stage's gravel is loose: about a third less grip than asphalt, so the car
+// slides and drifts, but it stays fast. Its verge is looser, rutted dirt: less
+// grip again and it drags, so running wide costs time.
 export const SURFACES = {
   road: { grip: 1, drag: 0, rolling: 0 },
-  gravel: { grip: 0.78, drag: 0.02, rolling: 0.3 },
+  gravel: { grip: 0.66, drag: 0.02, rolling: 0.35 },
+  dirt: { grip: 0.5, drag: 0.08, rolling: 0.7 },
   grass: { grip: 0.75, drag: 0.2, rolling: 0.8 },  // top ~40 km/h
   sand: { grip: 0.6, drag: 0.35, rolling: 1.6 },
 };

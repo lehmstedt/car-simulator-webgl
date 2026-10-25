@@ -12,6 +12,11 @@ sheen toward the horizon, while grass, sand (which glints in the sun) and gravel
 The rally stage's gravel road has two packed wheel ruts.
 A paddock sits beside the start/finish straight: pit wall, garages, race control and team trucks (scenery only, no collisions).
 
+The rally stage is a ~2.9 km point-to-point run on a narrow (6 m) gravel road. Gravel has about a
+third less grip than asphalt, so the car slides and drifts. The verge either side is loose dirt with
+even less grip, and it drags, so running wide costs time. The road is bumpy: rough stretches alternate
+with smoother ones, and taken fast the bumps make the car go light and rock side to side.
+
 ## Handling
 
 The car uses tire forces, so rough driving gets punished:

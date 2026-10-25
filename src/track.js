@@ -2,7 +2,7 @@
 // circuit, or the point-to-point rally stage. They drape over the terrain;
 // road surfaces sit a few cm above the ground.
 
-import { terrainHeight, terrainNormal } from './terrain.js';
+import { terrainHeight, terrainNormal, terrainSample, groundHeight, setRoadBumps } from './terrain.js';
 
 export const LAYOUTS = {
   // Asphalt circuit: two hairpins (~10 m radius) and a few tight corners among
@@ -15,12 +15,13 @@ export const LAYOUTS = {
       [40, -115], [8, -70], [-10, -16], [-36, -12], [-52, -56], [-90, -110],
       [-140, -112], [-166, -70], [-165, 40], [-140, 90], [-95, 98], [-60, 120],
     ],
-    halfWidth: 7, edge: 2.4, sand: true, sausages: true, surface: 'road',
+    halfWidth: 7, edge: 2.4, sand: true, sausages: true, surface: 'road', edgeSurface: 'road',
     colors: { road: [0.32, 0.33, 0.36] },
   },
-  // Rally stage, A to B: a narrow gravel road through the woods, ~2.9 km. Fast
-  // crests along the top, a hairpin at each end of the long switchbacks, a
-  // twisty middle and a fast run down to the flying finish.
+  // Rally stage, A to B: a narrow, bumpy gravel road through the woods, ~2.9 km,
+  // with a verge of loose dirt either side. Fast crests along the top, a hairpin
+  // at each end of the long switchbacks, a twisty middle and a fast run down to
+  // the flying finish.
   stage: {
     closed: false,
     control: [
@@ -33,7 +34,7 @@ export const LAYOUTS = {
       [110, 20], [180, 30], [250, 60], [320, 40], [372, 4], [392, -52], [370, -110],
       [310, -125], [240, -110], [200, -112],
     ],
-    halfWidth: 4, edge: 1.2, sand: false, surface: 'gravel',
+    halfWidth: 3, edge: 1.2, sand: false, surface: 'gravel', edgeSurface: 'dirt', bumps: true,
     start: 40, finish: 120, // m: start line from point A, finish line before the road ends at B
     colors: { road: [0.6, 0.53, 0.42] },
   },
@@ -41,7 +42,22 @@ export const LAYOUTS = {
 
 export const ROAD_LIFT = 0.05;      // m above the ground mesh
 const SAMPLES = 400;                // circuit samples
-const STAGE_STEP = 3;                  // m between stage samples
+const STAGE_STEP = 2;                  // m between stage samples (fine enough for the bumps)
+
+// Stage bumps: the height (m, >= 0) they add `s` meters along the road and `o`
+// meters right of the centerline. Two waves along the road (the shorter one
+// skewed across it, so the car rocks side to side too) whose size swells and
+// fades over ~230 m: rough sections between smoother ones. Full height across
+// the road, easing to nothing over the verge, so the road meets the ground.
+const BUMP_MIN = 0.1, BUMP_MAX = 0.24; // m: roughness of the smoothest / roughest sections
+function bumpHeight(s, o, w, verge) {
+  const a = Math.abs(o);
+  if (a >= w + verge) return 0;
+  const t = Math.max(0, (a - w) / verge), fade = 1 - t * t * (3 - 2 * t);
+  const size = BUMP_MIN + (BUMP_MAX - BUMP_MIN) * (0.5 + 0.5 * Math.sin((2 * Math.PI * s) / 230 + 0.9));
+  const u = 0.5 + 0.5 * (0.55 * Math.sin((2 * Math.PI * s) / 29 + 0.7) + 0.45 * Math.sin((2 * Math.PI * s) / 13 + 2.1 + 0.4 * o));
+  return size * u * u * fade;
+}
 
 // Corner warning boards: a corner is where the radius drops below TIGHT_RADIUS;
 // boards stand this many meters before its entry, on the outside.
@@ -113,6 +129,11 @@ export function buildTrack(layout, avoid = () => false) {
   const length = along[N];
   // Meters from i forward to j (negative behind i on an open road).
   const ahead = closed ? (i, j) => (along[j] - along[i] + length) % length : (i, j) => along[j] - along[i];
+
+  // Road bumps (stage only), by distance along and offset from the centerline.
+  const reach = w + CURB_WIDTH;
+  const bump = layout.bumps ? (s, o) => bumpHeight(s, o, w, CURB_WIDTH) : () => 0;
+  setRoadBumps(layout.bumps ? bumpsAt() : null);
 
   // Signed curvature (1/m, > 0 turning right) over a ~12 m window.
   const curv = pts.map((_, i) => {
@@ -196,8 +217,14 @@ export function buildTrack(layout, avoid = () => false) {
     const positions = [], normals = [], uvs = [];
     const at = (i, o) => {
       const x = pts[i][0] + nor[i][0] * o, z = pts[i][1] + nor[i][1] * o;
-      positions.push(x, terrainHeight(x, z) + lift, z);
-      normals.push(...terrainNormal(x, z));
+      positions.push(x, groundHeight(x, z) + bump(along[i], o) + lift, z);
+      // Slope of the ground plus the bumps' slope along and across the road.
+      const g = terrainSample(x, z, groundHeight), e = 0.25;
+      const ds = (bump(along[i] + e, o) - bump(along[i] - e, o)) / (2 * e);
+      const dn = (bump(along[i], o + e) - bump(along[i], o - e)) / (2 * e);
+      const gx = g.gx + ds * tan[i][0] + dn * nor[i][0], gz = g.gz + ds * tan[i][1] + dn * nor[i][1];
+      const l = Math.hypot(gx, 1, gz);
+      normals.push(-gx / l, 1 / l, -gz / l);
       uvs.push(o, 0); // meters across, for the shader's wheel ruts
     };
     for (let i = 0; i < segs; i++) {
@@ -385,23 +412,53 @@ export function buildTrack(layout, avoid = () => false) {
     finish: mark(finishIndex),
     end: mark(N - 1),
     // Distance from the centerline, how far along the road, and what's underfoot:
-    // track, sand or neither (grass).
+    // track, sand or neither (grass). `surface` is the road's or the edge's
+    // (kerb or verge) SURFACES key on the track, null off it.
     locate(x, z) {
       const r = nearest(x, z);
       const onTrack = r.distance <= w + CURB_WIDTH;
       const out = sandOut[r.side > 0 ? 0 : 1];
       const edge = out[r.index] + (out[(r.index + 1) % N] - out[r.index]) * r.t;
       const dist = along[r.index] + (along[r.index + 1] - along[r.index]) * r.t;
-      return { ...r, along: dist, onTrack, sand: !onTrack && r.distance < edge, sandEdge: edge };
+      const surface = !onTrack ? null : r.distance > w ? layout.edgeSurface : layout.surface;
+      return { ...r, along: dist, onTrack, surface, sand: !onTrack && r.distance < edge, sandEdge: edge };
     },
     // Height of a sausage kerb at (x, z), 0 where there is none.
     sausageHeight,
   };
 
-  // Nearest centerline sample and distance to the centerline polyline.
-  function nearest(x, z) {
-    let best = Infinity, index = 0, frac = 0, side = 1;
+  // World-space bumps for the physics: the segments within reach of the road
+  // are listed per grid cell, so a lookup only checks a handful of them.
+  function bumpsAt() {
+    const CELL = 20, cells = new Map();
+    const key = (cx, cz) => cx * 100003 + cz;
     for (let i = 0; i < segs; i++) {
+      const a = pts[i], b = pts[(i + 1) % N];
+      const x0 = Math.floor((Math.min(a[0], b[0]) - reach) / CELL), x1 = Math.floor((Math.max(a[0], b[0]) + reach) / CELL);
+      const z0 = Math.floor((Math.min(a[1], b[1]) - reach) / CELL), z1 = Math.floor((Math.max(a[1], b[1]) + reach) / CELL);
+      for (let cx = x0; cx <= x1; cx++) {
+        for (let cz = z0; cz <= z1; cz++) {
+          const k = key(cx, cz);
+          if (!cells.has(k)) cells.set(k, []);
+          cells.get(k).push(i);
+        }
+      }
+    }
+    return (x, z) => {
+      const list = cells.get(key(Math.floor(x / CELL), Math.floor(z / CELL)));
+      if (!list) return 0;
+      const r = nearest(x, z, list);
+      if (r.distance >= reach) return 0;
+      return bump(along[r.index] + (along[r.index + 1] - along[r.index]) * r.t, r.distance * r.side);
+    };
+  }
+
+  // Nearest centerline sample and distance to the centerline polyline
+  // (checking only the segments in `list`, if given).
+  function nearest(x, z, list = null) {
+    let best = Infinity, index = 0, frac = 0, side = 1;
+    for (let j = 0, n = list ? list.length : segs; j < n; j++) {
+      const i = list ? list[j] : j;
       const a = pts[i], b = pts[(i + 1) % N];
       const ex = b[0] - a[0], ez = b[1] - a[1];
       const t = Math.max(0, Math.min(1, ((x - a[0]) * ex + (z - a[1]) * ez) / (ex * ex + ez * ez)));
