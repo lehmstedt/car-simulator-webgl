@@ -61,9 +61,11 @@ function blob(m, T, r, cy) {
 // `opts` (stage-style roads): how many trees at most, after how many tries,
 // and `chunk`, a size (m) to split the forest into square pieces so far ones
 // can be skipped when drawing (0: one piece). `spots` (Montreal downtown):
-// candidate places, each planted where clear.
+// candidate places, each planted where clear. `near` and `spread` (m): how
+// close to the road the woods start and how far they reach; `thick`: dense
+// forest with only small clearings, in simpler trees (the Nordschleife).
 export function buildTrees(clear, height, road = null, opts = {}) {
-  const { count: most = 900, tries = 9000, chunk = 0, spots = null } = opts;
+  const { count: most = 900, tries = 9000, chunk = 0, spots = null, near = 8, spread = 60, thick = false } = opts;
   const rand = rng(7);
   const pieces = new Map(); // chunk key -> meshes
   let trunks, pines, leaves, leavesLight;
@@ -79,9 +81,10 @@ export function buildTrees(clear, height, road = null, opts = {}) {
     ({ trunks, pines, leaves, leavesLight } = pieces.get(key));
   };
   const taken = new Map(); // coarse grid, keeps trees a few meters apart
-  const cellOf = (x, z) => `${Math.floor(x / 4)},${Math.floor(z / 4)}`;
+  const CELL = thick ? 3.2 : 4;
+  const cellOf = (x, z) => `${Math.floor(x / CELL)},${Math.floor(z / CELL)}`;
   const free = (x, z) => {
-    for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) if (taken.has(cellOf(x + dx * 4, z + dz * 4))) return false;
+    for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) if (taken.has(cellOf(x + dx * CELL, z + dz * CELL))) return false;
     return true;
   };
   // Clumps: a smooth density field, so trees gather in woods with open fields between.
@@ -91,12 +94,14 @@ export function buildTrees(clear, height, road = null, opts = {}) {
   const plant = (x, z) => {
     pick(x, z);
     const T = { x, z, y: height(x, z) - 0.2, yaw: rand() * Math.PI * 2, s: 0.8 + rand() * 0.6, sy: 0.85 + rand() * 0.35 };
-    if (rand() < 0.55) {
-      cone(trunks, T, 0.28, 0.2, 0, 2, 5);
-      cone(pines, T, 2.4, 0.9, 1.6, 5.2, 7);
-      cone(pines, T, 1.8, 0, 4.2, 8.4, 7);
+    const sides = thick ? 5 : 7;
+    if (thick) T.s *= 1.15; // a taller, older forest
+    if (rand() < (thick ? 0.65 : 0.55)) {
+      cone(trunks, T, 0.28, 0.2, 0, 2, thick ? 4 : 5);
+      cone(pines, T, 2.4, 0.9, 1.6, 5.2, sides);
+      cone(pines, T, 1.8, 0, 4.2, 8.4, sides);
     } else {
-      cone(trunks, T, 0.32, 0.24, 0, 3.2, 5);
+      cone(trunks, T, 0.32, 0.24, 0, 3.2, thick ? 4 : 5);
       const crown = rand() < 0.5 ? leaves : leavesLight;
       blob(crown, T, 2.6, 4.6);
       blob(crown, { ...T, x: x + Math.cos(T.yaw) * 1.3 * T.s, z: z + Math.sin(T.yaw) * 1.3 * T.s }, 1.8, 3.9);
@@ -115,9 +120,9 @@ export function buildTrees(clear, height, road = null, opts = {}) {
     const { points, tangents } = road;
     for (let i = 0; i < tries && count < most; i++) {
       const k = Math.floor(rand() * points.length), [px, pz] = points[k], [tx, tz] = tangents[k];
-      const off = (rand() < 0.5 ? -1 : 1) * (8 + rand() * rand() * 60);
+      const off = (rand() < 0.5 ? -1 : 1) * (near + rand() * rand() * spread);
       const x = px - tz * off, z = pz + tx * off;
-      if (rand() > density(x, z) * 0.6 + 0.35 || !clear(x, z) || !free(x, z)) continue;
+      if (rand() > density(x, z) * 0.6 + (thick ? 0.7 : 0.35) || !clear(x, z) || !free(x, z)) continue;
       plant(x, z);
     }
     return { pieces: [...pieces.values()], count };

@@ -55,14 +55,16 @@ export const LAYOUTS = {
   },
   // The Nürburgring Nordschleife: 20.7 km through the Eifel forest with ~290 m
   // of climb, its path and heights from real map and elevation data
-  // (nordschleife.js). A 9 m asphalt road with white edge lines and grass
-  // verges; no kerbs or sand. Laps start and end at T13.
+  // (nordschleife.js). A 9 m asphalt road with white edge lines, tall red and
+  // white kerbs through the bends, Armco guardrails a couple of meters off the
+  // road all the way round, and grass verges into the woods. Laps start and
+  // end at T13.
   ring: {
     closed: true,
     control: NORDSCHLEIFE.road.map(([x, z]) => [x, z]),
     step: 3, // m between road samples
     halfWidth: 4.5, edge: 0.3, sand: false, sausages: false, surface: 'road', edgeSurface: 'road',
-    verge: true, sections: NORDSCHLEIFE.sections,
+    verge: true, kerbs: true, rails: true, sections: NORDSCHLEIFE.sections,
     colors: { road: [0.3, 0.31, 0.33] },
   },
   // Downtown Montreal, from open map data (scripts/downtown/): Sherbrooke, Peel,
@@ -124,6 +126,19 @@ const SAUSAGE_GAP = 0.08;           // m between the flat kerb and the sausage
 const SAUSAGE_BEFORE = 5, SAUSAGE_AFTER = 8; // m of sausages before / after the apex
 const PIECE = 2, PIECE_GAP = 0.35;  // m: length of each piece, gap between them
 const PIECE_ROUND = 0.35;           // m over which each end rounds down
+
+// Nordschleife kerbs: red/white blocks on both sides of every bend tighter
+// than KERB_RADIUS, from a little before to a little after. They are tall and
+// ramped (KERB_TOP at their outer edge), so a car that rides them is thrown
+// about and loses grip (they count as sausages for the physics).
+const KERB_RADIUS = 160;            // m
+const KERB_W = 1.1;                 // m wide
+const KERB_TOP = 0.09;              // m high at the outer edge
+const KERB_BEFORE = 15, KERB_AFTER = 15; // m of kerb before / after each bend sample
+// Armco: a double steel guardrail on posts, RAIL_GAP past the kerb or edge.
+const RAIL_GAP = 1.6;               // m from the kerb's outer edge to the rail
+const RAIL_LOW = 0.38, RAIL_HIGH = 1.05; // m: bottom of the lower beam, top of the upper one
+const RAIL_POST = 3;                // m between posts (one per road sample)
 
 // `avoid(x, z)` marks ground that must stay clear of sand (the paddock).
 export function buildTrack(layout, avoid = () => false) {
@@ -264,6 +279,38 @@ export function buildTrack(layout, avoid = () => false) {
     });
   });
 
+  // Kerb width (m) past the edge line, per sample, for each side (0: right, 1: left).
+  const edgeOut = w + CURB_WIDTH;
+  const kerbOut = [new Float64Array(N), new Float64Array(N)];
+  for (let j = 0; j < N && layout.kerbs; j++) {
+    if (Math.abs(curv[j]) < 1 / KERB_RADIUS) continue;
+    for (const k of kerbOut) {
+      for (let i = j; ahead(i, j) < KERB_BEFORE; i = prev(i)) { k[i] = KERB_W; if (prev(i) === i) break; }
+      for (let i = j; ahead(j, i) < KERB_AFTER; i = next(i)) { k[i] = KERB_W; if (next(i) === i) break; }
+    }
+  }
+  // Guardrail offset from the centerline per sample and side, 0 where there is
+  // none: just past the kerb, pulled in on the inside of tight bends, and left
+  // out where another part of the road comes close.
+  const railOut = [new Float64Array(N), new Float64Array(N)];
+  for (let s = 0; s < 2 && layout.rails; s++) {
+    const side = s === 0 ? 1 : -1;
+    for (let i = 0; i < N; i++) {
+      const want = edgeOut + kerbOut[s][i] + RAIL_GAP;
+      const lim = curv[i] * side > 0 ? 0.85 / Math.abs(curv[i]) : Infinity;
+      let o = Math.min(want, lim);
+      const x = pts[i][0] + nor[i][0] * (o + 2) * side, z = pts[i][1] + nor[i][1] * (o + 2) * side;
+      const r = nearest(x, z);
+      const own = ahead(i, r.index) < 30 || ahead(r.index, i) < 30;
+      railOut[s][i] = own && o > edgeOut + kerbOut[s][i] + 0.4 ? o : 0;
+    }
+  }
+  // Offset of the rail at a point `t` of the way along segment i (0: none).
+  const railAt = (s, i, t) => {
+    const a = railOut[s][i], b = railOut[s][(i + 1) % N];
+    return a && b ? a + (b - a) * t : 0;
+  };
+
   // A strip between offsets [inner, outer] from the centerline, draped over the
   // terrain and lifted by `lift`. It's split into `lanes` across so it follows
   // the ground's curvature. `filter(i, lane)` picks pieces (alternating curb colors).
@@ -277,7 +324,7 @@ export function buildTrack(layout, avoid = () => false) {
       const dn = (bump(along[i], o + e) - bump(along[i], o - e)) / (2 * e);
       const gx = g.gx + ds * tan[i][0] + dn * nor[i][0], gz = g.gz + ds * tan[i][1] + dn * nor[i][1];
       const l = Math.hypot(gx, 1, gz);
-      return [x, groundHeight(x, z) + bump(along[i], o) + lift, z, -gx / l, 1 / l, -gz / l];
+      return [x, groundHeight(x, z) + bump(along[i], o) + (typeof lift === 'function' ? lift(o) : lift), z, -gx / l, 1 / l, -gz / l];
     }, positions, normals, (o) => uvs.push(o, 0)); // meters across, for the shader's wheel ruts
     for (let i = 0; i < segs; i++) {
       const k = (i + 1) % N;
@@ -467,6 +514,87 @@ export function buildTrack(layout, avoid = () => false) {
     return 0;
   }
 
+  // Kerb surface height (m above the road) `u` meters past the edge line: a
+  // ramp up to KERB_TOP over the first 40%, then flat.
+  const kerbLift = (u) => KERB_TOP * Math.min(1, Math.max(0, u) / (KERB_W * 0.4));
+  // The kerbs on one side (1: right, -1: left), in blocks picked by `filter(i)`.
+  function kerbStrip(side, filter) {
+    const s = side > 0 ? 0 : 1, positions = [], normals = [], uvs = [];
+    const US = [0, 0.15, 0.3, 0.44, 0.7, 1];
+    const at = vertexCache((i, o) => {
+      const x = pts[i][0] + nor[i][0] * o * side, z = pts[i][1] + nor[i][1] * o * side;
+      const u = o - edgeOut, n = terrainNormal(x, z, groundHeight);
+      // Tilt the normal toward the road on the ramp, so it catches the light.
+      const ramp = u < KERB_W * 0.4 ? KERB_TOP / (KERB_W * 0.4) : 0;
+      const nx = n[0] - nor[i][0] * side * ramp, nz = n[2] - nor[i][1] * side * ramp, l = Math.hypot(nx, n[1], nz);
+      return [x, groundHeight(x, z) + ROAD_LIFT + 0.01 + kerbLift(u), z, nx / l, n[1] / l, nz / l];
+    }, positions, normals, (o) => uvs.push(o * side, 0));
+    for (let i = 0; i < segs; i++) {
+      const k = (i + 1) % N;
+      if (!kerbOut[s][i] || !kerbOut[s][k] || !filter(i)) continue;
+      for (let l = 0; l + 1 < US.length; l++) {
+        const o0 = edgeOut + US[l] * KERB_W, o1 = edgeOut + US[l + 1] * KERB_W;
+        for (const [p, o] of [[i, o0], [i, o1], [k, o1], [i, o0], [k, o1], [k, o0]]) at(p, o);
+      }
+      // Outer face, down to the grass.
+      const o = edgeOut + KERB_W;
+      for (const [p, dy] of [[i, 0], [k, 0], [k, 1], [i, 0], [k, 1], [i, 1]]) {
+        const x = pts[p][0] + nor[p][0] * o * side, z = pts[p][1] + nor[p][1] * o * side;
+        positions.push(x, groundHeight(x, z) + ROAD_LIFT + 0.01 + (dy ? 0 : KERB_TOP), z);
+        normals.push(nor[p][0] * side, 0, nor[p][1] * side);
+        uvs.push(o * side, 0);
+      }
+    }
+    return { positions, normals, uvs };
+  }
+  // Guardrails: posts and beams, as boxes along the rail line.
+  function railMeshes() {
+    const beams = { positions: [], normals: [] }, posts = { positions: [], normals: [] };
+    const quad = (m, a, b, c, d, n) => { for (const p of [a, b, c, a, c, d]) { m.positions.push(...p); m.normals.push(...n); } };
+    for (let s = 0; s < 2; s++) {
+      const side = s === 0 ? 1 : -1;
+      const P = (i) => {
+        const o = railOut[s][i], x = pts[i][0] + nor[i][0] * o * side, z = pts[i][1] + nor[i][1] * o * side;
+        return { x, z, y: groundHeight(x, z), n: [-nor[i][0] * side, -nor[i][1] * side] }; // n faces the road
+      };
+      for (let i = 0; i < segs; i++) {
+        const k = (i + 1) % N;
+        if (!railOut[s][i]) continue;
+        const a = P(i);
+        // Post: a thin box behind the beams.
+        const px = a.x - a.n[0] * 0.18, pz = a.z - a.n[1] * 0.18, t = [-a.n[1], a.n[0]], hw = 0.06;
+        for (const [ux, uz, nx, nz] of [[1, 0, a.n[0], a.n[1]], [-1, 0, -a.n[0], -a.n[1]], [0, 1, t[0], t[1]], [0, -1, -t[0], -t[1]]]) {
+          const cx = px + (a.n[0] * ux + t[0] * uz) * hw, cz = pz + (a.n[1] * ux + t[1] * uz) * hw;
+          const ex = (t[0] * ux - a.n[0] * uz) * hw, ez = (t[1] * ux - a.n[1] * uz) * hw;
+          quad(posts, [cx - ex, a.y - 0.3, cz - ez], [cx + ex, a.y - 0.3, cz + ez], [cx + ex, a.y + RAIL_HIGH - 0.05, cz + ez], [cx - ex, a.y + RAIL_HIGH - 0.05, cz - ez], [nx, 0, nz]);
+        }
+        if (!railOut[s][k]) continue;
+        const b = P(k);
+        // Two beams, each a front, a back and a top.
+        const mid = (RAIL_LOW + RAIL_HIGH) / 2;
+        for (const [y0, y1] of [[RAIL_LOW, mid - 0.04], [mid + 0.04, RAIL_HIGH]]) {
+          const F = (q, y, d) => [q.x - q.n[0] * d, q.y + y, q.z - q.n[1] * d];
+          const nf = [(a.n[0] + b.n[0]) / 2, 0, (a.n[1] + b.n[1]) / 2];
+          quad(beams, F(a, y0, 0), F(b, y0, 0), F(b, y1, 0), F(a, y1, 0), nf);
+          quad(beams, F(b, y0, 0.1), F(a, y0, 0.1), F(a, y1, 0.1), F(b, y1, 0.1), nf.map((v) => -v));
+          quad(beams, F(a, y1, 0), F(b, y1, 0), F(b, y1, 0.1), F(a, y1, 0.1), [0, 1, 0]);
+        }
+      }
+    }
+    return { beams, posts };
+  }
+  // Height of a kerb at (x, z) above the road, 0 off them.
+  function kerbHeight(x, z) {
+    if (!layout.kerbs) return 0;
+    const r = nearest(x, z), s = r.side > 0 ? 0 : 1;
+    const k = kerbOut[s][r.index] && kerbOut[s][(r.index + 1) % N];
+    const u = r.distance - edgeOut;
+    if (!k || u < 0 || u > KERB_W) return 0;
+    // A ripple along the blocks, so riding them shakes the car.
+    const d = along[r.index] + (along[r.index + 1] - along[r.index]) * r.t;
+    return Math.max(0.01, kerbLift(u) * (0.75 + 0.25 * Math.sin(d * 4.2)));
+  }
+
   // Sample index `d` meters along the road.
   const indexAt = (d) => Math.max(0, along.findIndex((a) => a >= d));
   // Start and finish lines: the same line on a circuit, at each end of a stage.
@@ -489,11 +617,16 @@ export function buildTrack(layout, avoid = () => false) {
   } else if (layout.verge) {
     // Nordschleife: asphalt with white edge lines, on grass verges that show
     // the exact ground out to RING_VERGE (see terrain.js).
+    const red = (i) => i % 2 === 0, rails = railMeshes();
     layers = [
       { mesh: merge(vergeStrip(1), vergeStrip(-1)), color: [0.3, 0.55, 0.3], mat: 'grass' },
       { mesh: strip(-w, w, ROAD_LIFT, undefined, 4), color: layout.colors.road, mat: 'asphalt' },
       { mesh: edges(() => true), color: [0.92, 0.92, 0.9], mat: 'line' },
+      { mesh: merge(kerbStrip(1, red), kerbStrip(-1, red)), color: [0.85, 0.15, 0.12], mat: 'kerb', raised: true },
+      { mesh: merge(kerbStrip(1, (i) => !red(i)), kerbStrip(-1, (i) => !red(i))), color: [0.95, 0.95, 0.95], mat: 'kerb', raised: true },
       { mesh: line(startIndex, () => true), color: [0.95, 0.95, 0.95], mat: 'line', top: true },
+      { mesh: rails.beams, color: [0.72, 0.74, 0.76], mat: 'metal', solid: true },
+      { mesh: rails.posts, color: [0.5, 0.52, 0.55], mat: 'metal', solid: true },
     ];
   } else if (closed) {
     const red = (i) => Math.floor(i / 2) % 2 === 0;
@@ -539,15 +672,27 @@ export function buildTrack(layout, avoid = () => false) {
     // (kerb or verge) SURFACES key on the track, null off it.
     locate(x, z) {
       const r = nearest(x, z);
-      const onTrack = r.distance <= w + CURB_WIDTH;
+      const kerb = kerbOut[r.side > 0 ? 0 : 1];
+      const onTrack = r.distance <= w + CURB_WIDTH + Math.min(kerb[r.index], kerb[(r.index + 1) % N]);
       const out = sandOut[r.side > 0 ? 0 : 1];
       const edge = out[r.index] + (out[(r.index + 1) % N] - out[r.index]) * r.t;
       const dist = along[r.index] + (along[r.index + 1] - along[r.index]) * r.t;
       const surface = !onTrack ? null : r.distance > w ? layout.edgeSurface : layout.surface;
-      return { ...r, along: dist, onTrack, surface, sand: !onTrack && r.distance < edge, sandEdge: edge };
+      const rail = railAt(r.side > 0 ? 0 : 1, r.index, r.t);
+      return { ...r, along: dist, onTrack, surface, sand: !onTrack && r.distance < edge, sandEdge: edge, rail };
     },
-    // Height of a sausage kerb at (x, z), 0 where there is none.
-    sausageHeight,
+    // Height of a sausage kerb (or a tall Nordschleife kerb) at (x, z), 0 where there is none.
+    sausageHeight: layout.kerbs ? (x, z) => Math.max(sausageHeight(x, z), kerbHeight(x, z)) : sausageHeight,
+    // Guardrails: a point pushed into one gives how deep and which way out
+    // (toward the road); points well behind a rail are left alone.
+    blocked: layout.rails ? (x, z) => {
+      const r = nearest(x, z), o = railAt(r.side > 0 ? 0 : 1, r.index, r.t);
+      const depth = r.distance - (o - 0.05);
+      if (!o || depth <= 0 || depth > 1.5) return null;
+      const a = pts[r.index], b = pts[(r.index + 1) % N];
+      const cx = a[0] + (b[0] - a[0]) * r.t, cz = a[1] + (b[1] - a[1]) * r.t, l = Math.hypot(cx - x, cz - z) || 1;
+      return { depth, nx: (cx - x) / l, nz: (cz - z) / l };
+    } : undefined,
   };
 
   // World-space bumps for the physics: the segments within reach of the road
