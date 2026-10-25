@@ -21,8 +21,8 @@ export function createProgram(gl, vsSrc, fsSrc) {
   return p;
 }
 
-// mesh = { positions: number[], normals: number[], uvs?: number[], mode? }
-export function createMesh(gl, program, { positions, normals, uvs, mode = gl.TRIANGLES }) {
+// mesh = { positions: number[], normals: number[], uvs?: number[], indices?: number[], mode? }
+export function createMesh(gl, program, { positions, normals, uvs, indices, mode = gl.TRIANGLES }) {
   const vao = gl.createVertexArray();
   gl.bindVertexArray(vao);
   const attach = (name, data, size = 3) => {
@@ -36,6 +36,10 @@ export function createMesh(gl, program, { positions, normals, uvs, mode = gl.TRI
   attach('aPosition', positions);
   attach('aNormal', normals);
   if (uvs) attach('aUV', uvs, 2);
+  if (indices) {
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, gl.createBuffer());
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint32Array(indices), gl.STATIC_DRAW);
+  }
   gl.bindVertexArray(null);
-  return { vao, count: positions.length / 3, mode };
+  return { vao, count: indices ? indices.length : positions.length / 3, mode, indexed: !!indices };
 }

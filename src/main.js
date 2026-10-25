@@ -79,7 +79,7 @@ const uTextured = gl.getUniformLocation(program, 'uTextured');
 const track = buildTrack();
 const meshes = {
   cube: createMesh(gl, program, cube()),
-  ground: createMesh(gl, program, terrainMesh(600, 6)),
+  ground: createMesh(gl, program, terrainMesh(600, 8)),
   road: createMesh(gl, program, track.meshes.road),
   curbRed: createMesh(gl, program, track.meshes.curbRed),
   curbWhite: createMesh(gl, program, track.meshes.curbWhite),
@@ -192,7 +192,8 @@ function draw(mesh, model, color, gridSize = 0, alpha = 1) {
   gl.uniform1f(uGrid, gridSize);
   gl.uniform1f(uAlpha, alpha);
   gl.bindVertexArray(mesh.vao);
-  gl.drawArrays(mesh.mode, 0, mesh.count);
+  if (mesh.indexed) gl.drawElements(mesh.mode, mesh.count, gl.UNSIGNED_INT, 0);
+  else gl.drawArrays(mesh.mode, 0, mesh.count);
 }
 
 const WHEELS = [[-1, 1.3, true], [1, 1.3, true], [-1, -1.3, false], [1, -1.3, false]];
