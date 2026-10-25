@@ -35,8 +35,6 @@ export class Car {
     this.yawInertia = 1800;    // kg m^2
     this.cgHeight = 0.5;       // m, sets how much weight shifts under accel/brake
     this.maxSteer = 0.6;       // rad at standstill
-    this.steerInRate = 1.6;    // rad/s turning the wheel in: tap for small inputs
-    this.steerOutRate = 3.0;   // rad/s back toward center
     this.maxDrive = 5500;      // N at the tires (low speed)
     this.power = 140000;       // W, caps drive force at speed
     this.reverseForce = 4000;  // N
@@ -81,13 +79,11 @@ export class Car {
   get speed() { return this.vx; }
 
   update(dt, c, onGrass = false) {
-    // Steering is rate limited: holding a key winds on lock steadily, so short
-    // taps give gentle inputs and holding it is the "rough" input that gets punished.
+    // The wheel input is already gradual (see input.js); map it to road-wheel
+    // angle. Lock shrinks only a little with speed, so cranking the wheel at
+    // speed still overloads the tires: that's the punishment for rough steering.
     const lock = this.maxSteer / (1 + Math.abs(this.vx) * 0.03);
-    const target = c.steer * lock;
-    const turningIn = Math.abs(target) > Math.abs(this.steer) && target * this.steer >= 0;
-    const rate = (turningIn ? this.steerInRate : this.steerOutRate) * dt;
-    this.steer += clamp(target - this.steer, -rate, rate);
+    this.steer = c.steer * lock;
 
     // Pedals ramp in (keys are on/off) but release twice as fast.
     const ramp = (cur, want) => cur + clamp(want - cur, -2 * this.pedalRate * dt, this.pedalRate * dt);

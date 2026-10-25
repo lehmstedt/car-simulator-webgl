@@ -7,7 +7,7 @@
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;700&display=swap">
 <style>
-  /* Full-bleed 3D view; HUD top-left, steering pads bottom-left, pedals bottom-right. One look in both themes. */
+  /* Full-bleed 3D view; HUD top-left, steering wheel bottom-left, pedals bottom-right. One look in both themes. */
   :root {
     color-scheme: dark;
     --sky: #8cbfef;
@@ -79,6 +79,12 @@
     display: grid; place-items: center; touch-action: none; cursor: pointer;
     transition: transform .06s, background .06s;
   }
+  #wheel {
+    width: 132px; height: 132px; border-radius: 50%; color: var(--hud-fg);
+    background: var(--pad-bg); touch-action: none; cursor: grab;
+  }
+  #wheel.on { color: var(--accent); cursor: grabbing; }
+  #wheel svg { width: 100%; height: 100%; display: block; }
   .pad svg { width: 30px; height: 30px; fill: currentColor; }
   .pad.pedal { border-radius: 14px; width: 72px; }
   .pad.pedal.gas { height: 116px; border-color: var(--gas); }
@@ -109,8 +115,14 @@
 </div>
 <div class="controls">
   <div class="group">
-    <button class="pad" data-ctl="left" type="button" aria-label="Steer left"><svg viewBox="0 0 24 24"><path d="M15 4 7 12l8 8z"/></svg></button>
-    <button class="pad" data-ctl="right" type="button" aria-label="Steer right"><svg viewBox="0 0 24 24"><path d="m9 4 8 8-8 8z"/></svg></button>
+    <div id="wheel" role="img" aria-label="Steering wheel: drag to turn">
+      <svg viewBox="0 0 100 100" aria-hidden="true">
+        <circle cx="50" cy="50" r="42" fill="none" stroke="currentColor" stroke-width="9"/>
+        <path d="M9 52 L38 56 L50 62 L62 56 L91 52 M50 62 L50 92" fill="none" stroke="currentColor" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+        <circle cx="50" cy="54" r="10" fill="currentColor"/>
+        <rect x="46" y="4" width="8" height="10" rx="2" fill="var(--accent)"/>
+      </svg>
+    </div>
   </div>
   <div class="group">
     <button class="pad pedal brake" data-ctl="brake" type="button">Brake</button>

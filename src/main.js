@@ -1,7 +1,7 @@
 import { createProgram, createMesh } from './gl.js';
 import { cube, plane } from './geometry.js';
 import { perspective, lookAt, multiply, trs, identity } from './math.js';
-import { readControls } from './input.js';
+import { readControls, resetWheel } from './input.js';
 import { Car, VARIANTS } from './car.js';
 import { Skids } from './skids.js';
 import { buildTrack, ROAD_HALF_WIDTH } from './track.js';
@@ -104,6 +104,7 @@ function switchDrive() {
 
 function resetRace() {
   car.reset(...startPose());
+  resetWheel();
   cam.x = car.x + Math.sin(car.heading) * 9;
   cam.z = car.z + Math.cos(car.heading) * 9;
   lap.start = null;
@@ -187,7 +188,7 @@ function frame(now) {
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
 
-  const controls = readControls();
+  const controls = readControls(dt);
   if (controls.switchDrive) switchDrive();
   else if (controls.reset) resetRace();
   const where = track.locate(car.x, car.z);
