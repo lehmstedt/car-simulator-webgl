@@ -74,7 +74,7 @@ const sky = new Sky(gl);
 // buildings. Rebuilt when the layout changes.
 // M / the Track button cycles through them in this order.
 const LAYOUT_ORDER = ['circuit', 'stage', 'montreal', 'downtown', 'ring', 'verdun'];
-const LAYOUT_NAMES = { circuit: 'Circuit', stage: 'Stage', montreal: 'Montréal', downtown: 'Downtown MTL', ring: 'Nordschleife', verdun: 'Verdun' };
+const LAYOUT_NAMES = { circuit: 'Circuit', stage: 'Stage', montreal: 'Montréal', downtown: 'Downtown MTL', ring: 'Nordschleife', verdun: 'Verdun–Downtown' };
 let layout = 'circuit';
 try { const v = localStorage.getItem('layout'); if (LAYOUT_ORDER.includes(v)) layout = v; } catch {}
 // Scenery further than this (m) isn't drawn: past the far plane, or lost in the haze.
@@ -84,6 +84,7 @@ let world = null, track = null;
 function buildWorld(kind) {
   if (world) {
     for (const m of world.gpu) deleteMesh(gl, m);
+    for (const c of world.cells ?? []) unloadCell(c);
     gl.deleteTexture(world.signs.texture);
   }
   setTerrain(kind);
@@ -154,14 +155,15 @@ function buildWorld(kind) {
   };
 }
 
-// Verdun: streets, buildings, trees and the river from map data (openmap.js).
+// Open map, Verdun to downtown: streets, buildings, trees and the river from
+// map data (openmap.js). Buildings and trees come in cells whose meshes are
+// made when the car comes near and freed when it's far (see streamCells).
 function buildVerdunWorld() {
   const t = buildOpenMap();
   const gpu = [];
   const upload = (m) => { const mesh = createMesh(gl, program, m); gpu.push(mesh); return mesh; };
   const signs = new Signs(gl, program, []);
   gpu.push(signs.faces);
-  const trees = buildTreesAt(t.trees, terrainHeight);
   return {
     kind: 'verdun',
     track: t,
@@ -179,24 +181,47 @@ function buildVerdunWorld() {
     boxes: [],
     cars: [],
     barriers: upload(t.barriers),
-    buildings: t.buildingChunks().map((c) => ({
-      x: c.x, z: c.z, radius: c.radius,
-      parts: [
-        ...c.walls.map((m, i) => [m.positions.length && upload(m), BRICKS[i][0], 'facade']),
-        [c.sheds.positions.length && upload(c.sheds), [0.55, 0.5, 0.44], 'concrete'],
-        [c.roofs.positions.length && upload(c.roofs), [0.27, 0.27, 0.28], 'concrete'],
-      ].filter(([m]) => m),
-    })),
-    trees: trees.pieces.map((p) => ({
-      x: p.x, z: p.z, radius: p.radius,
-      parts: [
-        [upload(p.trunks), [0.36, 0.25, 0.16], 'bark'],
-        [upload(p.leaves), [0.22, 0.45, 0.17], 'leaves'],
-        [upload(p.leavesLight), [0.36, 0.55, 0.2], 'leaves'],
-      ],
-    })),
+    cells: t.cells.map((data) => ({ x: data.x, z: data.z, radius: data.radius, data, buildings: null, trees: null, gpu: [] })),
+    trees: [],
     gpu,
   };
+}
+
+// Makes a cell's meshes (open map).
+function loadCell(c) {
+  const upload = (m) => { const mesh = createMesh(gl, program, m); c.gpu.push(mesh); return mesh; };
+  const m = track.cellMeshes(c.data);
+  c.buildings = [
+    ...m.walls.map((w, i) => [w.positions.length && upload(w), BRICKS[i][0], 'facade']),
+    [m.towers.positions.length && upload(m.towers), [0.32, 0.42, 0.5], 'curtain'],
+    [m.sheds.positions.length && upload(m.sheds), [0.55, 0.5, 0.44], 'concrete'],
+    [m.roofs.positions.length && upload(m.roofs), [0.27, 0.27, 0.28], 'concrete'],
+  ].filter(([mesh]) => mesh);
+  const p = buildTreesAt(c.data.trees, terrainHeight, 1e9).pieces[0];
+  c.trees = p ? [
+    [upload(p.trunks), [0.36, 0.25, 0.16], 'bark'],
+    [upload(p.leaves), [0.22, 0.45, 0.17], 'leaves'],
+    [upload(p.leavesLight), [0.36, 0.55, 0.2], 'leaves'],
+  ].filter(([mesh]) => mesh.count) : [];
+}
+function unloadCell(c) {
+  for (const m of c.gpu) deleteMesh(gl, m);
+  c.gpu = [];
+  c.buildings = c.trees = null;
+}
+// Loads cells coming within reach of (x, z), nearest first (one per frame
+// unless `all`, so driving never stutters), and frees those left far behind.
+function streamCells(x, z, all = false) {
+  if (!world.cells) return;
+  const near = (c) => Math.hypot(c.x - x, c.z - z) - c.radius;
+  const want = [];
+  for (const c of world.cells) {
+    const d = near(c);
+    if (c.buildings && d > world.drawDistance + 400) unloadCell(c);
+    else if (!c.buildings && d < world.drawDistance + 150) want.push([d, c]);
+  }
+  want.sort((a, b) => a[0] - b[0]);
+  for (const [, c] of all ? want : want.slice(0, 1)) loadCell(c);
 }
 
 const meshes = {
@@ -294,6 +319,7 @@ function switchDrive() {
 
 function resetRace() {
   car.reset(...startPose());
+  streamCells(car.x, car.z, true);
   resetWheel();
   cam.x = car.x + Math.sin(car.heading) * 9;
   cam.z = car.z + Math.cos(car.heading) * 9;
@@ -745,6 +771,7 @@ function frame(now) {
   }
   const proj = perspective(cockpit ? fovy * 1.1 : fovy, aspect, cockpit ? 0.05 : 0.1, world.far);
   const viewProj = multiply(proj, viewMat);
+  streamCells(eyePos[0], eyePos[2]);
   sky.draw(viewProj, eyePos, now / 1000);
   gl.useProgram(program);
   gl.uniformMatrix4fv(uViewProj, false, viewProj);
@@ -770,6 +797,10 @@ function frame(now) {
   for (const l of world.layers) if (l.top) draw(l.mesh, identity(), l.color, l.mat);
   if (skids.used) draw(skids.mesh, identity(), [0.12, 0.12, 0.13], 'rubber');
   gl.disable(gl.POLYGON_OFFSET_FILL);
+  for (const c of world.cells ?? []) {
+    if (!c.trees || !seen(c, world.treeDistance)) continue;
+    for (const [mesh, color, mat] of c.trees) draw(mesh, identity(), color, mat);
+  }
   for (const t of world.trees) {
     if (!seen(t, world.treeDistance)) continue;
     for (const [mesh, color, mat] of t.parts) draw(mesh, identity(), color, mat); // open cones: no culling
@@ -779,9 +810,9 @@ function frame(now) {
     draw(world.city.roofs, identity(), [0.36, 0.37, 0.38], 'concrete');
   }
   gl.enable(gl.CULL_FACE);
-  for (const b of world.buildings ?? []) {
-    if (!seen(b)) continue;
-    for (const [mesh, color, mat] of b.parts) draw(mesh, identity(), color, mat);
+  for (const c of world.cells ?? []) {
+    if (!c.buildings || !seen(c)) continue;
+    for (const [mesh, color, mat] of c.buildings) draw(mesh, identity(), color, mat);
   }
   if (world.barriers) draw(world.barriers, identity(), [0.7, 0.7, 0.68], 'concrete');
 

@@ -1,13 +1,15 @@
-// Verdun, Montreal: an open map to drive around freely, no laps. Streets,
-// buildings, trees and the river come from public map data (verdun.js). The
-// ground is flat (Verdun is), so everything sits at height 0.
+// Montreal from Verdun to downtown: an open map to drive around freely, no
+// laps. Streets, buildings, trees and the river come from public map data
+// (verdun.js). The ground is flat, so everything sits at height 0 (in truth
+// downtown climbs ~50 m from the canal to Sherbrooke).
 //
 // - Streets are asphalt strips with round joins, so bends and crossings have
 //   no gaps; the bigger ones have sidewalks and a yellow center line.
 // - Buildings are their footprints pushed up to their height, with windows
 //   drawn by the shader. The car can't drive through them.
-// - The map ends at the river, the aqueduct canal and, on land, a low
-//   concrete barrier along the borough's edge.
+// - The street bridges over the Lachine and aqueduct canals have railings.
+// - The map ends at the river, the canals and, on land, a low concrete
+//   barrier along its edge.
 
 import { VERDUN } from './verdun.js';
 import { ROAD_LIFT } from './track.js';
@@ -16,7 +18,7 @@ import { ROAD_LIFT } from './track.js';
 const HALF = { primary: 7, secondary: 6.5, tertiary: 5.5, residential: 4.5, unclassified: 4, living_street: 3.5, service: 2.6, pedestrian: 3 };
 const WALK = { primary: 2.5, secondary: 2.5, tertiary: 2.2, residential: 2, unclassified: 1.8 };
 const CENTER_LINE = new Set(['primary', 'secondary', 'tertiary']);
-const CHUNK = 400;   // m: buildings and trees come in square pieces, far ones aren't drawn
+const CHUNK = 300;   // m: buildings and trees come in square cells, made only when near
 const CELL = 25;     // m: lookup grid for roads and buildings
 // Brick colors of Verdun's plexes (red, brown, buff, grey stone), with weights.
 export const BRICKS = [[[0.52, 0.24, 0.17], 4], [[0.42, 0.28, 0.2], 3], [[0.7, 0.6, 0.46], 2], [[0.58, 0.57, 0.55], 1]];
@@ -110,7 +112,7 @@ export function buildOpenMap() {
   const area = [];
   for (let i = 0; i < VERDUN.area.length; i += 2) area.push([VERDUN.area[i] * U, VERDUN.area[i + 1] * U]);
   // Inside/outside mask in MASK-meter cells, filled row by row.
-  const MASK = 2;
+  const MASK = 3;
   const xs = area.map((p) => p[0]), zs = area.map((p) => p[1]);
   const mx0 = Math.min(...xs) - 4, mz0 = Math.min(...zs) - 4;
   const mnx = Math.ceil((Math.max(...xs) + 4 - mx0) / MASK), mnz = Math.ceil((Math.max(...zs) + 4 - mz0) / MASK);
@@ -197,28 +199,32 @@ export function buildOpenMap() {
     return null;
   };
 
-  // Chunks of building meshes: walls by brick color (plus plain sheds), roofs.
+  // The map in square cells of CHUNK meters, each with its buildings and trees
+  // (filled in below). Their meshes are made by cellMeshes() when the car
+  // comes near, so only the nearby ones take memory.
+  const cellMap = new Map();
+  const cellOf = (x, z) => {
+    const i = Math.floor(x / CHUNK), j = Math.floor(z / CHUNK), k = key(i, j);
+    if (!cellMap.has(k)) cellMap.set(k, { x: (i + 0.5) * CHUNK, z: (j + 0.5) * CHUNK, radius: CHUNK * 0.75, buildings: [], trees: [] });
+    return cellMap.get(k);
+  };
+  for (const b of buildings) cellOf((b.box[0] + b.box[1]) / 2, (b.box[2] + b.box[3]) / 2).buildings.push(b);
+
+  // A cell's building meshes: walls by brick color (plus plain sheds), roofs.
   // Wall UVs are meters along the wall and up it, for the shader's windows.
-  function buildingChunks() {
-    const chunks = new Map();
+  function cellMeshes(cell) {
     const weights = BRICKS.reduce((s, [, w]) => s + w, 0);
-    for (const b of buildings) {
-      const cx = (b.box[0] + b.box[1]) / 2, cz = (b.box[2] + b.box[3]) / 2;
-      const k = `${Math.floor(cx / CHUNK)},${Math.floor(cz / CHUNK)}`;
-      if (!chunks.has(k)) {
-        const [i, j] = k.split(',').map(Number);
-        chunks.set(k, {
-          x: (i + 0.5) * CHUNK, z: (j + 0.5) * CHUNK, radius: CHUNK * 0.75,
-          walls: BRICKS.map(() => ({ positions: [], normals: [], uvs: [] })),
-          sheds: { positions: [], normals: [] }, roofs: { positions: [], normals: [] },
-        });
-      }
-      const c = chunks.get(k);
+    const c = {
+      walls: BRICKS.map(() => ({ positions: [], normals: [], uvs: [] })),
+      towers: { positions: [], normals: [], uvs: [] }, // glass, 35 m and up
+      sheds: { positions: [], normals: [] }, roofs: { positions: [], normals: [] },
+    };
+    for (const b of cell.buildings) {
       // A stable pick per building.
       let r = ((b.id * 2654435761) >>> 0) / 4294967296 * weights, color = 0;
       while (r >= BRICKS[color][1]) r -= BRICKS[color++][1];
       const shed = b.h < 4.5;
-      const m = shed ? c.sheds : c.walls[color];
+      const m = shed ? c.sheds : b.h >= 35 ? c.towers : c.walls[color];
       const n = b.ring.length;
       let u = 0;
       for (let i = 0; i < n; i++) {
@@ -237,11 +243,9 @@ export function buildOpenMap() {
         for (const i of tri) { c.roofs.positions.push(b.ring[i][0], b.h, b.ring[i][1]); c.roofs.normals.push(0, 1, 0); }
       }
     }
-    for (const c of chunks.values()) {
-      for (const m of [...c.walls, c.sheds]) fixWinding(m.positions, m.normals);
-      fixWinding(c.roofs.positions);
-    }
-    return [...chunks.values()];
+    for (const m of [...c.walls, c.towers, c.sheds]) fixWinding(m.positions, m.normals);
+    fixWinding(c.roofs.positions);
+    return c;
   }
 
   // --- trees -----------------------------------------------------------
@@ -251,6 +255,7 @@ export function buildOpenMap() {
     const x = tr[i] * U, z = tr[i + 1] * U, r = nearestRoad(x, z);
     if ((r && r.edge < 0.6) || buildingAt(x, z)) continue;
     trees.push([x, z]);
+    cellOf(x, z).trees.push([x, z]);
   }
 
   // Nearest road segment within reach of (x, z): distance past its roadway's
@@ -283,7 +288,8 @@ export function buildOpenMap() {
 
     buildings,
     trees,
-    buildingChunks,
+    cells: [...cellMap.values()],
+    cellMeshes,
     layers: [
       { mesh: waterMesh(), color: [0.2, 0.36, 0.45], mat: 'water' },
       { mesh: ribbons(roads, (r) => r.walk && r.w + r.walk, ROAD_LIFT * 0.6), color: [0.62, 0.62, 0.6], mat: 'concrete' },

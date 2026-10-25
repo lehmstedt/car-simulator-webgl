@@ -2,7 +2,7 @@
 
 Barebone car simulator in raw WebGL2 — no frameworks, no build step.
 Drive laps of a 1.25 km circuit with two hairpins, through wooded hills under a cloudy sky,
-run a gravel rally stage, lap the Nürburgring Nordschleife, or drive freely around the streets of Verdun, Montreal
+run a gravel rally stage, lap the Nürburgring Nordschleife, or drive freely from Verdun to downtown Montreal
 (switch in settings or with **M**).
 The grass is slippery and slow (about 45 km/h max) but you can drive back on.
 Sand traps on the outside of the bends catch cars that run wide: they bog you down fast and you crawl out at about 13 km/h.
@@ -33,7 +33,7 @@ from public, open data: the centerline GeoJSON from [bacinger/f1-circuits](https
 fast bends down the island, the tight hairpin, the long Casino straight and the final chicane. The
 island is flat, so there are no hills here. `scripts/montreal.mjs` turns the GeoJSON into `src/montreal.js`.
 
-Switch tracks with **M** or the Track button (Circuit → Stage → Montréal → Downtown MTL → Nordschleife → Verdun).
+Switch tracks with **M** or the Track button (Circuit → Stage → Montréal → Downtown MTL → Nordschleife → Verdun–Downtown).
 
 ## Nordschleife
 
@@ -52,25 +52,34 @@ start/finish at T13, built from public geographic data:
 `scripts/nordschleife.py` rebuilds `src/nordschleife.js` from those sources. It reads only the parts of
 the OSM planet file (AWS Open Data) it needs, using HTTP range requests.
 
-## Verdun (open map)
+## Verdun–Downtown (open map)
 
-The sixth map isn't a track: it's mainland Verdun, the Montreal borough between the aqueduct canal and
-the St. Lawrence (about 4.5 km by 1.5 km), to drive around freely. No laps or timers; the HUD shows the
-street you're on and a heading-up minimap. You start on Rue Wellington, by Rue de l'Église.
+The sixth map isn't a track: it's Montreal from Verdun up to downtown, to drive around freely. It covers all of
+mainland Verdun (between the aqueduct canal and the St. Lawrence), then north through Pointe-Saint-Charles,
+across the Lachine Canal into Griffintown and Little Burgundy, and downtown up to about Sherbrooke, from
+Atwater to the edge of Old Montreal: about 16 km², 7.8 km from end to end. No laps or timers; the HUD
+shows the street you're on and a heading-up minimap. You start on Rue Wellington in Verdun, by Rue de l'Église.
+Rue Wellington itself takes you all the way to the canal and downtown.
 
 - **Data**: [Overture Maps](https://overturemaps.org) (release 2026-10-21; mostly OpenStreetMap data,
-  © OpenStreetMap contributors, ODbL): the borough boundary, ~130 km of streets with their names, ~12,600
-  building footprints and heights, ~11,000 individually mapped trees, and the river and canal.
+  © OpenStreetMap contributors, ODbL): the borough boundaries, ~355 km of streets with their names, ~23,000
+  building footprints and heights, ~28,000 individually mapped trees, and the river and canals.
 - **Streets**: asphalt by road class (main streets wider, back lanes narrow), sidewalks on the bigger ones
   (they drive like road; lawns and yards are grass), and a yellow center line on the main streets.
+  Motorways, their ramps and tunnels are left out.
+- **Bridges**: the street bridges over the Lachine Canal (Charlevoix, des Seigneurs, Wellington, Mill) and
+  the aqueduct canal are drivable, with railings.
 - **Buildings**: footprints pushed up to their height (from the data, or the number of floors, or the
-  building type: mostly two- and three-storey brick plexes), in four brick colors with windows. You can't
-  drive through them: hit one and the car stops against it.
-- **Edges**: the river and the canal, and a low concrete barrier where the borough ends on land. Nuns'
-  Island is left out (it's reached by bridges). The ground is flat.
+  building type), in four brick colors with windows; towers 35 m and up are glass. You can't drive
+  through them: hit one and the car stops against it.
+- **Edges**: the river and canals, and a low concrete barrier where the map ends on land. Nuns' Island is
+  left out (only motorway bridges reach it). The ground is flat, though downtown really climbs ~50 m
+  from the canal to Sherbrooke.
+- **Streaming**: buildings and trees come in 300 m cells whose meshes are made as the car approaches and
+  freed once it's far, so only the nearby part of the city uses memory. The minimap is drawn in cached tiles.
 
 `scripts/verdun.py` rebuilds `src/verdun.js` from Overture's GeoParquet files on AWS Open Data, reading only
-the parts that cover Verdun with HTTP range requests.
+the parts that cover the map with HTTP range requests.
 
 ## Handling
 

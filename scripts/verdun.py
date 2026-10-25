@@ -1,4 +1,4 @@
-"""Builds src/verdun.js: an open map of Verdun, Montreal, from public data.
+"""Builds src/verdun.js: an open map of Montreal from Verdun to downtown, from public data.
 
   pip install numpy requests pyarrow shapely
   python3 scripts/verdun.py [cache dir]
@@ -6,13 +6,16 @@
 Everything comes from Overture Maps (release REL below; mostly OpenStreetMap
 data, © OpenStreetMap contributors, ODbL), read from its GeoParquet files on
 AWS Open Data (s3://overturemaps-us-west-2) with HTTP range requests: only the
-row groups whose bounding boxes touch Verdun are downloaded (cached).
+row groups whose bounding boxes touch the map are downloaded (cached).
 
-- area: the Verdun borough boundary (divisions theme) minus the St. Lawrence
-  and the aqueduct canal (base/water), keeping the mainland part (Nuns' Island
-  is left out: it is only reached by bridges).
+- area: the borough of Verdun, and north of it the parts of Le Sud-Ouest
+  (Pointe-Saint-Charles, Griffintown, Little Burgundy) and Ville-Marie
+  (downtown, the edge of Old Montreal) inside NORTH, minus the St. Lawrence and the
+  canals (base/water), plus the street bridges over them. The part connected
+  to Verdun is kept (Nuns' Island is left out: it is only reached by
+  motorway bridges).
 - roads: drivable street segments (transportation/segment) inside the area,
-  with their class and name. Motorways and their ramps are left out.
+  with their class and name. Motorways, their ramps and tunnels are left out.
 - buildings: footprints and heights (buildings theme), out to a little past
   the area so the view doesn't end at the edge.
 - trees: the city's individually mapped trees (base/land, class tree).
@@ -20,20 +23,23 @@ row groups whose bounding boxes touch Verdun are downloaded (cached).
 
 Local meters: x east, z south, from the area's center.
 """
-import base64, io, json, math, os, re, sys, struct, concurrent.futures as cf
+import base64, io, json, math, os, re, sys, struct, time, concurrent.futures as cf
 import numpy as np, requests, shapely
 import pyarrow as pa, pyarrow.parquet as pq, pyarrow.compute as pc
 from shapely.geometry import LineString, MultiLineString, Polygon, MultiPolygon, Point, box
 from shapely.ops import unary_union
 
-CACHE = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(__file__), '..', '.cache', 'verdun')
+CACHE = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(__file__), '..', '.cache', 'verdun-downtown')
 os.makedirs(CACHE, exist_ok=True)
 OUT = os.path.join(os.path.dirname(__file__), '..', 'src', 'verdun.js')
 REL = 'release/2026-10-21.0'
 BUCKET = 'https://overturemaps-us-west-2.s3.amazonaws.com'
-BBOX = (-73.605, 45.425, -73.515, 45.48)  # lon/lat box around the borough
-HOME = (-73.5685, 45.4615)                # a point in mainland Verdun (Wellington / de l'Église)
-UNIT = 0.1                                # m per int16 step in the packed data
+BBOX = (-73.61, 45.425, -73.54, 45.51)    # lon/lat box of the data downloaded
+CLIP = (-73.60, 45.428, -73.552, 45.5055) # the map's bounds
+NORTH = (-73.588, 45.4655, -73.552, 45.5055) # north of Verdun: Atwater to Old Montreal, up to Sherbrooke
+BOROUGHS = ('Le Sud-Ouest', 'Ville-Marie')   # cut to NORTH, plus all of Verdun
+HOME = (-73.5685, 45.4615)                # a point in Verdun (Wellington / de l'Église)
+UNIT = 0.2                                # m per int16 step in the packed data
 S = requests.Session()
 
 
@@ -43,7 +49,13 @@ class RangeFile(io.RawIOBase):
 
     def __init__(self, url):
         self.url, self.pos, self.blocks = url, 0, {}
-        self.size = int(S.head(url).headers['Content-Length'])
+        for attempt in range(6):
+            try:
+                self.size = int(S.head(url, timeout=60).headers['Content-Length'])
+                break
+            except requests.RequestException:
+                if attempt == 5: raise
+                time.sleep(2 ** attempt)
 
     def readable(self): return True
     def seekable(self): return True
@@ -63,6 +75,7 @@ class RangeFile(io.RawIOBase):
                     break
                 except requests.RequestException:
                     if attempt == 4: raise
+                    time.sleep(2 ** attempt)
             self.blocks[i] = r.content
         return self.blocks[i]
 
@@ -113,7 +126,7 @@ def fetch(theme, name):
                        pc.and_(pc.less_equal(b.field('ymin'), y1), pc.greater_equal(b.field('ymax'), y0)))
         return t.filter(keep)
 
-    with cf.ThreadPoolExecutor(16) as ex:
+    with cf.ThreadPoolExecutor(8) as ex:
         parts = [t for t in ex.map(one, keys(theme)) if t is not None and t.num_rows]
     t = pa.concat_tables(parts)
     pq.write_table(t, path)
@@ -126,17 +139,8 @@ geom = lambda r: shapely.from_wkb(r['geometry'])
 
 # --- the area ---------------------------------------------------------------
 divisions = fetch('theme=divisions/type=division_area', 'divisions')
-verdun = next(geom(r) for r in rows(divisions, ['names', 'subtype', 'geometry'])
-              if r['subtype'] == 'macrohood' and r['names']['primary'] == 'Verdun')
-water_rows = rows(fetch('theme=base/type=water', 'water'), ['subtype', 'class', 'geometry'])
-big_water = unary_union([g for r in water_rows if r['subtype'] in ('river', 'canal', 'physical', 'water', 'lake')
-                         for g in [geom(r)] if g.geom_type in ('Polygon', 'MultiPolygon')]).buffer(0)
-land = verdun.difference(big_water)
-home = Point(HOME)
-mainland = next(p for p in getattr(land, 'geoms', [land]) if p.contains(home))
-mainland = Polygon(mainland.exterior)  # no holes
-
-lat0, lon0 = mainland.centroid.y, mainland.centroid.x
+# Local meters around the middle of CLIP: x east, z south.
+lat0, lon0 = (CLIP[1] + CLIP[3]) / 2, (CLIP[0] + CLIP[2]) / 2
 R, rad = 6371008.8, math.pi / 180
 k = math.cos(lat0 * rad)
 
@@ -145,21 +149,40 @@ def proj(g):
     return shapely.transform(g, lambda c: np.column_stack([(c[:, 0] - lon0) * rad * R * k, -(c[:, 1] - lat0) * rad * R]))
 
 
-area = proj(mainland).simplify(1.0)
-water = proj(big_water)
+macro = {r['names']['primary']: geom(r) for r in rows(divisions, ['names', 'subtype', 'geometry']) if r['subtype'] == 'macrohood'}
+boroughs = proj(unary_union([macro['Verdun'].intersection(box(*CLIP))] + [macro[n].intersection(box(*NORTH)) for n in BOROUGHS]))
+water_rows = rows(fetch('theme=base/type=water', 'water'), ['subtype', 'class', 'geometry'])
+water = proj(unary_union([g for r in water_rows if r['subtype'] in ('river', 'canal', 'physical', 'water', 'lake')
+                          for g in [geom(r)] if g.geom_type in ('Polygon', 'MultiPolygon')]).buffer(0))
+# Street bridges: their decks (a little wider and longer than the road) join the banks.
+CLASSES = ['primary', 'secondary', 'tertiary', 'residential', 'unclassified', 'living_street', 'service', 'pedestrian']
+HALF = {'primary': 7, 'secondary': 6.5, 'tertiary': 5.5, 'residential': 4.5, 'unclassified': 4, 'living_street': 3.5, 'service': 2.6, 'pedestrian': 3}
+segs = rows(fetch('theme=transportation/type=segment', 'segments'), ['subtype', 'class', 'subclass', 'names', 'road_flags', 'geometry'])
+flagged = lambda r, f: [x['between'] or (0, 1) for x in (r['road_flags'] or []) if f in x['values']]
+decks = []
+for r in segs:
+    if r['subtype'] != 'road' or r['class'] not in CLASSES or r['subclass'] == 'link': continue
+    for a, b in flagged(r, 'is_bridge'):
+        deck = shapely.ops.substring(proj(geom(r)), a, b, normalized=True)
+        decks.append(deck.buffer(HALF[r['class']] + 2.5, cap_style='flat').buffer(3))
+land = boroughs.difference(water).union(unary_union(decks).intersection(boroughs.buffer(30)))
+home = proj(Point(HOME))
+mainland = next(p for p in getattr(land, 'geoms', [land]) if p.contains(home))
+area = Polygon(mainland.exterior).simplify(1.0)  # no holes
 minx, minz, maxx, maxz = area.bounds
 print(f'area: {area.area / 1e6:.2f} km², x {minx:.0f}..{maxx:.0f}, z {minz:.0f}..{maxz:.0f}')
 view = area.buffer(450)  # scenery reaches this far past the edge
 
 # --- roads ------------------------------------------------------------------
-# Half widths (m) by class; service roads are Verdun's back lanes and parking aisles.
-CLASSES = ['primary', 'secondary', 'tertiary', 'residential', 'unclassified', 'living_street', 'service', 'pedestrian']
-segs = rows(fetch('theme=transportation/type=segment', 'segments'), ['subtype', 'class', 'subclass', 'names', 'geometry'])
+# Service roads are back lanes and parking aisles.
 names, roads = [], []
 inside = area.buffer(-0.5)
 for r in segs:
     if r['subtype'] != 'road' or r['class'] not in CLASSES or r['subclass'] in ('link', 'driveway'): continue
-    line = proj(geom(r)).intersection(inside)
+    g = geom(r)
+    tunnels = [shapely.ops.substring(g, a, b, normalized=True).buffer(1e-6) for a, b in flagged(r, 'is_tunnel')]
+    if tunnels: g = g.difference(unary_union(tunnels))  # tunnels: keep only the open-air parts
+    line = proj(g).intersection(inside)
     if line.is_empty: continue
     name = (r['names'] or {}).get('primary') or ''
     if name not in names: names.append(name)
@@ -169,10 +192,11 @@ for r in segs:
         roads.append([CLASSES.index(r['class']), names.index(name), *c.flatten().tolist()])
 print(f'roads: {len(roads)} pieces, {sum(LineString(np.array(r[2:]).reshape(-1, 2) * UNIT).length for r in roads) / 1000:.1f} km')
 
-# The edge of the area: a low barrier where it is on land (not the river or canal).
+# The edge of the area: a low barrier where it is on land (not the river or
+# canal shore), and railings along the bridges over the water.
 near_water = water.buffer(12)
 walls = []
-edge = area.exterior.difference(near_water)
+edge = unary_union([area.exterior.difference(near_water), area.exterior.intersection(water.buffer(-2))])
 for piece in getattr(edge, 'geoms', [edge]):
     if piece.geom_type == 'LineString' and piece.length > 5:
         walls.append(np.round(np.array(piece.coords) / UNIT).astype(int).flatten().tolist())
@@ -251,7 +275,7 @@ js = f"""// Verdun, Montreal: an open map from public data. Generated by
 // From Overture Maps {REL.split('/')[1]} (© OpenStreetMap contributors, ODbL, and
 // other open sources), meters around {lat0:.5f}° N, {-lon0:.5f}° W: x east, z south.
 // Lengths in the packed data are int16 steps of `unit` meters.
-// - area: the drivable part of the borough (mainland Verdun), outer ring [x, z, ...].
+// - area: the drivable part of the map, outer ring [x, z, ...].
 // - names: street names. roads: [class index into `classes`, name index, x, z, x, z, ...].
 // - walls: where the area's edge is on land, polylines [x, z, ...].
 // - buildings: base64 int16: point count, height (dm), then x, z per point.
