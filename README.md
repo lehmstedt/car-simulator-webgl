@@ -1,43 +1,18 @@
 # Car Simulator (WebGL)
 
 Barebone car simulator in raw WebGL2 — no frameworks, no build step.
-Drive laps of a 1.25 km circuit with two hairpins, through wooded hills under a cloudy sky,
-run a gravel rally stage, lap the Nürburgring Nordschleife, or drive freely from Verdun to downtown Montreal
+Drive freely from Verdun to downtown Montreal, or lap the Nürburgring Nordschleife through the Eifel forest
 (switch in settings or with **M**).
 The grass is slippery and slow (about 45 km/h max) but you can drive back on.
-Sand traps on the outside of the bends catch cars that run wide: they bog you down fast and you crawl out at about 13 km/h.
-Yellow sausage kerbs sit just past the flat kerb on the inside of each tight corner. Cut the apex
-over them and the car thumps up and rolls, the wheels that hit skip and lose grip for a moment, and you lose a little speed.
 Surfaces are textured and catch the light by material (`src/shading.js`): car paint and
 windows mirror the sky with a sharp sun highlight, asphalt has a speckle of stones and a soft
-sheen toward the horizon, while grass, sand (which glints in the sun) and gravel stay matte.
-The rally stage's gravel road has two packed wheel ruts.
-A paddock sits beside the start/finish straight: pit wall, garages, race control and team trucks (scenery only, no collisions).
+sheen toward the horizon, while grass stays matte.
 
-**Downtown MTL** is a ~2.5 km street circuit through downtown Montreal, built from public open data: Rue Sherbrooke,
-Rue Peel, Rue Sainte-Catherine, Rue Crescent, Boulevard René-Lévesque and Rue Guy, with six right-angle street
-corners and a double yellow center line. Around it are the real streets (drivable but not timed), parks and
-about 1,800 buildings extruded from their footprints to their mapped height; towers get glass curtain walls.
-Buildings are solid: hit one and the car stops. Off the road is sidewalk (a bit less grip, and it drags).
-The ground is the real terrain: the lap climbs and falls about 19 m (up to ~6%) between René-Lévesque and
-Sherbrooke, with Mount Royal rising behind.
-
-The rally stage is a ~2.9 km point-to-point run on a very narrow (under 5 m) gravel road. Gravel has about a
-third less grip than asphalt, so the car slides and drifts. The verge either side is loose dirt with
-even less grip, and it drags, so running wide costs time. The road is very bumpy: rough stretches alternate
-with less rough ones, and taken fast the bumps make the car go light and rock side to side.
-
-Montréal is Circuit Gilles-Villeneuve, the real 4.36 km Grand Prix track on Île Notre-Dame, built
-from public, open data: the centerline GeoJSON from [bacinger/f1-circuits](https://github.com/bacinger/f1-circuits)
-(MIT license, traced from OpenStreetMap), projected to meters. It runs clockwise: the Senna S, the
-fast bends down the island, the tight hairpin, the long Casino straight and the final chicane. The
-island is flat, so there are no hills here. `scripts/montreal.mjs` turns the GeoJSON into `src/montreal.js`.
-
-Switch tracks with **M** or the Track button (Circuit → Stage → Montréal → Downtown MTL → Nordschleife → Verdun–Downtown).
+Switch maps with **M** or the Track button (Verdun–Downtown ↔ Nordschleife).
 
 ## Nordschleife
 
-The fourth track is the Nürburgring Nordschleife: the full 20.7 km lap through the Eifel forest,
+The Nürburgring Nordschleife is: the full 20.7 km lap through the Eifel forest,
 start/finish at T13, built from public geographic data:
 
 - **Path**: OpenStreetMap relation 38566 "Nürburgring Nordschleife" (© OpenStreetMap contributors, ODbL).
@@ -54,7 +29,7 @@ the OSM planet file (AWS Open Data) it needs, using HTTP range requests.
 
 ## Verdun–Downtown (open map)
 
-The sixth map isn't a track: it's Montreal from Verdun up to downtown, to drive around freely. It covers all of
+Verdun–Downtown isn't a track: it's Montreal from Verdun up to downtown, to drive around freely. It covers all of
 mainland Verdun (between the aqueduct canal and the St. Lawrence), then north through Pointe-Saint-Charles,
 across the Lachine Canal into Griffintown and Little Burgundy, and downtown up to about Sherbrooke, from
 Atwater to the edge of Old Montreal: about 16 km², 7.8 km from end to end. No laps or timers; the HUD
@@ -90,7 +65,7 @@ The car uses tire forces, so rough driving gets punished:
 - **Understeer** (front slides, car runs wide) and **oversteer** (rear slides, car
   rotates) are shown in the HUD. Sliding wheels turn orange and leave skid marks.
 - **Lifting off or braking mid-corner** shifts weight forward and lightens the rear.
-- **Hills**: the circuit rolls over terrain with grades up to about 14%.
+- **Hills**: the Nordschleife climbs and falls with grades up to about 20%.
   - Gravity slows you uphill, speeds you up downhill and pushes you sideways on cambered bits.
   - Grade moves weight between the axles: uphill loads the rear (good for RWD traction,
     FWD loses front grip), downhill loads the front. Braking downhill makes the rear very light.
@@ -161,7 +136,7 @@ An amber ghost replays Claude's run on the same layout and car; its time
 shows as **Claude** in the HUD. `scripts/autodrive.mjs` drove it with the game's
 own physics at 60 fps, using only what a player has (steering wheel, on/off
 pedals) and never leaving the road. Re-run it after physics or track changes:
-`node scripts/autodrive.mjs circuit all` (or `stage`, `montreal`, `downtown`, `ring`; `both` = FWD and RWD, or name one car).
+`node scripts/autodrive.mjs ring all` (`both` = FWD and RWD, or name one car).
 
 ## Cockpit view
 
@@ -201,18 +176,14 @@ With the keyboard, holding A/D turns the wheel gradually; let go and it returns 
 | T              | Switch car (FWD/RWD/GT3) |
 | G              | Toggle ghost    |
 | C              | Chase / cockpit view |
-| M              | Switch track (circuit, stage, Montréal, Downtown MTL, Nordschleife) |
+| M              | Switch map (Verdun–Downtown, Nordschleife) |
 | R              | Reset           |
 
 ## Layout
 
 - `src/main.js` — setup, render loop, chase and cockpit cameras, lap timing, HUD
-- `src/track.js` — circuit spline, road/curb/sand meshes, surface test
-- `src/montreal.js` — Circuit Gilles-Villeneuve centerline (generated by `scripts/montreal.mjs`)
+- `src/track.js` — road spline, road/kerb/guardrail meshes, surface test
 - `src/nordschleife.js` — Nordschleife path, road heights and ground grid (generated)
-- `src/city.js` — downtown Montreal's streets, parks and buildings, sidewalk/street/park lookup, building collisions
-- `src/downtown-data.js` — downtown Montreal map data (generated, see below)
-- `src/paddock.js` — paddock apron, garages, tower, trucks, parked cars
 - `src/trees.js` — low-poly trees, merged into a few meshes
 - `src/sky.js` — sky dome with sun and clouds; its horizon color is the distance haze
 - `src/car.js` — car physics (dynamic bicycle model, tire grip, FWD/RWD)
@@ -221,35 +192,10 @@ With the keyboard, holding A/D turns the wheel gradually; let go and it returns 
 - `src/bot-lap.js` — Claude's runs (generated by `scripts/autodrive.mjs`)
 - `src/gl.js` — shader/mesh helpers
 - `src/geometry.js` — cube, torus (ground grid is drawn in the shader)
-- `src/terrain.js` — rolling hills, levelled beside the start straight for the paddock; the Nordschleife's real ground
+- `src/terrain.js` — the ground: the Nordschleife's real terrain, flat for Verdun
 - `src/bodies.js` — lofted car bodies (the GT3), built from the physics dimensions
 - `src/math.js` — mat4 helpers
 - `src/input.js` — keyboard and touch controls
 - `scripts/autodrive.mjs` — self-driving bot that sets Claude's ghost runs
-- `scripts/montreal.mjs` — converts the open-data GeoJSON of the Montreal circuit
 - `scripts/nordschleife.py` — builds `src/nordschleife.js` from OpenStreetMap and Copernicus DEM data
 - `scripts/bundle.mjs` — inlines everything into one HTML file
-- `scripts/downtown/` — fetches the open data and builds `src/downtown-data.js`
-
-## Downtown Montreal map data
-
-All from public, open sources:
-
-- Roads, buildings (footprints, heights, floors) and parks: [Overture Maps](https://overturemaps.org)
-  release 2026-10-21.0, mostly © OpenStreetMap contributors, ODbL.
-- Elevation: [AWS Terrain Tiles](https://registry.opendata.aws/terrain-tiles/) (Terrarium, zoom 15), which in
-  Canada come from the Canadian Digital Elevation Model (Open Government Licence – Canada).
-
-To rebuild it (Python 3 with `pyarrow shapely requests pillow`):
-
-```sh
-cd scripts/downtown
-BOX=-73.595,45.488,-73.555,45.512
-python3 fetch_overture.py theme=transportation/type=segment $BOX data/segments.parquet
-python3 fetch_overture.py theme=buildings/type=building $BOX data/buildings.parquet
-python3 fetch_overture.py theme=base/type=land_use $BOX data/landuse.parquet
-python3 fetch_dem.py $BOX data/dem.json 157 135
-python3 build.py data ../../src/downtown-data.js
-```
-
-The fetch script reads only the parts of Overture's GeoParquet files that cover the box (HTTP range requests).
