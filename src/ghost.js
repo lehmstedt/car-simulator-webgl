@@ -5,10 +5,10 @@
 const INTERVAL = 50;  // ms between recorded samples
 const STRIDE = 4;     // t, x, z, heading
 // New key when a layout changes: old laps aren't comparable.
-const KEYS = { circuit: 'ghost-hairpins', stage: 'ghost-stage-2', montreal: 'ghost-montreal', ring: 'ghost-nordschleife', downtown: 'ghost-downtown' };
+const KEYS = { ring: 'ghost-nordschleife' };
 
 export class Ghost {
-  constructor(layout = 'circuit') {
+  constructor(layout = 'ring') {
     this.key = KEYS[layout];
     this.laps = {};   // variant -> { time, samples: [t, x, z, heading, ...] }
     this.rec = null;  // samples of the lap in progress

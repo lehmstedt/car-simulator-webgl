@@ -1,44 +1,23 @@
-// Rolling hills: a smooth height field shared by the ground, the road and the
-// car physics. Long wavelengths keep grades under ~14% and crests gentle enough
-// that the car only goes light near top speed. Past the circuit the hills fade
-// to flat, so the far ground can be a few big cells (cheap to draw on phones).
+// The ground, shared by the ground mesh, the road and the car physics.
 //
-// Beside the start straight the ground is levelled across the track for the
-// paddock: there it keeps the straight's own height, so the road is unchanged.
-//
-// The rally stage (track.js) has its own, wider ground: a long valley wave on
-// top of the same rolling hills, and no paddock levelling. Its road also has
-// bumps (track.js registers them with setRoadBumps): they raise the road only,
-// so the physics and the road mesh feel them but the ground mesh does not.
-//
-// The Nordschleife ('ring') uses real ground instead (nordschleife.js): a
-// 30 m elevation grid from the Copernicus DEM, plus the road's own smoothed
+// The Nordschleife ('ring') uses real ground (nordschleife.js): a 30 m
+// elevation grid from the Copernicus DEM, plus the road's own smoothed
 // height profile. Near the road the ground takes the road's height (flat
 // across it), then blends back into the elevation grid over BLEND meters.
-
 //
-// Downtown Montreal's ground is real too: an elevation grid from open data
-// (downtown-data.js), smoothed with a cubic B-spline so slopes and their
-// curvature are continuous.
+// Verdun ('verdun') is flat: about 20 m above sea level all over, and wide.
 
 import { NORDSCHLEIFE } from './nordschleife.js';
-import { DOWNTOWN } from './downtown-data.js';
 
-// hills / flat: fade from hills to flat between these (m, square radius).
+// flat: half-size (m) of the ground's fine middle part.
 const LANDS = {
-  circuit: { hills: 200, flat: 250, valley: 0, level: { x0: -55, x1: 60, z0: 118, z1: 172, ref: 121, blend: 40 } },
-  stage: { hills: 470, flat: 530, valley: 7, level: null },
-  // Île Notre-Dame is flat (about 13 m above sea level all over).
-  montreal: { hills: 0, flat: 1300, valley: 0, level: null, allFlat: true },
   ring: { real: true },
-  downtown: { grid: DOWNTOWN.ground, level: null },
-  // Verdun is flat too (about 20 m above sea level), and wide.
-  verdun: { hills: 0, flat: 3000, valley: 0, level: null, allFlat: true },
+  verdun: { flat: 3000 },
 };
-let land = LANDS.circuit;
+let land = LANDS.ring;
 let bumps = null; // (x, z) -> extra height (m, >= 0) on the road, or null
 
-// Picks the ground for a layout ('circuit', 'stage', 'montreal', 'downtown', 'ring' or 'verdun'); call before building anything on it.
+// Picks the ground for a layout ('ring' or 'verdun'); call before building anything on it.
 export function setTerrain(kind) {
   land = LANDS[kind];
   bumps = null;
@@ -56,46 +35,7 @@ export function terrainHeight(x, z) {
 
 // The ground alone, without road bumps.
 export function groundHeight(x, z) {
-  if (land.real) return ringHeight(x, z);
-  if (land.grid) return gridHeight(land.grid, x, z);
-  const h = hills(x, z);
-  const L = land.level;
-  if (!L) return h;
-  const dx = Math.max(L.x0 - x, 0, x - L.x1), dz = Math.max(L.z0 - z, 0, z - L.z1);
-  const t = Math.min(1, Math.hypot(dx, dz) / L.blend);
-  if (t >= 1) return h;
-  const w = 1 - t * t * t * (t * (6 * t - 15) + 10); // smootherstep: no kink in the curvature
-  return h + (hills(x, L.ref) - h) * w;
-}
-
-function hills(x, z) {
-  if (land.allFlat) return 0;
-  const r = Math.max(Math.abs(x), Math.abs(z));
-  if (r >= land.flat) return 0;
-  const t = Math.max(0, (r - land.hills) / (land.flat - land.hills));
-  const fade = 1 - t * t * (3 - 2 * t);
-  return fade * (
-    6.0 * Math.sin(x / 55 + 0.6) * Math.cos(z / 62 - 0.3) +
-    3.0 * Math.sin((x + z) / 47 + 1.7) +
-    1.2 * Math.cos((x - 0.6 * z) / 40) +
-    land.valley * Math.sin(x / 140 + 0.4) * Math.cos(z / 120 - 1.1)
-  );
-}
-
-// Uniform cubic B-spline over the grid's samples (clamped at its edges).
-const bspline = (t) => [(1 - t) ** 3 / 6, (3 * t ** 3 - 6 * t * t + 4) / 6, (-3 * t ** 3 + 3 * t * t + 3 * t + 1) / 6, t ** 3 / 6];
-function gridHeight(G, x, z) {
-  const fx = (x - G.x0) / G.dx, fz = (z - G.z0) / G.dz;
-  const i = Math.floor(fx), j = Math.floor(fz);
-  const wx = bspline(fx - i), wz = bspline(fz - j);
-  let h = 0;
-  for (let b = 0; b < 4; b++) {
-    const r = Math.min(G.nz - 1, Math.max(0, j + b - 1)) * G.nx;
-    let row = 0;
-    for (let a = 0; a < 4; a++) row += wx[a] * G.h[r + Math.min(G.nx - 1, Math.max(0, i + a - 1))];
-    h += wz[b] * row;
-  }
-  return h;
+  return land.real ? ringHeight(x, z) : 0;
 }
 
 // Height, gradient (gx = dh/dx, gz = dh/dz) and second derivatives at (x, z).
@@ -125,11 +65,10 @@ export function terrainNormal(x, z, f = terrainHeight) {
   return [-gx / l, 1 / l, -gz / l];
 }
 
-// Ground grid covering [-half, half]^2: cells of about `cell` meters over the
-// hills, then a few wide cells out to the flat edge. Rows and columns share the
+// Ground grid covering [-half, half]^2: cells of about `cell` meters in the
+// middle, then a few wide cells out to the edge. Rows and columns share the
 // same coordinates everywhere, so there are no cracks between the two.
 export function terrainMesh(half, cell) {
-  if (land.grid) return gridMesh(half);
   const FLAT = land.flat, fine = Math.ceil((2 * FLAT) / cell), coarse = 6;
   const axis = [];
   for (let i = 0; i < coarse; i++) axis.push(-half + ((half - FLAT) * i) / coarse);
@@ -332,28 +271,4 @@ function nearRoad(x, z) {
     best = Math.min(best, Math.hypot(x - a[0] - ex * t, z - a[1] - ez * t));
   }
   return best;
-}
-
-// Downtown Montreal: one vertex per elevation sample, then a few wide cells out
-// to `half` (the grid's edge heights carry on, flat).
-function gridMesh(half) {
-  const G = land.grid, axis = (o, d, n) => {
-    const a = [-half, -half / 2];
-    for (let i = 0; i < n; i++) a.push(o + d * i);
-    a.push(half / 2, half);
-    return a.filter((v, i, all) => i === 0 || v > all[i - 1]);
-  };
-  const xs = axis(G.x0, G.dx, G.nx), zs = axis(G.z0, G.dz, G.nz);
-  const positions = [], normals = [], indices = [];
-  for (const x of xs) {
-    for (const z of zs) {
-      positions.push(x, groundHeight(x, z), z);
-      normals.push(...terrainNormal(x, z, groundHeight));
-    }
-  }
-  const n = zs.length, at = (i, j) => i * n + j;
-  for (let i = 0; i + 1 < xs.length; i++) {
-    for (let j = 0; j + 1 < n; j++) indices.push(at(i, j), at(i, j + 1), at(i + 1, j + 1), at(i, j), at(i + 1, j + 1), at(i + 1, j));
-  }
-  return { positions, normals, indices };
 }

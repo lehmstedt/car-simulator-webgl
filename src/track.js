@@ -1,58 +1,10 @@
-// Roads built from a Catmull-Rom spline through control points: the closed
-// circuit, the point-to-point rally stage, or real tracks from open data. They
-// drape over the terrain; road surfaces sit a few cm above the ground.
+// Roads built from a Catmull-Rom spline through control points, from real
+// map data. They drape over the terrain; road surfaces sit a few cm above the ground.
 
 import { terrainHeight, terrainNormal, terrainSlope, groundHeight, setRoadBumps, RING_VERGE } from './terrain.js';
 import { NORDSCHLEIFE } from './nordschleife.js';
-import { MONTREAL } from './montreal.js';
-import { DOWNTOWN } from './downtown-data.js';
-
-export const pairs = (a) => Array.from({ length: a.length / 2 }, (_, i) => [a[2 * i], a[2 * i + 1]]);
 
 export const LAYOUTS = {
-  // Asphalt circuit: two hairpins (~10 m radius) and a few tight corners among
-  // faster bends, red/white kerbs and sand traps.
-  circuit: {
-    closed: true,
-    control: [
-      [0, 120], [80, 122], [145, 120], [174, 106], [172, 80], [142, 74],
-      [112, 58], [112, 20], [150, -10], [162, -60], [140, -110], [100, -125],
-      [40, -115], [8, -70], [-10, -16], [-36, -12], [-52, -56], [-90, -110],
-      [-140, -112], [-166, -70], [-165, 40], [-140, 90], [-95, 98], [-60, 120],
-    ],
-    halfWidth: 7, edge: 2.4, sand: true, sausages: true, surface: 'road', edgeSurface: 'road',
-    colors: { road: [0.32, 0.33, 0.36] },
-  },
-  // Rally stage, A to B: a narrow, bumpy gravel road through the woods, ~2.9 km,
-  // with a verge of loose dirt either side. Fast crests along the top, a hairpin
-  // at each end of the long switchbacks, a twisty middle and a fast run down to
-  // the flying finish.
-  stage: {
-    closed: false,
-    control: [
-      [-460, 380], [-420, 380], [-380, 382], [-300, 378], [-230, 360], [-170, 372], [-100, 395],
-      [-30, 385], [30, 350], [90, 345], [160, 372], [230, 380], [300, 365], [345, 345],
-      [368, 322], [364, 300], [345, 295], [300, 300], [250, 282], [210, 240], [150, 225],
-      [80, 240], [10, 252], [-60, 232], [-120, 252], [-190, 262], [-260, 245], [-320, 252],
-      [-360, 240], [-374, 218], [-366, 198], [-345, 194], [-300, 190], [-250, 165], [-200, 120],
-      [-150, 72], [-90, 52], [-30, 80], [10, 118], [40, 124], [62, 100], [70, 60],
-      [110, 20], [180, 30], [250, 60], [320, 40], [372, 4], [392, -52], [370, -110],
-      [310, -125], [240, -110], [200, -112],
-    ],
-    halfWidth: 2.4, edge: 1.2, sand: false, surface: 'gravel', edgeSurface: 'dirt', bumps: true,
-    start: 40, finish: 120, // m: start line from point A, finish line before the road ends at B
-    colors: { road: [0.6, 0.53, 0.42] },
-  },
-  // Circuit Gilles-Villeneuve, Montreal: the real 4.36 km layout on the flat
-  // Île Notre-Dame, from open data (montreal.js). Clockwise: the Senna S, long
-  // bends down the island, the hairpin, the Casino straight and the final chicane.
-  montreal: {
-    closed: true,
-    control: MONTREAL,
-    step: 3, // m between samples: the control points are dense, so sample by distance
-    halfWidth: 6.5, edge: 1.8, sand: true, sausages: true, surface: 'road', edgeSurface: 'road',
-    colors: { road: [0.3, 0.31, 0.34] },
-  },
   // The Nürburgring Nordschleife: 20.7 km through the Eifel forest with ~290 m
   // of climb, its path and heights from real map and elevation data
   // (nordschleife.js). A 9 m asphalt road with white edge lines, tall red and
@@ -65,17 +17,6 @@ export const LAYOUTS = {
     step: 3, // m between road samples
     halfWidth: 4.5, edge: 0.3, sand: false, sausages: false, surface: 'road', edgeSurface: 'road',
     verge: true, kerbs: true, rails: true, sections: NORDSCHLEIFE.sections,
-    colors: { road: [0.3, 0.31, 0.33] },
-  },
-  // Downtown Montreal, from open map data (scripts/downtown/): Sherbrooke, Peel,
-  // Sainte-Catherine, Crescent, René-Lévesque and Guy, ~2.5 km with six
-  // right-angle street corners, among the city's buildings (city.js). Concrete
-  // gutters and a double yellow center line.
-  downtown: {
-    closed: true, city: true,
-    control: pairs(DOWNTOWN.route),
-    step: 3, // m between samples: the control points are 3 m apart already
-    halfWidth: 6.5, edge: 0.6, sand: false, sausages: false, surface: 'road', edgeSurface: 'road',
     colors: { road: [0.3, 0.31, 0.33] },
   },
 };
@@ -140,7 +81,7 @@ const RAIL_GAP = 1.6;               // m from the kerb's outer edge to the rail
 const RAIL_LOW = 0.38, RAIL_HIGH = 1.05; // m: bottom of the lower beam, top of the upper one
 const RAIL_POST = 3;                // m between posts (one per road sample)
 
-// `avoid(x, z)` marks ground that must stay clear of sand (the paddock).
+// `avoid(x, z)` marks ground that must stay clear of sand.
 export function buildTrack(layout, avoid = () => false) {
   const { control: CONTROL, closed, halfWidth: w, edge: CURB_WIDTH } = layout;
   const SAUSAGE_CENTER = w + CURB_WIDTH + SAUSAGE_GAP + SAUSAGE_RADIUS; // m from the centerline
@@ -260,7 +201,7 @@ export function buildTrack(layout, avoid = () => false) {
     for (let i = j; ahead(i, j) < SAND_BEFORE; i = (i - 1 + N) % N) want[s][i] = Math.max(want[s][i], depth);
     for (let i = j; ahead(j, i) < SAND_AFTER; i = (i + 1) % N) want[s][i] = Math.max(want[s][i], depth);
   }
-  // Taper the ends, then stop short of other parts of the circuit and the paddock.
+  // Taper the ends, then stop short of other parts of the road.
   const sandOut = want.map((d, s) => {
     const side = s === 0 ? 1 : -1;
     return Array.from(d, (_, i) => {
