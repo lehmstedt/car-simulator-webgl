@@ -2,7 +2,7 @@
 // in the body-only format used for a Claude artifact: no doctype/html/head/body tags.
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 
-const ORDER = ['math.js', 'gl.js', 'geometry.js', 'bodies.js', 'nordschleife.js', 'downtown-data.js', 'terrain.js', 'montreal.js', 'track.js', 'city.js', 'verdun.js', 'openmap.js', 'minimap.js', 'gates.js', 'signs.js', 'paddock.js', 'trees.js', 'sky.js', 'shading.js', 'input.js', 'car.js', 'skids.js', 'ghost.js', 'bot-lap.js', 'main.js'];
+const ORDER = ['math.js', 'gl.js', 'geometry.js', 'bodies.js', 'nordschleife.js', 'downtown-data.js', 'terrain.js', 'montreal.js', 'track.js', 'city.js', 'verdun.js', 'openmap.js', 'traffic.js', 'minimap.js', 'gates.js', 'signs.js', 'paddock.js', 'trees.js', 'sky.js', 'shading.js', 'input.js', 'car.js', 'skids.js', 'ghost.js', 'bot-lap.js', 'main.js'];
 
 const js = ORDER.map((f) => {
   const src = readFileSync(new URL(`../src/${f}`, import.meta.url), 'utf8')

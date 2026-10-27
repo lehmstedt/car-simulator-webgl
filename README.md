@@ -65,8 +65,22 @@ Rue Wellington itself takes you all the way to the canal and downtown.
   © OpenStreetMap contributors, ODbL): the borough boundaries, ~355 km of streets with their names, ~23,000
   building footprints and heights, ~28,000 individually mapped trees, and the river and canals.
 - **Streets**: asphalt by road class (main streets wider, back lanes narrow), sidewalks on the bigger ones
-  (they drive like road; lawns and yards are grass), and a yellow center line on the main streets.
-  Motorways, their ramps and tunnels are left out.
+  (they drive like road; lawns and yards are grass). Motorways, their ramps and tunnels are left out.
+- **Road markings**, on streets wide enough for them: a double yellow line down two-way main streets, a
+  dashed yellow one down two-way side streets, and dashed white lines between the lanes of one-way main
+  streets (Sainte-Catherine, De Maisonneuve…). One-way side streets (one-way comes from the map data) are
+  narrower and unmarked. White stop lines cross the lanes at every stop sign and light.
+- **Traffic lights**: at the ~250 crossings the map has signals for. They cycle in 60 s: the main street's
+  way gets 26 s of green, 3 s of yellow and a second of all-red, then the cross street's. Close crossings
+  (divided streets) change together.
+- **Stop signs** (red ARRÊT octagons): the ones mapped in OpenStreetMap, plus the Montreal habit
+  where the map has none: side streets stop where they meet a bigger street, and crossings of residential
+  streets are all-way stops (~1,200 stop approaches in all).
+- **Traffic**: about 70 cars of three shapes drive around you, keeping right and to one-way streets. They
+  slow for turns, stop at red and yellow lights, come to a full stop at stop signs and go in turn once the
+  crossing is clear, yield to oncoming cars before turning left on a green, and brake for the car ahead,
+  yours too (their brake lights come on). Cars stay within ~500 m: far ones go away and new ones appear on
+  streets out of sight. They're solid: hit one and you stop against it. The minimap shows them as dots.
 - **Bridges**: the street bridges over the Lachine Canal (Charlevoix, des Seigneurs, Wellington, Mill) and
   the aqueduct canal are drivable, with railings.
 - **Buildings**: footprints pushed up to their height (from the data, or the number of floors, or the
@@ -79,7 +93,10 @@ Rue Wellington itself takes you all the way to the canal and downtown.
   freed once it's far, so only the nearby part of the city uses memory. The minimap is drawn in cached tiles.
 
 `scripts/verdun.py` rebuilds `src/verdun.js` from Overture's GeoParquet files on AWS Open Data, reading only
-the parts that cover the map with HTTP range requests.
+the parts that cover the map with HTTP range requests. One-way streets come from the segments' access
+restrictions; traffic signals and stop signs from the base theme's infrastructure points (OSM
+`highway=traffic_signals` and `highway=stop`, with `stop=all`), matched to the crossing they stand at.
+The traffic itself is `src/traffic.js`.
 
 ## Handling
 

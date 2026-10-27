@@ -17,7 +17,10 @@ import { ROAD_LIFT } from './track.js';
 // Half widths (m) of the roadway by class, and sidewalk widths beside it.
 const HALF = { primary: 7, secondary: 6.5, tertiary: 5.5, residential: 4.5, unclassified: 4, living_street: 3.5, service: 2.6, pedestrian: 3 };
 const WALK = { primary: 2.5, secondary: 2.5, tertiary: 2.2, residential: 2, unclassified: 1.8 };
-const CENTER_LINE = new Set(['primary', 'secondary', 'tertiary']);
+const MAIN = new Set(['primary', 'secondary', 'tertiary']);
+const SIDE = new Set(['residential', 'unclassified']);
+// One-way side streets are narrower: a lane and parking.
+const ONE_WAY_HALF = 3.6;
 const CHUNK = 300;   // m: buildings and trees come in square cells, made only when near
 const CELL = 25;     // m: lookup grid for roads and buildings
 // Brick colors of Verdun's plexes (red, brown, buff, grey stone), with weights.
@@ -34,10 +37,11 @@ export function buildOpenMap() {
   const U = VERDUN.unit;
 
   // --- roads -----------------------------------------------------------
-  const roads = VERDUN.roads.map(([c, n, ...xy]) => {
-    const cls = VERDUN.classes[c], pts = [];
+  const roads = VERDUN.roads.map(([c, n, f, ...xy], index) => {
+    const cls = VERDUN.classes[c], pts = [], oneWay = !!(f & 1);
     for (let i = 0; i < xy.length; i += 2) pts.push([xy[i] * U, xy[i + 1] * U]);
-    return { cls, name: VERDUN.names[n], w: HALF[cls], walk: WALK[cls] ?? 0, pts };
+    const w = oneWay && SIDE.has(cls) ? ONE_WAY_HALF : HALF[cls];
+    return { index, cls, name: VERDUN.names[n], w, walk: WALK[cls] ?? 0, pts, oneWay, cars: !(f & 2) && cls !== 'pedestrian' };
   });
   // Segments by grid cell, for the nearest road.
   const segs = [], segCells = new Map();
@@ -55,10 +59,19 @@ export function buildOpenMap() {
       }
     }
   }
-  // Road ends shared by three or more pieces are crossings: center lines stop short of them.
+  // Road ends shared by three or more pieces are crossings: lines stop short
+  // of them, by the half width of the widest other street there.
   const ends = new Map(), endKey = ([x, z]) => `${Math.round(x)},${Math.round(z)}`;
-  for (const r of roads) for (const p of [r.pts[0], r.pts[r.pts.length - 1]]) ends.set(endKey(p), (ends.get(endKey(p)) ?? 0) + 1);
-  const crossing = (p) => (ends.get(endKey(p)) ?? 0) >= 3;
+  for (const r of roads) for (const p of [r.pts[0], r.pts[r.pts.length - 1]]) {
+    const k = endKey(p);
+    if (!ends.has(k)) ends.set(k, []);
+    ends.get(k).push(r);
+  }
+  const clearance = (p, r) => {
+    const at = ends.get(endKey(p)) ?? [];
+    if (at.length < 3) return 0;
+    return Math.max(...at.map((o) => (o === r ? 0 : o.w))) + 1;
+  };
 
   // Asphalt (or sidewalk) along each road: a quad per segment and a disc at
   // every point, so bends and crossings are filled.
@@ -85,28 +98,56 @@ export function buildOpenMap() {
     fixWinding(positions);
     return { positions, normals };
   }
-  // Yellow center line on the bigger streets, stopping short of crossings.
-  function centerLines() {
-    const positions = [], normals = [], put = (x, z) => { positions.push(x, ROAD_LIFT + 0.02, z); normals.push(0, 1, 0); };
-    for (const r of roads) {
-      if (!CENTER_LINE.has(r.cls)) continue;
+  // Road paint, on streets wide enough for it (narrow side streets, mostly
+  // one-way, have none): a double yellow line down two-way main streets, a
+  // dashed yellow one down two-way side streets, and dashed white lines between
+  // the lanes of one-way main streets. Lines stop short of crossings.
+  function roadLines() {
+    const yellow = { positions: [], normals: [] }, white = { positions: [], normals: [] };
+    // A strip `half` wide, `off` m right of the road's line, dashed if `dash` ([on, off] m).
+    const strip = (m, r, off, half, dash) => {
+      const put = (x, z) => { m.positions.push(x, ROAD_LIFT + 0.02, z); m.normals.push(0, 1, 0); };
       const len = r.pts.reduce((s, p, i) => (i ? s + Math.hypot(p[0] - r.pts[i - 1][0], p[1] - r.pts[i - 1][1]) : 0), 0);
-      const from = crossing(r.pts[0]) ? 9 : 0, to = len - (crossing(r.pts[r.pts.length - 1]) ? 9 : 0);
+      const from = clearance(r.pts[0], r), to = len - clearance(r.pts[r.pts.length - 1], r);
       let s = 0;
       for (let i = 0; i + 1 < r.pts.length; i++) {
         const [ax, az] = r.pts[i], [bx, bz] = r.pts[i + 1], l = Math.hypot(bx - ax, bz - az);
-        const t0 = Math.max(0, (from - s) / l), t1 = Math.min(1, (to - s) / l);
+        if (l < 1e-3) continue;
+        const ux = (bx - ax) / l, uz = (bz - az) / l, rx = -uz, rz = ux; // along, right
+        // Pieces of this segment: the whole of it, or its dashes.
+        const spans = [];
+        if (!dash) spans.push([Math.max(from, s), Math.min(to, s + l)]);
+        else {
+          const period = dash[0] + dash[1];
+          for (let d = Math.floor(Math.max(from, s) / period) * period; d < Math.min(to, s + l); d += period) {
+            spans.push([Math.max(d, from, s), Math.min(d + dash[0], to, s + l)]);
+          }
+        }
+        for (const [d0, d1] of spans) {
+          if (d1 - d0 < 0.05) continue;
+          const px = ax + ux * (d0 - s) + rx * off, pz = az + uz * (d0 - s) + rz * off;
+          const qx = ax + ux * (d1 - s) + rx * off, qz = az + uz * (d1 - s) + rz * off;
+          const nx = rx * half, nz = rz * half;
+          put(px + nx, pz + nz); put(px - nx, pz - nz); put(qx - nx, qz - nz);
+          put(px + nx, pz + nz); put(qx - nx, qz - nz); put(qx + nx, qz + nz);
+        }
         s += l;
-        if (t1 <= t0) continue;
-        const nx = (-(bz - az) / l) * 0.08, nz = ((bx - ax) / l) * 0.08;
-        const px = ax + (bx - ax) * t0, pz = az + (bz - az) * t0, qx = ax + (bx - ax) * t1, qz = az + (bz - az) * t1;
-        put(px + nx, pz + nz); put(px - nx, pz - nz); put(qx - nx, qz - nz);
-        put(px + nx, pz + nz); put(qx - nx, qz - nz); put(qx + nx, qz + nz);
+      }
+    };
+    for (const r of roads) {
+      if (!r.cars) continue;
+      if (MAIN.has(r.cls) && !r.oneWay) { strip(yellow, r, -0.13, 0.06); strip(yellow, r, 0.13, 0.06); }
+      else if (SIDE.has(r.cls) && !r.oneWay) strip(yellow, r, 0, 0.06, [3, 5]);
+      else if (MAIN.has(r.cls)) {
+        const lanes = Math.max(2, Math.floor((2 * r.w) / 3.6));
+        for (let k = 1; k < lanes; k++) strip(white, r, -r.w + (2 * r.w * k) / lanes, 0.06, [3, 6]);
       }
     }
-    fixWinding(positions);
-    return { positions, normals };
+    fixWinding(yellow.positions);
+    fixWinding(white.positions);
+    return { yellow, white };
   }
+  const lines = roadLines();
 
   // --- the area and its edge -------------------------------------------
   const area = [];
@@ -294,7 +335,8 @@ export function buildOpenMap() {
       { mesh: waterMesh(), color: [0.2, 0.36, 0.45], mat: 'water' },
       { mesh: ribbons(roads, (r) => r.walk && r.w + r.walk, ROAD_LIFT * 0.6), color: [0.62, 0.62, 0.6], mat: 'concrete' },
       { mesh: ribbons(roads, (r) => r.w, ROAD_LIFT), color: [0.3, 0.31, 0.33], mat: 'asphalt' },
-      { mesh: centerLines(), color: [0.95, 0.75, 0.15], mat: 'line', top: true },
+      { mesh: lines.yellow, color: [0.95, 0.75, 0.15], mat: 'line', top: true },
+      { mesh: lines.white, color: [0.92, 0.92, 0.9], mat: 'line', top: true },
     ],
     barriers: barriers(),
     // What's underfoot at (x, z): roadway and sidewalk drive as road, the rest is grass.

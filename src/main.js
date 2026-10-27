@@ -9,7 +9,8 @@ import { Skids } from './skids.js';
 import { Ghost } from './ghost.js';
 import { BOT_LAPS } from './bot-lap.js';
 import { buildTrack, LAYOUTS, ROAD_LIFT } from './track.js';
-import { Signs } from './signs.js';
+import { Signs, createTexture } from './signs.js';
+import { Traffic, carMeshes } from './traffic.js';
 import { onPaddock, buildPaddock } from './paddock.js';
 import { buildTrees, buildTreesAt } from './trees.js';
 import { buildOpenMap, BRICKS } from './openmap.js';
@@ -65,6 +66,7 @@ const uCam = gl.getUniformLocation(program, 'uCam');
 const uFog = gl.getUniformLocation(program, 'uFog');
 const uZenith = gl.getUniformLocation(program, 'uZenith');
 const uSun = gl.getUniformLocation(program, 'uSun');
+const uTime = gl.getUniformLocation(program, 'uTime');
 const SUN = (() => { const l = Math.hypot(...SUN_DIR); return SUN_DIR.map((v) => v / l); })();
 const sky = new Sky(gl);
 
@@ -86,6 +88,7 @@ function buildWorld(kind) {
     for (const m of world.gpu) deleteMesh(gl, m);
     for (const c of world.cells ?? []) unloadCell(c);
     gl.deleteTexture(world.signs.texture);
+    if (world.streetSigns) gl.deleteTexture(world.streetSigns.texture);
   }
   setTerrain(kind);
   if (kind === 'verdun') return buildVerdunWorld();
@@ -164,8 +167,16 @@ function buildVerdunWorld() {
   const upload = (m) => { const mesh = createMesh(gl, program, m); gpu.push(mesh); return mesh; };
   const signs = new Signs(gl, program, []);
   gpu.push(signs.faces);
+  // Traffic, and the lights and stop signs at the crossings.
+  const traffic = new Traffic(t);
+  const f = traffic.furniture();
   return {
     kind: 'verdun',
+    traffic,
+    streetSigns: {
+      poles: upload(f.poles), lamps: upload(f.lamps), backs: upload(f.backs), faces: upload(f.signs),
+      texture: createTexture(gl, stopSignCanvas()),
+    },
     track: t,
     // Lots of buildings and trees: far ones (mostly lost in the haze) aren't drawn.
     drawDistance: 800,
@@ -175,7 +186,7 @@ function buildVerdunWorld() {
     far: 1000,
     offTrack: () => 'grass', // lawns and yards
     apron: null,
-    layers: t.layers.map((l) => ({ ...l, mesh: upload(l.mesh) })),
+    layers: [...t.layers, { mesh: f.lines, color: [0.92, 0.92, 0.9], mat: 'line', top: true }].map((l) => ({ ...l, mesh: upload(l.mesh) })),
     signs,
     signParts: [],
     boxes: [],
@@ -186,6 +197,47 @@ function buildVerdunWorld() {
     gpu,
   };
 }
+
+// Montreal's stop sign, ARRÊT in white on a red octagon, filling the texture
+// (the sign's octagon takes its UVs from the same shape).
+function stopSignCanvas() {
+  const n = 256, cv = document.createElement('canvas');
+  cv.width = cv.height = n;
+  const g = cv.getContext('2d');
+  const octagon = (r) => {
+    g.beginPath();
+    for (let k = 0; k < 8; k++) { const a = Math.PI / 8 + (k * Math.PI) / 4; g.lineTo(n / 2 + Math.cos(a) * r, n / 2 - Math.sin(a) * r); }
+    g.closePath();
+  };
+  g.fillStyle = '#ffffff'; g.fillRect(0, 0, n, n);
+  g.fillStyle = '#c4161c'; octagon(n * 0.47); g.fill();
+  g.strokeStyle = '#ffffff'; g.lineWidth = n * 0.035; octagon(n * 0.43); g.stroke();
+  g.fillStyle = '#ffffff';
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.font = `bold ${Math.round(n * 0.25)}px "Arial Narrow", Arial, sans-serif`;
+  g.fillText('ARRÊT', n / 2, n / 2 + n * 0.01, n * 0.78);
+  return cv;
+}
+
+// Traffic cars: one mesh per shape and part, drawn per car in its color.
+const TRAFFIC_CARS = carMeshes().map((m) => Object.fromEntries(Object.entries(m).map(([k, v]) => [k, createMesh(gl, program, v)])));
+const TRAFFIC_DRAW = 320; // m
+
+function drawTraffic(eye) {
+  for (const c of world.traffic.cars) {
+    if (Math.hypot(c.x - eye[0], c.z - eye[2]) > TRAFFIC_DRAW) continue;
+    const m = TRAFFIC_CARS[c.kind.index];
+    const B = basis([c.x, ROAD_LIFT, c.z], [-c.dz, 0, c.dx], [0, 1, 0], [-c.dx, 0, -c.dz]);
+    draw(m.paint, B, c.color, 'paint');
+    draw(m.glass, B, [0.1, 0.12, 0.15], 'glass');
+    draw(m.trim, B, [0.06, 0.06, 0.07], 'rubber');
+    draw(m.head, B, [0.86, 0.88, 0.9], 'glass');
+    draw(m.tail, B, c.braking ? [1, 0.12, 0.08] : [0.5, 0.05, 0.05], c.braking ? 'lamp' : 'paint');
+  }
+}
+
+// What the traffic needs to know of the player's car.
+const playerState = () => ({ x: car.x, z: car.z, speed: car.speed, vx: -Math.sin(car.heading) * car.speed, vz: -Math.cos(car.heading) * car.speed });
 
 // Makes a cell's meshes (open map).
 function loadCell(c) {
@@ -320,6 +372,7 @@ function switchDrive() {
 function resetRace() {
   car.reset(...startPose());
   streamCells(car.x, car.z, true);
+  world.traffic?.reset(playerState());
   resetWheel();
   cam.x = car.x + Math.sin(car.heading) * 9;
   cam.z = car.z + Math.cos(car.heading) * 9;
@@ -688,7 +741,8 @@ function collide() {
     let hit = null;
     for (const [a, b] of outline) {
       // forward = (-sin, -cos), right = (cos, -sin)
-      const h = track.blocked(car.x - s * a + c * b, car.z - c * a - s * b);
+      const px = car.x - s * a + c * b, pz = car.z - c * a - s * b;
+      const h = track.blocked(px, pz) ?? world.traffic?.blocked(px, pz);
       if (h && (!hit || h.depth > hit.depth)) hit = h;
     }
     if (!hit) return;
@@ -723,6 +777,7 @@ function frame(now) {
   updateKerbs(dt);
   car.update(dt, controls, surface, terrainSample(car.x, car.z));
   if (world.city) world.city.collide(car);
+  world.traffic?.update(dt, playerState());
   collide();
   const after = track.locate(car.x, car.z);
   if (track.open) { /* free roaming: no clock */ }
@@ -779,6 +834,7 @@ function frame(now) {
   gl.uniform3fv(uFog, HORIZON);
   gl.uniform3fv(uZenith, ZENITH);
   gl.uniform3fv(uSun, SUN);
+  gl.uniform1f(uTime, world.traffic?.clock ?? 0);
 
   // Road layers sit a few cm above the ground; polygon offset keeps them from
   // z-fighting with it (and the start line and skids with the road) far away.
@@ -822,6 +878,19 @@ function frame(now) {
   draw(world.signs.faces, identity(), [1, 1, 1]);
   gl.uniform1i(uTextured, 0);
   for (const b of world.boxes) draw(meshes.cube, b.model, b.color, b.mat);
+  if (world.traffic) {
+    const ss = world.streetSigns;
+    drawTraffic(eyePos);
+    gl.disable(gl.CULL_FACE);
+    draw(ss.poles, identity(), [0.2, 0.22, 0.2], 'metal');
+    draw(ss.backs, identity(), [0.6, 0.62, 0.64], 'metal');
+    draw(ss.lamps, identity(), [1, 1, 1], 'signal');
+    gl.uniform1i(uTextured, 1);
+    gl.bindTexture(gl.TEXTURE_2D, ss.texture);
+    draw(ss.faces, identity(), [1, 1, 1]);
+    gl.uniform1i(uTextured, 0);
+    gl.enable(gl.CULL_FACE);
+  }
   for (const p of world.cars) drawCar(p, p.colors, 1, { pitch: 0, roll: 0 }, true, model(p.variant));
   drawCar(car, CAR_COLORS, 1, lean, !cockpit);
   if (cockpit) drawCockpit();
@@ -847,7 +916,7 @@ function frame(now) {
     // The street the car is on (or beside).
     const name = after.name || ' ';
     if (sectionEl.textContent !== name) sectionEl.textContent = name;
-    minimap.draw(car);
+    minimap.draw(car, world.traffic?.cars);
   } else if (track.sections) {
     // Name of the corner or stretch the car is in (the last one started).
     const s = track.sections;

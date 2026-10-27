@@ -13,7 +13,7 @@
 export const MAT = {
   matte: 0, grass: 1, asphalt: 2, sand: 3, gravel: 4, paint: 5, glass: 6, rubber: 7,
   line: 8, metal: 9, concrete: 10, leaves: 11, bark: 12, kerb: 13, straw: 14,
-  facade: 15, curtain: 16, water: 17,
+  facade: 15, curtain: 16, water: 17, lamp: 18, signal: 19,
 };
 
 export const SCENE_VS = `#version 300 es
@@ -50,6 +50,7 @@ uniform vec3 uCam;
 uniform vec3 uFog;    // sky at the horizon
 uniform vec3 uZenith; // sky overhead
 uniform vec3 uSun;    // direction to the sun, normalized
+uniform float uTime;  // traffic clock (s), for the traffic lights
 out vec4 outColor;
 
 float hash(vec2 p) {
@@ -92,6 +93,7 @@ void main() {
   float gloss = 0.25; // 0 rough .. 1 mirror
   float refl = 0.08;  // how much of the environment it mirrors
   float metal = 0.0, h = 0.0, sparkle = 0.0, wrap = 0.0, fmin = 0.0;
+  float emit = 0.0; // lamps: their own light, no shading
 
   if (uMat == M_GRASS) {
     float mid = tn(p, 0.25), blade = tc(p, 14.0);
@@ -162,6 +164,18 @@ void main() {
     float r = tn(p + vec2(3.0, 1.0), 0.35) + 0.5 * tn(p * 1.7 + 11.0, 0.9);
     alb *= 0.85 + 0.2 * tn(p, 0.02);
     h = 0.06 * r; gloss = 0.85; f0 = 0.03; refl = 0.75;
+  } else if (uMat == M_LAMP) {
+    emit = 1.0;
+  } else if (uMat == M_SIGNAL) {
+    // Traffic light lamp. vUV.x: the crossing's offset in the cycle (s);
+    // vUV.y: its way (0 or 1) * 3 + the lamp (0 red, 1 yellow, 2 green).
+    // Same timing as signalState() in traffic.js: 60 s, 26 s green, 3 s yellow.
+    float way = floor(vUV.y / 3.0 + 0.01), lamp = floor(vUV.y - way * 3.0 + 0.5);
+    float u = mod(uTime + vUV.x - way * 30.0, 60.0);
+    float state = u < 26.0 ? 2.0 : u < 29.0 ? 1.0 : 0.0;
+    vec3 col = lamp < 0.5 ? vec3(1.0, 0.12, 0.08) : lamp < 1.5 ? vec3(1.0, 0.7, 0.1) : vec3(0.25, 1.0, 0.65);
+    alb = abs(state - lamp) < 0.5 ? col * 1.4 : col * 0.06 + 0.02;
+    emit = 1.0;
   } else if (uMat == M_STRAW) {
     alb *= 0.72 + 0.5 * tn(p, 7.0) * (0.7 + 0.3 * tc(p, 30.0));
     gloss = 0.05; refl = 0.0;
@@ -194,6 +208,7 @@ void main() {
 
   vec3 c = diffuse * (1.0 - metal) * (1.0 - F * refl) + spec + mirror;
   c += sparkle * 1.5 * sunCol * max(nl, 0.0) * pow(max(dot(N, H), 0.0), 6.0);
+  if (emit > 0.5) c = alb;
   // Haze: far things fade into the sky's horizon color.
   float fog = smoothstep(120.0, 750.0, distance(vWorld, uCam)) * 0.85;
   outColor = vec4(mix(c, uFog, fog), uAlpha);

@@ -23,7 +23,7 @@ row groups whose bounding boxes touch the map are downloaded (cached).
 
 Local meters: x east, z south, from the area's center.
 """
-import base64, io, json, math, os, re, sys, struct, time, concurrent.futures as cf
+import base64, io, zlib, json, math, os, re, sys, struct, time, concurrent.futures as cf
 import numpy as np, requests, shapely
 import pyarrow as pa, pyarrow.parquet as pq, pyarrow.compute as pc
 from shapely.geometry import LineString, MultiLineString, Polygon, MultiPolygon, Point, box
@@ -157,7 +157,7 @@ water = proj(unary_union([g for r in water_rows if r['subtype'] in ('river', 'ca
 # Street bridges: their decks (a little wider and longer than the road) join the banks.
 CLASSES = ['primary', 'secondary', 'tertiary', 'residential', 'unclassified', 'living_street', 'service', 'pedestrian']
 HALF = {'primary': 7, 'secondary': 6.5, 'tertiary': 5.5, 'residential': 4.5, 'unclassified': 4, 'living_street': 3.5, 'service': 2.6, 'pedestrian': 3}
-segs = rows(fetch('theme=transportation/type=segment', 'segments'), ['subtype', 'class', 'subclass', 'names', 'road_flags', 'geometry'])
+segs = rows(fetch('theme=transportation/type=segment', 'segments'), ['subtype', 'class', 'subclass', 'names', 'road_flags', 'connectors', 'access_restrictions', 'geometry'])
 flagged = lambda r, f: [x['between'] or (0, 1) for x in (r['road_flags'] or []) if f in x['values']]
 decks = []
 for r in segs:
@@ -174,23 +174,147 @@ print(f'area: {area.area / 1e6:.2f} km², x {minx:.0f}..{maxx:.0f}, z {minz:.0f}
 view = area.buffer(450)  # scenery reaches this far past the edge
 
 # --- roads ------------------------------------------------------------------
-# Service roads are back lanes and parking aisles.
+# Service roads are back lanes and parking aisles. Each street segment is cut
+# at its connectors, so pieces end at the crossings and share their end points.
+# flags: 1 one-way (in the drawn direction), 2 closed to cars (pedestrian
+# streets, bus lanes...).
+def oneway(r):
+    for a in r['access_restrictions'] or []:
+        w = a['when'] or {}
+        if a['access_type'] == 'denied' and w.get('heading') in ('backward', 'forward') and not a['between'] \
+                and not any(w.get(k) for k in ('mode', 'using', 'during', 'recognized', 'vehicle')):
+            return w['heading']
+    return None
+
+
+def no_cars(r):
+    return any(a['access_type'] == 'denied' and not a['between'] and set((a['when'] or {}).get('mode') or []) & {'motor_vehicle', 'car'}
+               and not (a['when'] or {}).get('heading') for a in r['access_restrictions'] or [])
+
+
+def cut(intervals, gaps):
+    """Intervals [a, b] (fractions along a segment) minus the gaps."""
+    for g0, g1 in gaps:
+        out = []
+        for a, b in intervals:
+            if g1 <= a or g0 >= b: out.append((a, b)); continue
+            if g0 > a: out.append((a, g0))
+            if g1 < b: out.append((g1, b))
+        intervals = out
+    return intervals
+
+
 names, roads = [], []
 inside = area.buffer(-0.5)
 for r in segs:
     if r['subtype'] != 'road' or r['class'] not in CLASSES or r['subclass'] in ('link', 'driveway'): continue
-    g = geom(r)
-    tunnels = [shapely.ops.substring(g, a, b, normalized=True).buffer(1e-6) for a, b in flagged(r, 'is_tunnel')]
-    if tunnels: g = g.difference(unary_union(tunnels))  # tunnels: keep only the open-air parts
-    line = proj(g).intersection(inside)
-    if line.is_empty: continue
+    g = proj(geom(r))
+    ats = sorted({0.0, 1.0, *[c['at'] for c in r['connectors'] or []]})
+    # Tunnels: keep only the open-air parts.
+    spans = cut([(a, b) for a, b in zip(ats, ats[1:]) if b - a > 1e-9], flagged(r, 'is_tunnel'))
+    head = oneway(r)
+    flags = (1 if head else 0) | (2 if no_cars(r) else 0)
     name = (r['names'] or {}).get('primary') or ''
-    if name not in names: names.append(name)
-    for piece in getattr(line, 'geoms', [line]):
-        if piece.geom_type != 'LineString' or piece.length < 2: continue
-        c = np.round(np.array(piece.simplify(0.3).coords) / UNIT).astype(int)
-        roads.append([CLASSES.index(r['class']), names.index(name), *c.flatten().tolist()])
-print(f'roads: {len(roads)} pieces, {sum(LineString(np.array(r[2:]).reshape(-1, 2) * UNIT).length for r in roads) / 1000:.1f} km')
+    for a, b in spans:
+        sub = shapely.ops.substring(g, a, b, normalized=True)
+        if sub.geom_type != 'LineString': continue
+        line = sub.intersection(inside)
+        if line.is_empty: continue
+        if name not in names: names.append(name)
+        for piece in getattr(line, 'geoms', [line]):
+            if piece.geom_type != 'LineString' or piece.length < 1: continue
+            c = np.round(np.array(piece.simplify(0.3).coords) / UNIT).astype(int)
+            if head == 'forward': c = c[::-1]  # one-way against the drawing: flip it
+            roads.append([CLASSES.index(r['class']), names.index(name), flags, *c.flatten().tolist()])
+print(f'roads: {len(roads)} pieces, {sum(LineString(np.array(r[3:]).reshape(-1, 2) * UNIT).length for r in roads) / 1000:.1f} km, '
+      f'{sum(r[2] & 1 for r in roads)} one-way')
+
+# --- traffic control --------------------------------------------------------
+# Crossings: piece ends shared by three or more streets open to cars. Each one
+# gets traffic lights if the map has signals at or just before it, or stop
+# signs on the approaches that have them (an all-way stop when tagged so).
+CAR = {CLASSES.index(c) for c in CLASSES if c not in ('service', 'pedestrian')}
+ends = {}
+for i, r in enumerate(roads):
+    if r[0] not in CAR or r[2] & 2: continue
+    ends.setdefault((r[3], r[4]), []).append(2 * i)          # start of piece i
+    ends.setdefault((r[-2], r[-1]), []).append(2 * i + 1)    # its end
+nodes = {nk: v for nk, v in ends.items() if len(v) >= 3}
+nkeys = list(nodes)
+npts = np.array(nkeys, dtype=float) * UNIT
+rline = lambda i: LineString(np.array(roads[i][3:]).reshape(-1, 2) * UNIT)
+infra = rows(fetch('theme=base/type=infrastructure', 'infrastructure'), ['class', 'source_tags', 'geometry'])
+tags = lambda r: dict(r['source_tags'] or [])
+
+
+def near_nodes(p, reach):
+    d = np.hypot(npts[:, 0] - p.x, npts[:, 1] - p.y)
+    return [(d[j], nkeys[j]) for j in np.argsort(d) if d[j] < reach]
+
+
+def approach(p, reach=30):
+    """The crossing approach (piece end) that the point p lies on, if any: the
+    nearest crossing within reach along a piece through p."""
+    for d, nk in near_nodes(p, reach):
+        if d < 2.5: return nk, None  # on the crossing itself
+        for e in nodes[nk]:
+            if rline(e // 2).distance(p) < 3: return nk, e
+    return None
+
+
+signal_nodes, stops, allway = set(), set(), set()
+for r in infra:
+    if r['class'] not in ('traffic_signals', 'stop'): continue
+    p = proj(geom(r))
+    if p.geom_type != 'Point': continue
+    if not inside.contains(p): continue
+    a = approach(p, 30 if r['class'] == 'traffic_signals' else 25)
+    if not a: continue
+    nk, e = a
+    if r['class'] == 'traffic_signals': signal_nodes.add(nk)
+    elif tags(r).get('stop') == 'all': allway.add(nk)
+    elif e is not None: stops.add(e)
+    else:
+        # A stop sign on the crossing itself: the minor streets stop.
+        top = min(roads[x // 2][0] for x in nodes[nk])
+        minor = [x for x in nodes[nk] if roads[x // 2][0] > top]
+        stops.update(minor or nodes[nk])
+# Divided streets cross in several close nodes: lights spread to the nodes of
+# the same crossing (joined by a short piece).
+for _ in range(2):
+    for nk in list(signal_nodes):
+        for e in nodes[nk]:
+            i = e // 2
+            if rline(i).length > 22 or roads[i][0] not in CAR: continue
+            o = (roads[i][3], roads[i][4]) if e % 2 else (roads[i][-2], roads[i][-1])
+            if o in nodes: signal_nodes.add(o)
+for nk in allway: stops.update(nodes[nk])
+# Each signalised crossing: its main axis (the biggest street through it) and
+# a group, shared by close nodes so their lights change together.
+sig_list, groups = [], {}
+for nk in sorted(signal_nodes):
+    stops -= set(nodes[nk])
+    p = np.array(nk) * UNIT
+    g = next((gid for q, gid in groups.items() if np.hypot(*(np.array(q) * UNIT - p)) < 40), len(set(groups.values())))
+    groups[nk] = g
+    best = min(nodes[nk], key=lambda e: (roads[e // 2][0], -rline(e // 2).length))
+    c = np.array(roads[best // 2][3:]).reshape(-1, 2)
+    v = c[1] - c[0] if best % 2 == 0 else c[-2] - c[-1]
+    sig_list += [nk[0], nk[1], int(round(math.atan2(v[1], v[0]) * 1000)), g]
+# Crossings the map has no signs for, the Montreal way: side streets stop
+# where they meet a bigger street, and residential crossings are all-way stops.
+# Crossings of main streets only are left as they are.
+RESIDENTIAL = {CLASSES.index(c) for c in ('residential', 'unclassified', 'living_street')}
+guessed = 0
+for nk, es in nodes.items():
+    if nk in signal_nodes or any(e in stops for e in es): continue
+    cls = [roads[e // 2][0] for e in es]
+    top = min(cls)
+    add = [e for e, c in zip(es, cls) if c > top] or (es if top in RESIDENTIAL else [])
+    stops.update(add)
+    guessed += bool(add)
+print(f'guessed stop signs at {guessed} crossings')
+print(f'crossings: {len(nodes)}, with lights: {len(signal_nodes)}, stop approaches: {len(stops)} ({len(allway)} all-way)')
 
 # The edge of the area: a low barrier where it is on land (not the river or
 # canal shore), and railings along the bridges over the water.
@@ -230,7 +354,7 @@ for r in blds:
         if p.geom_type != 'Polygon' or p.is_empty: continue
         h = r['height'] or (r['num_floors'] and r['num_floors'] * 3.2 + 0.8) or DEFAULT_H.get(r['class'] or '', 0)
         if not h:
-            h = 7.5 + (hash(p.wkb) % 5) * 0.9  # unknown: 2-3 storeys
+            h = 7.5 + (zlib.crc32(p.wkb) % 5) * 0.9  # unknown: 2-3 storeys
         ring = list(p.exterior.coords)[:-1]
         if len(ring) < 3 or len(ring) > 255: continue
         bdata.append(len(ring))
@@ -260,11 +384,15 @@ print(f'water: {len(wtri) // 6} triangles')
 
 # --- start: on Rue Wellington, 40 m before Rue de l'Église, facing it -------
 def lines_named(n):
-    return [LineString(np.array(r[2:]).reshape(-1, 2) * UNIT) for r in roads if names[r[1]] == n]
-well, church = lines_named('Rue Wellington'), unary_union(lines_named("Rue de l'Église"))
-line = next(l for l in well if l.length > 60 and Point(l.coords[-1]).distance(church) < 1)
-p0 = line.interpolate(line.length - 40)
-p1 = line.interpolate(line.length - 39)
+    return [LineString(np.array(r[3:]).reshape(-1, 2) * UNIT) for r in roads if names[r[1]] == n]
+well = shapely.line_merge(unary_union(lines_named('Rue Wellington')))
+church = unary_union(lines_named("Rue de l'Église"))
+hit = well.intersection(church)
+cross = min(getattr(hit, 'geoms', [hit]), key=lambda q: q.distance(Point(700, 440)))  # the one in Verdun
+line = min(getattr(well, 'geoms', [well]), key=lambda l: l.distance(cross))
+s0 = line.project(cross)
+# 40 m south of the crossing (Wellington runs about north there), facing it.
+p0, p1 = max(([line.interpolate(s0 - 40), line.interpolate(s0 - 39)], [line.interpolate(s0 + 40), line.interpolate(s0 + 39)]), key=lambda c: c[0].y)
 start = [round(p0.x, 1), round(p0.y, 1), round(math.atan2(-(p1.x - p0.x), -(p1.y - p0.y)), 3)]
 print('start', start)
 
@@ -276,7 +404,11 @@ js = f"""// Verdun, Montreal: an open map from public data. Generated by
 // other open sources), meters around {lat0:.5f}° N, {-lon0:.5f}° W: x east, z south.
 // Lengths in the packed data are int16 steps of `unit` meters.
 // - area: the drivable part of the map, outer ring [x, z, ...].
-// - names: street names. roads: [class index into `classes`, name index, x, z, x, z, ...].
+// - names: street names. roads: [class index into `classes`, name index, flags, x, z, x, z, ...];
+//   flags: 1 one-way in the drawn direction, 2 closed to cars. Pieces end at crossings.
+// - signals: crossings with traffic lights, [x, z, main axis (mrad), group, ...]:
+//   lights of a group change together. stops: approaches with a stop sign, as
+//   2 × road index (+ 1 for the road's last point).
 // - walls: where the area's edge is on land, polylines [x, z, ...].
 // - buildings: base64 int16: point count, height (dm), then x, z per point.
 // - trees: base64 int16 x, z. water: base64 int16 triangles x, z ×3, in whole meters.
@@ -287,6 +419,8 @@ export const VERDUN = {{
   walls: {json.dumps(walls)},
   names: {json.dumps(names, ensure_ascii=False)},
   roads: {json.dumps(roads, separators=(',', ':'))},
+  signals: {json.dumps(sig_list, separators=(',', ':'))},
+  stops: {json.dumps(sorted(stops), separators=(',', ':'))},
   buildings: "{pack(bdata, 'h')}",
   trees: "{pack(tdata, 'h')}",
   water: "{pack(wtri, 'h')}",

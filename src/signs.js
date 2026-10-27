@@ -41,7 +41,7 @@ function drawAtlas() {
   return cv;
 }
 
-function createTexture(gl, canvas) {
+export function createTexture(gl, canvas) {
   const tex = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, tex);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
