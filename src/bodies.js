@@ -165,3 +165,60 @@ export function gt3Body(v) {
   };
   return { skin, tub, glass, roofPanel, parts, cockpit };
 }
+
+// Toyota Yaris (XP210) five-door hatchback: short nose, a cab-forward
+// windscreen, a tall roof held almost to the tail, then a steep hatch.
+// Same frame and conventions as gt3Body.
+export function yarisBody(v) {
+  const L = v.length, front = v.overhangFront, sF = front, sR = front + v.cgToFront + v.cgToRear;
+  const toZ = (s) => s - front - v.cgToFront;
+  const halfW = v.width / 2;
+  // Bonnet rising to the cowl, then a beltline that climbs gently to the tail.
+  const top = profile([[0, 0.56], [0.14, 0.7], [sF, 0.83], [sF + 0.55, 0.92], [sF + 0.8, 0.94], [sR, 1.0], [L - 0.12, 0.99], [L, 0.9]]);
+  // Pumped rear haunches, narrower nose and a squarer tail.
+  const width = profile([[0, halfW - 0.16], [0.3, halfW - 0.06], [sF, halfW - 0.03], [sF + 0.6, halfW - 0.05], [sR - 0.6, halfW - 0.04], [sR - 0.1, halfW], [L - 0.2, halfW - 0.03], [L, halfW - 0.09]]);
+  const bottom = profile([[0, 0.26], [0.18, 0.16], [L - 0.3, 0.17], [L, 0.36]]);
+  const dip = profile([[0, 0.01], [0.4, 0.03], [sF + 0.45, 0.02], [sF + 0.6, 0], [L, 0]]);
+  const arch = (s) => {
+    let y = bottom(s);
+    for (const [c, r] of [[sF, v.wheelRadiusFront], [sR, v.wheelRadiusRear]]) {
+      const R = r + 0.06, d = s - c;
+      if (Math.abs(d) < R) y = Math.max(y, r + Math.sqrt(R * R - d * d));
+    }
+    return y;
+  };
+  const skin = loft(range(0, L, 0.04).map((s) => ({ z: toZ(s), y0: arch(s), y1: top(s), w: width(s), dip: dip(s), pinch: 0.04 })));
+  const tubW = Math.min(v.trackFront - v.tireWidthFront, v.trackRear - v.tireWidthRear) / 2 - 0.04;
+  const tub = loft(range(0.1, L - 0.1, 0.1).map((s) => ({ z: toZ(s), y0: bottom(s) + 0.02, y1: top(s) - 0.06, w: Math.min(tubW, width(s) - 0.05) })), 16);
+
+  // Greenhouse: raked windscreen up to a roof that runs almost to the tail,
+  // then the hatch drops steeply onto the bumper.
+  const g0 = sF + 0.55, g1 = L - 0.1;
+  const roof = profile([[g0, 0.92], [g0 + 1.0, 1.47], [g0 + 1.6, 1.5], [L - 0.65, 1.47], [L - 0.35, 1.36], [g1, 1.0]]);
+  const gw = profile([[g0, halfW - 0.12], [g0 + 0.9, halfW - 0.16], [L - 0.6, halfW - 0.16], [g1, halfW - 0.2]]);
+  const glass = loft(range(g0, g1, 0.05).map((s) => ({ z: toZ(s), y0: top(s) - 0.08, y1: roof(s), w: gw(s), pinch: 0.22 })), 24, 3);
+  const roofPanel = loft(range(g0 + 0.9, L - 0.42, 0.05).map((s) => ({ z: toZ(s), y0: roof(s) - 0.09, y1: roof(s) + 0.008, w: gw(s) * 0.76 })), 24, 3);
+
+  const parts = [];
+  const box = (x, y, s, sx, sy, sz, color, mat) => parts.push({ x, y, z: toZ(s), sx, sy, sz, color, mat });
+  for (const side of [-1, 1]) {
+    box(side * (halfW - 0.24), top(0.22) - 0.04, 0.22, 0.32, 0.08, 0.3, 'light', 'glass');   // swept-back headlights
+    box(side * (halfW + 0.06), 1.0, g0 + 0.3, 0.15, 0.1, 0.07, 'body', 'paint');             // mirrors
+    box(side * (halfW - 0.2), 0.95, L - 0.04, 0.34, 0.1, 0.06, 'tail', 'glass');              // tail lights
+    box(side * (halfW - 0.18), 0.24, 0.12, 0.2, 0.07, 0.12, 'trim', 'matte');                 // fog light bezels
+  }
+  box(0, 0.36, 0.04, 1.05, 0.22, 0.08, 'trim', 'matte');                     // big lower grille
+  box(0, top(0.06) - 0.06, 0.06, 0.7, 0.04, 0.06, 'trim', 'matte');           // slim upper grille
+  box(0, 0.28, L - 0.06, v.width - 0.3, 0.14, 0.1, 'trim', 'matte');          // rear bumper insert
+  box(0, roof(L - 0.42) + 0.01, L - 0.38, 1.1, 0.03, 0.2, 'body', 'paint');   // roof spoiler over the hatch
+  const cabinTop = Math.max(...range(g0, g0 + 1.6, 0.1).map(top));
+  const cockpit = {
+    eye: [-0.37, 1.24, toZ(g0 + 1.15)],
+    floorY: cabinTop + 0.03,
+    dashY: cabinTop + 0.03, dashZ: toZ(g0 + 0.25),
+    floorZ: [toZ(g0 + 0.2), toZ(g0 + 1.9)],
+    pillarBase: [halfW - 0.15, top(g0), toZ(g0 + 0.05)], pillarTop: [halfW - 0.21, roof(g0 + 0.9) - 0.02, toZ(g0 + 0.9)],
+    roofY: roof(g0 + 0.95) - 0.02, roofZ: toZ(g0 + 0.95),
+  };
+  return { skin, tub, glass, roofPanel, parts, cockpit, rim: [0.62, 0.64, 0.67] };
+}

@@ -85,8 +85,8 @@ The car uses tire forces, so rough driving gets punished:
 - **Lifting off or braking mid-corner** shifts weight forward and lightens the rear.
 - **Hills**: the Nordschleife climbs and falls with grades up to about 20%.
   - Gravity slows you uphill, speeds you up downhill and pushes you sideways on cambered bits.
-  - Grade moves weight between the axles: uphill loads the rear (good for RWD traction,
-    FWD loses front grip), downhill loads the front. Braking downhill makes the rear very light.
+  - Grade moves weight between the axles: uphill loads the rear (good for the GT3's traction,
+    the Yaris loses front grip), downhill loads the front. Braking downhill makes the rear very light.
   - Crests unload the tires, so there is less grip at the top of a rise taken fast;
     dips press the car down and add grip.
   - The HUD shows the current grade and the weight on each axle (F / R, % of the car's
@@ -96,18 +96,41 @@ The car uses tire forces, so rough driving gets punished:
   from sliding, and cool in the airflow, faster at speed. Grip is best between 80 and
   100 °C and fades gradually outside it: cold tires (they start at 45 °C) give about
   5–10% less grip, and overheated ones lose more the hotter they get (−6% at 120 °C,
-  −20% at 150 °C). Brisk laps bring both axles into the window (on the RWD car the
+  −20% at 150 °C). Brisk laps bring both axles into the window (on the GT3 the
   driven rears run a little warmer). Hot tires shed heat much faster, so they hover
   near the top of the window; only sustained abuse (long slides, donuts) pushes them
-  over, to about 110–115 °C, and they recover quickly once you ease off. On the FWD car the fronts do the driving, braking
+  over, to about 110–115 °C, and they recover quickly once you ease off. On the Yaris the fronts do the driving, braking
   and steering, so they run hotter and the rears stay cooler.
   The HUD shows a top view of the car with each tire colored blue (cold), green
   (in the window), amber then red (overheated), plus the grip lost.
 - A light traction control stops full throttle from using all the grip of the driven wheels.
-- **Three cars**, switched with **T** or the Car button (best laps kept per car):
-  - **FWD** — front-heavy, front wheels drive. Throttle in a corner makes it push wide.
-  - **RWD** — balanced, rear wheels drive. Throttle in a slow corner kicks the tail out.
-  - **GT3** — a Porsche 911 GT3 (992), modeled from published data (see below).
+- **Two cars**, switched with **T** or the Car button (best laps kept per car), both
+  modeled from published data (see below):
+  - **Yaris** — a Toyota Yaris Hybrid: front-heavy, front wheels drive. Throttle in a corner makes it push wide.
+  - **GT3** — a Porsche 911 GT3 (992): engine behind the rear axle, rear wheels drive.
+
+## Toyota Yaris Hybrid (XP210)
+
+Built the same way as the GT3 below: the physics and the drawn hatchback come from the
+same numbers (`VARIANTS.yaris` in `src/car.js`, `yarisBody` in `src/bodies.js`).
+
+| | Data used |
+| --- | --- |
+| Size | 3940 × 1745 × 1500 mm, 2560 mm wheelbase, 1531 / 1520 mm track |
+| Weight | ~1120 kg kerb + 75 kg driver, ~62 / 38 % front / rear |
+| Engine | 1.5 L three-cylinder hybrid, 85 kW (116 PS) system power, e-CVT, front-wheel drive |
+| Tires | 185/65 R15 (eco) |
+| Aero | Cd ~0.32, no downforce |
+| Claimed | 0–100 km/h 9.7 s, 175 km/h (limited) |
+
+In the game it does 0–100 km/h in 9.75 s, runs into its 175 km/h limiter, corners at
+about 0.9 g, and stops from 100 km/h in about 45 m (pedal travel included).
+
+How it drives:
+- **Understeer**: 62% of the weight is on the front tires, which also drive and do
+  most of the braking, so pushing too hard makes the nose run wide.
+- **Lift-off rotation**: the light rear only steps out when you lift or brake mid-corner.
+- **Soft body**: tall and softly sprung, it dives, squats and leans much more than the GT3.
 
 ## Porsche 911 GT3 (992)
 
@@ -136,7 +159,7 @@ How the rear engine shows up:
   lets go quickly. Lift or brake mid-corner and the car rotates; overdo it and the
   tail swings like a pendulum (high yaw inertia from the engine's overhang).
 - **Downforce** grows with speed squared, so fast corners have more grip than slow ones.
-- **Stiffer body**: it pitches and rolls less than the other two cars.
+- **Stiffer body**: it pitches and rolls much less than the Yaris.
 
 ## Corner boards
 
@@ -154,7 +177,7 @@ An amber ghost replays Claude's run on the same layout and car; its time
 shows as **Claude** in the HUD. `scripts/autodrive.mjs` drove it with the game's
 own physics at 60 fps, using only what a player has (steering wheel, on/off
 pedals) and never leaving the road. Re-run it after physics or track changes:
-`node scripts/autodrive.mjs ring all` (`both` = FWD and RWD, or name one car).
+`node scripts/autodrive.mjs ring all` (or name one car: `yaris`, `gt3`).
 
 ## Cockpit view
 
@@ -191,7 +214,7 @@ With the keyboard, holding A/D turns the wheel gradually; let go and it returns 
 | S / ↓          | Brake / reverse |
 | A / D, ← / →   | Steer           |
 | Space          | Handbrake       |
-| T              | Switch car (FWD/RWD/GT3) |
+| T              | Switch car (Yaris/GT3)   |
 | G              | Toggle ghost    |
 | C              | Chase / cockpit view |
 | M              | Switch map (Montreal, Nordschleife)        |
@@ -204,14 +227,14 @@ With the keyboard, holding A/D turns the wheel gradually; let go and it returns 
 - `src/nordschleife.js` — Nordschleife path, road heights and ground grid (generated)
 - `src/trees.js` — low-poly trees, merged into a few meshes
 - `src/sky.js` — sky dome with sun and clouds; its horizon color is the distance haze
-- `src/car.js` — car physics (dynamic bicycle model, tire grip, FWD/RWD)
+- `src/car.js` — car physics (dynamic bicycle model, tire grip) and the cars' specs
 - `src/skids.js` — skid marks
 - `src/ghost.js` — best-lap recording and ghost replay
 - `src/bot-lap.js` — Claude's runs (generated by `scripts/autodrive.mjs`)
 - `src/gl.js` — shader/mesh helpers
 - `src/geometry.js` — cube, torus (ground grid is drawn in the shader)
 - `src/terrain.js` — the ground: the Nordschleife's real terrain, flat for Montreal
-- `src/bodies.js` — lofted car bodies (the GT3), built from the physics dimensions
+- `src/bodies.js` — lofted car bodies (Yaris, GT3), built from the physics dimensions
 - `src/math.js` — mat4 helpers
 - `src/input.js` — keyboard and touch controls
 - `scripts/autodrive.mjs` — self-driving bot that sets Claude's ghost runs

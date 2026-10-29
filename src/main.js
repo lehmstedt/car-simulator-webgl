@@ -1,6 +1,6 @@
 import { createProgram, createMesh, deleteMesh } from './gl.js';
 import { cube, torus, cylinder } from './geometry.js';
-import { gt3Body } from './bodies.js';
+import { gt3Body, yarisBody } from './bodies.js';
 import { perspective, lookAt, multiply, identity, basis, rotate } from './math.js';
 import { terrainHeight, terrainNormal, terrainSample, terrainMesh, ringTerrainChunks, setTerrain } from './terrain.js';
 import { readControls, resetWheel, wheelAngle } from './input.js';
@@ -264,21 +264,20 @@ const meshes = {
   wheelRim: createMesh(gl, program, torus(0.17, 0.018)),
   wheel: createMesh(gl, program, cylinder()),
 };
-// Per-variant drawing data: physics spec, wheel layout and (for modeled cars) body meshes.
+// Per-car drawing data: physics spec, wheel layout and body meshes.
+const BODIES = { gt3: gt3Body, yaris: yarisBody };
 const MODELS = {};
 for (const name of Object.keys(VARIANTS)) {
   const spec = variantSpec(name);
-  const m = { spec, wheels: wheelLayout(spec) };
-  if (spec.body === 'gt3') {
-    const b = gt3Body(spec);
-    Object.assign(m, b, {
-      skin: createMesh(gl, program, b.skin), tub: createMesh(gl, program, b.tub),
-      glass: createMesh(gl, program, b.glass), roofPanel: createMesh(gl, program, b.roofPanel),
-    });
-  }
-  MODELS[name] = m;
+  const b = BODIES[spec.body](spec);
+  MODELS[name] = {
+    ...b, spec, wheels: wheelLayout(spec),
+    skin: createMesh(gl, program, b.skin), tub: createMesh(gl, program, b.tub),
+    glass: createMesh(gl, program, b.glass), roofPanel: createMesh(gl, program, b.roofPanel),
+  };
 }
-const model = (variant) => MODELS[variant] ?? MODELS.rwd;
+const DEFAULT_CAR = 'gt3';
+const model = (variant) => MODELS[variant] ?? MODELS[DEFAULT_CAR];
 
 // Grid starts a few meters before the line, facing along the track.
 function startPose() {
@@ -286,8 +285,8 @@ function startPose() {
   return [x, z, Math.atan2(-tx, -tz)];
 }
 
-let savedDrive = 'rwd';
-try { savedDrive = localStorage.getItem('drive') in VARIANTS ? localStorage.getItem('drive') : 'rwd'; } catch {}
+let savedDrive = DEFAULT_CAR;
+try { savedDrive = localStorage.getItem('drive') in VARIANTS ? localStorage.getItem('drive') : DEFAULT_CAR; } catch {}
 const car = new Car(savedDrive);
 const skids = new Skids(gl, program);
 let ghost = null;
@@ -323,7 +322,7 @@ const tilt = { pitch: 0, roll: 0 }; // body lean from weight transfer (visual on
 const kerb = { lift: 0, vlift: 0, pitch: 0, vpitch: 0, roll: 0, vroll: 0, wheels: [0, 0, 0, 0] };
 let lean = { pitch: 0, roll: 0, lift: 0, wheels: kerb.wheels }; // tilt + kerb, used to draw the car
 // Laps: the track is split into 4 sectors; a lap counts only after visiting all of them.
-// Best times are kept per layout and drivetrain so FWD and RWD can be compared.
+// Best times are kept per layout and car.
 const lap = { start: null, last: null, done: false, best: {}, sector: 3, visited: new Set(), along: 0 };
 
 function setLayout(kind) {
@@ -505,26 +504,18 @@ function drawCar(pose = car, colors = CAR_COLORS, alpha = 1, lean = { pitch: 0, 
   const F = carFrame(pose);
   const body = bodyFrame(F, lean);
   const { right, up, back } = body;
-  const v = m.spec;
-  if (m.skin) {
-    const B = basis(body.o, right, up, back);
-    draw(m.skin, B, colors.body, 'paint', alpha);
-    draw(m.tub, B, colors.trim ?? TRIM, 'matte', alpha);
-    if (cabin) {
-      draw(m.glass, B, colors.cabin, 'glass', alpha);
-      draw(m.roofPanel, B, colors.body, 'paint', alpha);
-    }
-    for (const p of m.parts) {
-      if (!cabin && p.y > 0.98) continue; // wing and mirrors would clutter the cockpit view
-      const c = p.color === 'body' ? colors.body : p.color === 'light' ? colors.light ?? [0.85, 0.88, 0.9]
-        : p.color === 'tail' ? colors.tail ?? [0.75, 0.05, 0.05] : colors.trim ?? TRIM;
-      draw(meshes.cube, basis(toWorld(body, p.x, p.y, p.z), right, up, back, p.sx, p.sy, p.sz), c, p.mat, alpha);
-    }
-  } else {
-    // Plain box car, centered between the bumpers.
-    const mid = v.length / 2 - v.overhangFront - v.cgToFront;
-    draw(meshes.cube, basis(toWorld(body, 0, 0.6, mid), right, up, back, v.width, 0.6, v.length), colors.body, 'paint', alpha);
-    if (cabin) draw(meshes.cube, basis(toWorld(body, 0, 1.15, mid + 0.3), right, up, back, v.width - 0.3, 0.5, 2.0), colors.cabin, 'glass', alpha);
+  const B = basis(body.o, right, up, back);
+  draw(m.skin, B, colors.body, 'paint', alpha);
+  draw(m.tub, B, colors.trim ?? TRIM, 'matte', alpha);
+  if (cabin) {
+    draw(m.glass, B, colors.cabin, 'glass', alpha);
+    draw(m.roofPanel, B, colors.body, 'paint', alpha);
+  }
+  for (const p of m.parts) {
+    if (!cabin && p.y > 0.98) continue; // wing and mirrors would clutter the cockpit view
+    const c = p.color === 'body' ? colors.body : p.color === 'light' ? colors.light ?? [0.85, 0.88, 0.9]
+      : p.color === 'tail' ? colors.tail ?? [0.75, 0.05, 0.05] : colors.trim ?? TRIM;
+    draw(meshes.cube, basis(toWorld(body, p.x, p.y, p.z), right, up, back, p.sx, p.sy, p.sz), c, p.mat, alpha);
   }
   // Wheels stay on the road frame and glow orange when past the grip peak.
   m.wheels.forEach(([side, ahead, front, radius, width], i) => {
@@ -534,20 +525,15 @@ function drawCar(pose = car, colors = CAR_COLORS, alpha = 1, lean = { pitch: 0, 
     const color = sliding ? [0.95, 0.55, 0.1] : colors.wheel;
     const y = radius + (lean.wheels?.[i] ?? 0);
     const at = toWorld(F, side, y, -ahead);
-    if (m.skin) {
-      draw(meshes.wheel, basis(at, r, F.up, b, width, 2 * radius, 2 * radius), color, 'rubber', alpha);
-      // Centre-lock rim face, on the outside of the tire.
-      const rim = [0, 1, 2].map((k) => at[k] + r[k] * Math.sign(side) * (width / 2 + 0.003));
-      draw(meshes.wheel, basis(rim, r, F.up, b, 0.01, 1.4 * radius, 1.4 * radius), colors.rim ?? [0.12, 0.12, 0.13], 'metal', alpha);
-    } else {
-      draw(meshes.cube, basis(at, r, F.up, b, width, 2 * radius, 2 * radius), color, 'rubber', alpha);
-    }
+    draw(meshes.wheel, basis(at, r, F.up, b, width, 2 * radius, 2 * radius), color, 'rubber', alpha);
+    // Rim face, on the outside of the tire.
+    const rim = [0, 1, 2].map((k) => at[k] + r[k] * Math.sign(side) * (width / 2 + 0.003));
+    draw(meshes.wheel, basis(rim, r, F.up, b, 0.01, 1.4 * radius, 1.4 * radius), colors.rim ?? m.rim ?? [0.12, 0.12, 0.13], 'metal', alpha);
   });
 }
 
-// Driver's seat, left-hand drive, in the body frame (x right, y up, z back).
-const EYE = [-0.35, 1.22, 0.15];
-const eyeOf = (variant) => model(variant).cockpit?.eye ?? EYE;
+// Driver's seat (left-hand drive) in the body frame (x right, y up, z back), from the car's body.
+const eyeOf = (variant) => model(variant).cockpit.eye;
 const INTERIOR = [0.13, 0.13, 0.15], DASH_TOP = [0.2, 0.2, 0.23], TRIM = [0.06, 0.06, 0.07];
 
 // A box stretched between two body-frame points, w wide and h thick.
@@ -570,36 +556,22 @@ function drawCockpit() {
   const box = (x, y, z, sx, sy, sz, c) => draw(meshes.cube, basis(toWorld(B, x, y, z), B.right, B.up, B.back, sx, sy, sz), c);
   const ck = model(car.variant).cockpit;
   const eye = eyeOf(car.variant);
-  if (ck) {
-    // Modeled car: low dash under the screen, A-pillars along the glass, roof header.
-    const w = car.width - 0.34;
-    const [f0, f1] = ck.floorZ;
-    box(0, ck.floorY, (f0 + f1) / 2, car.width - 0.2, 0.03, f1 - f0, TRIM);        // floor, hides the body's top
-    box(0, ck.dashY - 0.07, ck.dashZ + 0.15, w, 0.14, 0.5, INTERIOR);          // dashboard
-    box(0, ck.dashY + 0.005, ck.dashZ - 0.02, w, 0.01, 0.24, DASH_TOP);        // top of the dash, toward the glass
-    box(eye[0], ck.dashY + 0.02, ck.dashZ + 0.33, 0.34, 0.05, 0.12, INTERIOR); // instrument hood
-    for (const s of [-1, 1]) {
-      const [px, py, pz] = ck.pillarBase, [tx, ty, tz] = ck.pillarTop;
-      drawBeam(B, [s * px, py, pz], [s * tx, ty, tz], 0.05, 0.06, TRIM);       // A-pillar
-      box(s * (car.width / 2 - 0.12), ck.dashY - 0.02, eye[2] - 0.05, 0.08, 0.14, 1.3, INTERIOR); // door top
-    }
-    box(0, ck.roofY, ck.roofZ, 2 * ck.pillarTop[0], 0.03, 0.06, TRIM);         // roof edge
-    draw(meshes.cube, basis(toWorld(B, 0, ck.roofY - 0.06, ck.roofZ - 0.05), B.right, B.up, B.back, 0.2, 0.05, 0.02), [0.35, 0.38, 0.42], 'metal'); // mirror
-  } else {
-    box(0, 0.905, -0.2, 1.56, 0.05, 1.3, TRIM);          // floor, hides the body's top
-    box(0, 0.9, -0.8, 1.56, 0.16, 0.5, INTERIOR);        // dashboard
-    box(0, 0.985, -0.92, 1.56, 0.01, 0.24, DASH_TOP);    // top of the dash, toward the glass
-    box(EYE[0], 1.0, -0.64, 0.34, 0.05, 0.12, INTERIOR); // instrument hood
-    for (const s of [-1, 1]) {
-      drawBeam(B, [s * 0.8, 0.98, -1.15], [s * 0.7, 1.45, -0.25], 0.045, 0.06, TRIM); // A-pillar
-      box(s * 0.8, 0.98, 0.1, 0.06, 0.16, 1.2, INTERIOR);                            // door top
-    }
-    box(0, 1.46, -0.22, 1.5, 0.04, 0.1, TRIM);         // roof edge
-    draw(meshes.cube, basis(toWorld(B, 0, 1.39, -0.5), B.right, B.up, B.back, 0.2, 0.05, 0.02), [0.35, 0.38, 0.42], 'metal'); // rear-view mirror
-    drawBeam(B, [0, 1.46, -0.3], [0, 1.4, -0.5], 0.02, 0.02, TRIM); // its stem
+  // Low dash under the screen, A-pillars along the glass, roof header.
+  const w = car.width - 0.34;
+  const [f0, f1] = ck.floorZ;
+  box(0, ck.floorY, (f0 + f1) / 2, car.width - 0.2, 0.03, f1 - f0, TRIM);        // floor, hides the body's top
+  box(0, ck.dashY - 0.07, ck.dashZ + 0.15, w, 0.14, 0.5, INTERIOR);          // dashboard
+  box(0, ck.dashY + 0.005, ck.dashZ - 0.02, w, 0.01, 0.24, DASH_TOP);        // top of the dash, toward the glass
+  box(eye[0], ck.dashY + 0.02, ck.dashZ + 0.33, 0.34, 0.05, 0.12, INTERIOR); // instrument hood
+  for (const s of [-1, 1]) {
+    const [px, py, pz] = ck.pillarBase, [tx, ty, tz] = ck.pillarTop;
+    drawBeam(B, [s * px, py, pz], [s * tx, ty, tz], 0.05, 0.06, TRIM);       // A-pillar
+    box(s * (car.width / 2 - 0.12), ck.dashY - 0.02, eye[2] - 0.05, 0.08, 0.14, 1.3, INTERIOR); // door top
   }
+  box(0, ck.roofY, ck.roofZ, 2 * ck.pillarTop[0], 0.03, 0.06, TRIM);         // roof edge
+  draw(meshes.cube, basis(toWorld(B, 0, ck.roofY - 0.06, ck.roofZ - 0.05), B.right, B.up, B.back, 0.2, 0.05, 0.02), [0.35, 0.38, 0.42], 'metal'); // mirror
   // Steering wheel, tilted toward the driver and turned with the input.
-  const c = ck ? toWorld(B, eye[0], eye[1] - 0.25, eye[2] - 0.55) : toWorld(B, eye[0], eye[1] - 0.34, eye[2] - 0.45);
+  const c = toWorld(B, eye[0], eye[1] - 0.25, eye[2] - 0.55);
   let wb = rotate(B.back, B.right, -0.42), wu = rotate(B.up, B.right, -0.42); // wheel axis and up
   const a = wheelAngle();
   const wr = rotate(B.right, wb, a);
