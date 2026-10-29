@@ -4,7 +4,7 @@
 // itself, then writes its best run to src/bot-lap.js, which the game replays
 // as Claude's ghost.
 //
-//   node scripts/autodrive.mjs [ring] [fwd|rwd|gt3|both|all] [iterations]
+//   node scripts/autodrive.mjs [ring] [yaris|gt3|all] [iterations]
 import { writeFileSync, readFileSync } from 'node:fs';
 import { Car, VARIANTS } from '../src/car.js';
 import { buildTrack, LAYOUTS } from '../src/track.js';
@@ -132,7 +132,7 @@ function run(variant, p, laps = LAPS, record = false) {
 
     // One game frame, in main.js order.
     const where = track.locate(car.x, car.z);
-    const surface = where.surface ?? (paddockAt(car.x, car.z) ? 'road' : where.sand ? 'sand' : 'grass');
+    const surface = where.surface ?? (where.sand ? 'sand' : 'grass'); // as main.js offTrack()
     if (!where.onTrack) off++;
     const on = [];
     const hs = wheelXZ(car).map(([x, z], i) => {
@@ -217,10 +217,10 @@ function tune(variant, iters) {
   return p;
 }
 
-const which = process.argv[3] ?? 'both', iters = +(process.argv[4] ?? 1500);
+const which = process.argv[3] ?? 'all', iters = +(process.argv[4] ?? 1500);
 const file = new URL('../src/bot-lap.js', import.meta.url);
 const read = () => { try { return JSON.parse(readFileSync(file, 'utf8').match(/BOT_LAPS = (.*);/s)[1]); } catch { return {}; } };
-for (const v of which === 'all' ? Object.keys(VARIANTS) : which === 'both' ? ['fwd', 'rwd'] : [which]) {
+for (const v of which === 'all' ? Object.keys(VARIANTS) : [which]) {
   const p = tune(v, iters);
   const lap = run(v, p, kind === 'ring' ? 1 : 3, true);
   if (!lap || lap.off) { console.log(`${kind} ${v}: no clean run`); continue; }

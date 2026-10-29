@@ -4,8 +4,8 @@
 //
 // That gives the classic behaviours:
 // - Steer too much or too fast: the tires pass their peak and slide (less grip).
-// - FWD: throttle in a corner uses up front grip -> understeer (the nose pushes wide).
-// - RWD: throttle in a corner uses up rear grip -> oversteer (the tail steps out).
+// - Front drive (Yaris): throttle in a corner uses up front grip -> understeer (the nose pushes wide).
+// - Rear drive (GT3): throttle in a corner uses up rear grip -> oversteer (the tail steps out).
 // - Lifting off or braking mid-corner moves weight forward -> the rear goes light.
 //
 // Elevation (see terrain.js) feeds the same model:
@@ -67,6 +67,7 @@ const BASE = {
   steerFalloff: 0.05,  // lock = maxSteer / (1 + speed * steerFalloff), speed in m/s
   maxDrive: 5500,      // N at the tires (low speed)
   power: 140000,       // W at the tires, caps drive force at speed
+  topSpeed: Infinity,  // m/s, electronic limiter
   reverseForce: 4000,  // N
   maxReverse: 8,       // m/s
   brakeForce: 10000,   // N total
@@ -88,14 +89,37 @@ const BASE = {
   tireWidthFront: 0.3, tireWidthRear: 0.3,
   length: 4.2, width: 1.8,
   overhangFront: null, // m ahead of the front axle; null = centered between the bumpers
-  body: 'box',
 };
 
 export const VARIANTS = {
-  // Front-heavy (60% front), front wheels drive and steer.
-  fwd: { label: 'FWD', drive: 'front', cgToFront: 1.04, cgToRear: 1.56, muFront: 1.06, muRear: 1.2 },
-  // Near 50/50, rear wheels drive.
-  rwd: { label: 'RWD', drive: 'rear', cgToFront: 1.35, cgToRear: 1.25, muFront: 1.0, muRear: 1.16 },
+  // Toyota Yaris Hybrid (XP210, 2020, 1.5 e-CVT), from published data:
+  // 3940 x 1745 x 1500 mm, 2560 mm wheelbase, 1531 / 1520 mm track, ~1120 kg
+  // kerb (+75 kg driver), ~62 / 38 front / rear (engine and hybrid gear over
+  // the front wheels), 85 kW (116 PS) system power, front-wheel drive,
+  // Cd ~0.32, 185/65 R15 eco tires. Claimed 0-100 km/h 9.7 s, top speed 175 km/h (limited).
+  yaris: {
+    label: 'Yaris', drive: 'front', body: 'yaris',
+    mass: 1195,
+    cgToFront: 0.38 * 2.56, cgToRear: 0.62 * 2.56,
+    yawInertia: 1850,    // ~ m * a * b
+    cgHeight: 0.55,      // a tall hatchback: weight shifts a lot under braking
+    maxDrive: 4800,      // the electric motor's torque from rest, through the e-CVT
+    power: 66000,        // 85 kW system power, less what's lost on the way to the tires
+    topSpeed: 175 / 3.6, // limited
+    brakeForce: 13500,   // ~1.15 g asked, about what the eco tires hold
+    brakeFront: 0.72,
+    drag: 0.42,          // 0.5 rho Cd A with A ~2.2 m^2
+    rolling: 140,
+    // Eco tires grip less than the GT3's Cups. The rears carry little weight
+    // and get a bit more friction, so it pushes wide when driven too hard and
+    // only steps out on a lift or a big brake mid-corner.
+    muFront: 0.98, muRear: 1.06, loadSens: 0.1,
+    pitchGain: 0.009, rollGain: 0.008, // soft springs: it dives and leans
+    trackFront: 1.531, trackRear: 1.52,
+    wheelRadiusFront: 0.311, wheelRadiusRear: 0.311, // 185/65 R15
+    tireWidthFront: 0.185, tireWidthRear: 0.185,
+    length: 3.94, width: 1.745, overhangFront: 0.82,
+  },
   // Porsche 911 GT3 (992, 2021, PDK), from published data: 4573 x 1852 x 1279 mm,
   // 2457 mm wheelbase, 1600 / 1553 mm track, 1435 kg DIN (+75 kg driver),
   // ~39 / 61 front / rear (the flat-six hangs behind the rear axle),
@@ -111,7 +135,7 @@ export const VARIANTS = {
     yawInertia: 2400,
     cgHeight: 0.43,
     // Full lock for hairpins, but the lock shrinks twice as fast with speed:
-    // the car rotates quicker and grips harder than the road cars, so at speed
+    // the car rotates quicker and grips harder than the Yaris, so at speed
     // the same wheel input needs fewer degrees to stay controllable.
     // ~0.30 rad at 36 km/h, 0.15 at 108 km/h, 0.10 at 180 km/h.
     maxSteer: 0.6,
@@ -177,7 +201,7 @@ const KERB_SPEED = 25;      // m/s at which a hit is at full strength
 const STEP = 1 / 240; // fixed physics step; tire forces are stiff
 
 export class Car {
-  constructor(variant = 'rwd') {
+  constructor(variant = 'gt3') {
     this.pedalRate = 3;        // pedals reach full travel in ~1/3 s
     this.setVariant(variant);
     this.reset();
@@ -373,7 +397,8 @@ export class Car {
 
     // Drive and brake demand.
     let drive = 0, brake = 0;
-    if (c.throttle) drive += c.throttle * Math.min(this.maxDrive, this.power / Math.max(Math.abs(vx), 1));
+    if (c.throttle) drive += c.throttle * Math.min(this.maxDrive, this.power / Math.max(Math.abs(vx), 1))
+      * clamp(this.topSpeed - vx, 0, 1); // the limiter fades drive out over the last 1 m/s
     if (c.brake) {
       if (vx > 0.5) brake = c.brake * this.brakeForce;
       else if (vx > -this.maxReverse) drive -= c.brake * this.reverseForce;
