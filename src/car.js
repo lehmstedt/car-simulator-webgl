@@ -112,7 +112,7 @@ export const VARIANTS = {
     // Quicker to rotate and grippier than the road cars, so it needs less lock
     // for the same wheel input to stay controllable.
     maxSteer: 0.45,
-    maxDrive: 14000,    // 470 Nm through 1st gear is more than the rears can take
+    maxDrive: 14000,     // 470 Nm through 1st gear is more than the rears can take
     power: 340000,       // 375 kW at the crank, ~10% lost on the way to the tires
     brakeForce: 20000,   // ~1.35 g: 100-0 km/h in ~32 m, about what the tires hold
     brakeFront: 0.62,    // the light nose takes less of the braking than a front-engined car
