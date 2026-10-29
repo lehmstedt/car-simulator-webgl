@@ -1,8 +1,7 @@
 // Roads built from a Catmull-Rom spline through control points, from real
 // map data. They drape over the terrain; road surfaces sit a few cm above the ground.
 
-import { terrainHeight, terrainNormal, terrainSlope, groundHeight, setRoadBumps, RING_VERGE } from './terrain.js';
-import { NORDSCHLEIFE } from './nordschleife.js';
+import { terrainHeight, terrainNormal, terrainSlope, groundHeight, setRoadBumps, roadClearance, RING_VERGE, RING_ROADS } from './terrain.js';
 
 export const LAYOUTS = {
   // The Nürburgring Nordschleife: 20.7 km through the Eifel forest with ~290 m
@@ -11,15 +10,44 @@ export const LAYOUTS = {
   // white kerbs through the bends, Armco guardrails a couple of meters off the
   // road all the way round, and grass verges into the woods. Laps start and
   // end at T13.
-  ring: {
-    closed: true,
-    control: NORDSCHLEIFE.road.map(([x, z]) => [x, z]),
+  ring: nurburgring('ring', {
     step: 3, // m between road samples
-    halfWidth: 4.5, edge: 0.3, sand: false, sausages: false, surface: 'road', edgeSurface: 'road',
-    verge: true, kerbs: true, rails: true, sections: NORDSCHLEIFE.sections,
+    edge: 0.3, sand: false, sausages: false, surface: 'road', edgeSurface: 'road',
+    verge: true, kerbs: true, rails: true,
     colors: { road: [0.3, 0.31, 0.33] },
-  },
+  }),
+  // The Nürburgring GP circuit, on the same map: 5.1 km with the Mercedes-Arena
+  // and the Müllenbachschleife, a 12 m road with kerbs through the bends and
+  // sand traps on the outside, open grass beyond. Laps start and end halfway
+  // down the pit straight.
+  gp: nurburgring('gp', {
+    step: 3,
+    edge: 0.3, sand: true, sausages: false, surface: 'road', edgeSurface: 'road',
+    verge: true, kerbs: true, rails: false,
+    colors: { road: [0.27, 0.28, 0.3] },
+  }),
 };
+
+// The 24-hour race's links between the GP circuit and the Nordschleife:
+// short open roads like the Nordschleife, untimed.
+export const LINK_LAYOUTS = RING_ROADS.filter((r) => !r.closed).map((r) => nurburgring(r.id, {
+  edge: 0.3, sand: false, sausages: false, surface: 'road', edgeSurface: 'road',
+  verge: true, kerbs: false, rails: true, lines: false, signs: false,
+  colors: { road: [0.3, 0.31, 0.33] },
+}));
+
+// A Nürburgring road (RING_ROADS id): its path, width and corner names from
+// the map data. Where it meets another road there are gaps in its lines,
+// kerbs, rails and verges (`others`, meters to the other road's asphalt).
+function nurburgring(id, opts) {
+  const r = RING_ROADS.find((q) => q.id === id);
+  return {
+    ...opts, id, closed: r.closed, halfWidth: r.halfWidth,
+    control: r.data.road.map(([x, z]) => [x, z]),
+    sections: r.data.sections,
+    others: (x, z) => roadClearance(x, z, id),
+  };
+}
 
 export const ROAD_LIFT = 0.05;      // m above the ground mesh
 const SAMPLES = 400;                // circuit samples
@@ -86,6 +114,8 @@ export function buildTrack(layout, avoid = () => false) {
   const { control: CONTROL, closed, halfWidth: w, edge: CURB_WIDTH } = layout;
   const SAUSAGE_CENTER = w + CURB_WIDTH + SAUSAGE_GAP + SAUSAGE_RADIUS; // m from the centerline
   const SIGN_OFFSET = w + CURB_WIDTH + 2.5; // m from the centerline
+  // Meters from (x, z) to another road's asphalt (Infinity: none near).
+  const others = layout.others ?? (() => Infinity);
   const n = CONTROL.length;
   const pts = [];
   if (closed) {
@@ -110,7 +140,7 @@ export function buildTrack(layout, avoid = () => false) {
   const segs = closed ? N : N - 1; // segment i joins samples i and i + 1
   // Segments by grid cell, for nearest() on long roads.
   const NEAR_CELL = 25, NEAR_LOOK = 6;
-  const near = segs > 3000 ? new Map() : null;
+  const near = segs > 500 ? new Map() : null;
   for (let i = 0; near && i < segs; i++) {
     const a = pts[i], b = pts[(i + 1) % N];
     for (let cx = Math.floor(Math.min(a[0], b[0]) / NEAR_CELL); cx <= Math.floor(Math.max(a[0], b[0]) / NEAR_CELL); cx++) {
@@ -174,7 +204,7 @@ export function buildTrack(layout, avoid = () => false) {
   // Count-down boards before each corner, skipped where they'd sit in the
   // previous corner. They go on the outside unless another part of the circuit is there.
   const signs = [];
-  corners.forEach((c, ci) => {
+  if (layout.signs !== false) corners.forEach((c, ci) => {
     const prevExit = closed ? corners[(ci - 1 + corners.length) % corners.length].exit : ci > 0 ? corners[ci - 1].exit : 0;
     const room = closed && corners.length === 1 ? length / 2 : ahead(prevExit, c.entry) - 10;
     for (const dist of SIGN_DISTANCES) {
@@ -183,7 +213,7 @@ export function buildTrack(layout, avoid = () => false) {
       while (ahead(i, c.entry) < dist) i = prev(i);
       for (const side of [c.right ? -1 : 1, c.right ? 1 : -1]) {
         const x = pts[i][0] + nor[i][0] * SIGN_OFFSET * side, z = pts[i][1] + nor[i][1] * SIGN_OFFSET * side;
-        if (nearest(x, z).distance < SIGN_OFFSET - 1) continue;
+        if (nearest(x, z).distance < SIGN_OFFSET - 1 || others(x, z) < 3) continue;
         signs.push({ x, z, y: terrainHeight(x, z), facing: [-tan[i][0], -tan[i][1]], dist, right: c.right });
         break;
       }
@@ -213,7 +243,7 @@ export function buildTrack(layout, avoid = () => false) {
         const off = sandIn + o, x = pts[i][0] + nor[i][0] * off * side, z = pts[i][1] + nor[i][1] * off * side;
         const r = nearest(x, z);
         const own = ahead(i, r.index) < 25 || ahead(r.index, i) < 25;
-        if (!own || avoid(x, z)) break;
+        if (!own || avoid(x, z) || others(x, z) < 2) break;
       }
       o = Math.max(0, o - 1);
       return o < 2 ? sandIn : sandIn + o;
@@ -230,6 +260,17 @@ export function buildTrack(layout, avoid = () => false) {
       for (let i = j; ahead(j, i) < KERB_AFTER; i = next(i)) { k[i] = KERB_W; if (next(i) === i) break; }
     }
   }
+  // Point `o` meters right (left when negative) of sample i.
+  const offset = (i, o) => [pts[i][0] + nor[i][0] * o, pts[i][1] + nor[i][1] * o];
+  // No kerbs, and gaps in the edge lines, where another road joins.
+  const lineClear = [new Uint8Array(N), new Uint8Array(N)];
+  for (let s = 0; s < 2; s++) {
+    const side = s === 0 ? 1 : -1;
+    for (let i = 0; i < N; i++) {
+      lineClear[s][i] = others(...offset(i, (w + CURB_WIDTH / 2) * side)) > 0.2 ? 1 : 0;
+      if (kerbOut[s][i] && others(...offset(i, (edgeOut + KERB_W / 2) * side)) < 0.5) kerbOut[s][i] = 0;
+    }
+  }
   // Guardrail offset from the centerline per sample and side, 0 where there is
   // none: just past the kerb, pulled in on the inside of tight bends, and left
   // out where another part of the road comes close.
@@ -243,7 +284,7 @@ export function buildTrack(layout, avoid = () => false) {
       const x = pts[i][0] + nor[i][0] * (o + 2) * side, z = pts[i][1] + nor[i][1] * (o + 2) * side;
       const r = nearest(x, z);
       const own = ahead(i, r.index) < 30 || ahead(r.index, i) < 30;
-      railOut[s][i] = own && o > edgeOut + kerbOut[s][i] + 0.4 ? o : 0;
+      railOut[s][i] = own && o > edgeOut + kerbOut[s][i] + 0.4 && others(...offset(i, o * side)) > 2.5 ? o : 0;
     }
   }
   // Offset of the rail at a point `t` of the way along segment i (0: none).
@@ -287,8 +328,8 @@ export function buildTrack(layout, avoid = () => false) {
     const reachOf = (i) => {
       const lim = Math.min(RING_VERGE, 0.9 / Math.max(1e-6, curv[i] * side > 0 ? Math.abs(curv[i]) : 0));
       const own = (o) => {
-        const r = nearest(pts[i][0] + nor[i][0] * o * side, pts[i][1] + nor[i][1] * o * side);
-        return ahead(i, r.index) < 40 || ahead(r.index, i) < 40;
+        const x = pts[i][0] + nor[i][0] * o * side, z = pts[i][1] + nor[i][1] * o * side, r = nearest(x, z);
+        return (ahead(i, r.index) < 40 || ahead(r.index, i) < 40) && others(x, z) > 0;
       };
       // Usually nothing else is near: a few probes tell. Otherwise step out.
       if ([0.25, 0.5, 0.75, 1].every((f) => own(from + (lim - from) * f))) return lim;
@@ -541,7 +582,12 @@ export function buildTrack(layout, avoid = () => false) {
   // Start and finish lines: the same line on a circuit, at each end of a stage.
   const startIndex = closed ? 0 : indexAt(layout.start);
   const finishIndex = closed ? 0 : indexAt(length - layout.finish);
-  const edges = (filter) => merge(strip(w, w + CURB_WIDTH, ROAD_LIFT, filter), strip(-w - CURB_WIDTH, -w, ROAD_LIFT, filter));
+  const edges = (filter) => merge(
+    strip(w, w + CURB_WIDTH, ROAD_LIFT, (i, l) => filter(i, l) && lineClear[0][i] && lineClear[0][(i + 1) % N]),
+    strip(-w - CURB_WIDTH, -w, ROAD_LIFT, (i, l) => filter(i, l) && lineClear[1][i] && lineClear[1][(i + 1) % N]));
+  // A link's asphalt stops where it lies wholly on the road it joins.
+  const under = (i) => [i, (i + 1) % N].every((j) => others(...offset(j, w)) < -0.2 && others(...offset(j, -w)) < -0.2);
+  const asphalt = () => strip(-w, w, ROAD_LIFT, layout.lines === false ? (i) => !under(i) : undefined, 4);
   const line = (i, filter) => strip(-w, w, ROAD_LIFT + 0.02, (j, l) => j === i && filter(l), closed ? 4 : 8);
 
   // Surface layers, bottom to top; `top` ones need extra polygon offset over the road.
@@ -558,17 +604,19 @@ export function buildTrack(layout, avoid = () => false) {
   } else if (layout.verge) {
     // Nordschleife: asphalt with white edge lines, on grass verges that show
     // the exact ground out to RING_VERGE (see terrain.js).
+    // The GP circuit adds sand traps over the grass.
     const red = (i) => i % 2 === 0, rails = railMeshes();
     layers = [
       { mesh: merge(vergeStrip(1), vergeStrip(-1)), color: [0.3, 0.55, 0.3], mat: 'grass' },
-      { mesh: strip(-w, w, ROAD_LIFT, undefined, 4), color: layout.colors.road, mat: 'asphalt' },
+      layout.sand && { mesh: merge(sandStrip(0), sandStrip(1)), color: [0.86, 0.76, 0.52], mat: 'sand' },
+      { mesh: asphalt(), color: layout.colors.road, mat: 'asphalt' },
       { mesh: edges(() => true), color: [0.92, 0.92, 0.9], mat: 'line' },
-      { mesh: merge(kerbStrip(1, red), kerbStrip(-1, red)), color: [0.85, 0.15, 0.12], mat: 'kerb', raised: true },
-      { mesh: merge(kerbStrip(1, (i) => !red(i)), kerbStrip(-1, (i) => !red(i))), color: [0.95, 0.95, 0.95], mat: 'kerb', raised: true },
-      { mesh: line(startIndex, () => true), color: [0.95, 0.95, 0.95], mat: 'line', top: true },
-      { mesh: rails.beams, color: [0.72, 0.74, 0.76], mat: 'metal', solid: true },
-      { mesh: rails.posts, color: [0.5, 0.52, 0.55], mat: 'metal', solid: true },
-    ];
+      layout.kerbs && { mesh: merge(kerbStrip(1, red), kerbStrip(-1, red)), color: [0.85, 0.15, 0.12], mat: 'kerb', raised: true },
+      layout.kerbs && { mesh: merge(kerbStrip(1, (i) => !red(i)), kerbStrip(-1, (i) => !red(i))), color: [0.95, 0.95, 0.95], mat: 'kerb', raised: true },
+      layout.lines !== false && { mesh: line(startIndex, () => true), color: [0.95, 0.95, 0.95], mat: 'line', top: true },
+      layout.rails && { mesh: rails.beams, color: [0.72, 0.74, 0.76], mat: 'metal', solid: true },
+      layout.rails && { mesh: rails.posts, color: [0.5, 0.52, 0.55], mat: 'metal', solid: true },
+    ].filter((l) => l && l.mesh.positions.length);
   } else if (closed) {
     const red = (i) => Math.floor(i / 2) % 2 === 0;
     layers = [
@@ -592,6 +640,7 @@ export function buildTrack(layout, avoid = () => false) {
   const mark = (i) => ({ x: pts[i][0], z: pts[i][1], tangent: tan[i], along: along[i] });
 
   return {
+    id: layout.id,
     closed,
     halfWidth: w,
     edgeWidth: CURB_WIDTH,

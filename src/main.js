@@ -8,7 +8,7 @@ import { Car, VARIANTS, TIRE_TEMP, tempGrip, variantSpec, wheelLayout } from './
 import { Skids } from './skids.js';
 import { Ghost } from './ghost.js';
 import { BOT_LAPS } from './bot-lap.js';
-import { buildTrack, LAYOUTS, ROAD_LIFT } from './track.js';
+import { buildTrack, LAYOUTS, LINK_LAYOUTS, ROAD_LIFT } from './track.js';
 import { Signs, createTexture } from './signs.js';
 import { Traffic, carMeshes } from './traffic.js';
 import { buildTrees, buildTreesAt } from './trees.js';
@@ -66,12 +66,16 @@ const uTime = gl.getUniformLocation(program, 'uTime');
 const SUN = (() => { const l = Math.hypot(...SUN_DIR); return SUN_DIR.map((v) => v / l); })();
 const sky = new Sky(gl);
 
-// Everything that depends on the layout ('ring', the Nordschleife, or
-// 'montreal', the open map of the island of Montreal): the ground, the road,
-// signs, trees and buildings. Rebuilt when the layout changes.
+// Everything that depends on the map: the ground, the roads, signs, trees and
+// buildings. Layouts are 'montreal', the open map of the island of Montreal,
+// and the Nürburgring's two circuits, 'ring' (the Nordschleife) and 'gp' (the
+// GP circuit), which share one map: switching between those two only moves
+// the car to the other circuit's grid. Driving from one circuit onto the
+// other (through the links at T13) switches the timed layout too.
 // M / the Track button cycles through them in this order.
-const LAYOUT_ORDER = ['montreal', 'ring'];
-const LAYOUT_NAMES = { ring: 'Nordschleife', montreal: 'Montreal' };
+const LAYOUT_ORDER = ['montreal', 'ring', 'gp'];
+const LAYOUT_NAMES = { ring: 'Nordschleife', gp: 'GP-Strecke', montreal: 'Montreal' };
+const MAPS = { ring: 'nurburgring', gp: 'nurburgring', montreal: 'montreal' };
 let layout = 'montreal';
 try {
   const v = localStorage.getItem('layout');
@@ -89,35 +93,42 @@ function buildWorld(kind) {
     if (world.streetSigns) gl.deleteTexture(world.streetSigns.texture);
   }
   setTerrain(kind);
-  return kind === 'montreal' ? buildMontrealWorld() : buildRingWorld();
+  return MAPS[kind] === 'montreal' ? buildMontrealWorld() : buildRingWorld(kind);
 }
 
-// The Nordschleife: the road with its kerbs and guardrails, corner boards and
+// The Nürburgring: the Nordschleife with its kerbs and guardrails, the GP
+// circuit with its sand traps, the two links between them, corner boards and
 // the Eifel forest.
-function buildRingWorld() {
-  const t = buildTrack(LAYOUTS.ring);
+function buildRingWorld(kind) {
+  const circuits = { ring: buildTrack(LAYOUTS.ring), gp: buildTrack(LAYOUTS.gp) };
+  const links = LINK_LAYOUTS.map((l) => buildTrack(l));
+  const roads = [...Object.values(circuits), ...links];
+  const t = ringNetwork(circuits, links, kind);
   const gpu = [];
   const upload = (m) => { const mesh = createMesh(gl, program, m); gpu.push(mesh); return mesh; };
-  const signs = new Signs(gl, program, t.signs);
+  const allSigns = roads.flatMap((r) => r.signs);
+  const signs = new Signs(gl, program, allSigns);
   gpu.push(signs.faces);
-  // Trees: off the road and the verge, away from the signs.
-  const roadside = t.halfWidth + 8;
+  // Trees: off the roads and their verges (a wider clear run-off beside the GP
+  // circuit), away from the signs.
   const trees = buildTrees((x, z) => {
     const at = t.locate(x, z);
+    const roadside = at.road.halfWidth + (at.road === circuits.gp ? 22 : 8);
     if (at.distance < Math.max(at.rail ? at.rail + 1.2 : roadside, at.sandEdge + 4)) return false;
-    return t.signs.every((s) => Math.hypot(s.x - x, s.z - z) > 6);
-  }, terrainHeight, { points: t.points, tangents: t.tangents },
-  { count: 20000, tries: 400000, chunk: 400, near: 7.5, spread: 70, thick: true });
+    return allSigns.every((s) => Math.hypot(s.x - x, s.z - z) > 6);
+  }, terrainHeight, { points: roads.flatMap((r) => r.points), tangents: roads.flatMap((r) => r.tangents) },
+  { count: 24000, tries: 480000, chunk: 400, near: 7.5, spread: 70, thick: true });
   return {
-    kind: 'ring',
+    kind: 'nurburgring',
+    circuits,
     track: t,
-    // ~60 km² of ground, in chunks drawn only when near.
+    // ~70 km² of ground, in chunks drawn only when near.
     ground: ringTerrainChunks(20).map((c) => ({ mesh: upload(c), x: c.x, z: c.z, radius: c.radius })),
     groundLook: [[0.3, 0.55, 0.3], 'grass'],
     far: 1000,
     // What's underfoot off the timed road.
     offTrack: (x, z, where) => where.sand ? 'sand' : 'grass',
-    layers: t.layers.map((l) => ({ ...l, mesh: upload(l.mesh) })),
+    layers: roads.flatMap((r) => r.layers).map((l) => ({ ...l, mesh: upload(l.mesh) })),
     signs,
     signParts: signs.parts().map(({ part, m }) => ({
       color: part === 'post' ? [0.55, 0.57, 0.6] : [0.3, 0.32, 0.35], mat: part === 'post' ? 'metal' : 'matte', model: basis(...m),
@@ -133,6 +144,53 @@ function buildRingWorld() {
     })),
     gpu,
   };
+}
+
+// The Nürburgring's roads seen as one track: what's underfoot comes from the
+// road the car is nearest (by how far past its asphalt), the lap clock and
+// the corner names from the circuit being timed (`key`: 'ring' or 'gp').
+function ringNetwork(circuits, links, key) {
+  const roads = [...Object.values(circuits), ...links];
+  // Bounding boxes, 100 m wider: a road further than that can't be the nearest.
+  const boxes = roads.map((r) => {
+    const xs = r.points.map((p) => p[0]), zs = r.points.map((p) => p[1]);
+    return [Math.min(...xs) - 100, Math.max(...xs) + 100, Math.min(...zs) - 100, Math.max(...zs) + 100];
+  });
+  const net = {
+    key,
+    closed: true,
+    get circuit() { return circuits[net.key]; },
+    get points() { return net.circuit.points; },
+    get sections() { return net.circuit.sections; },
+    get grid() { return net.circuit.grid; },
+    get length() { return net.circuit.length; },
+    locate(x, z) {
+      const timed = net.circuit, own = timed.locate(x, z);
+      let best = own, road = timed, margin = own.distance - timed.halfWidth;
+      roads.forEach((r, k) => {
+        const b = boxes[k];
+        if (r === timed || x < b[0] || x > b[1] || z < b[2] || z > b[3]) return;
+        const at = r.locate(x, z), m = at.distance - r.halfWidth;
+        if (m < margin) { best = at; road = r; margin = m; }
+      });
+      // Where on the timed circuit, whatever road the car is on.
+      return { ...best, road, index: own.index, along: own.along };
+    },
+    sausageHeight: (x, z) => {
+      let h = 0;
+      for (const r of roads) h = Math.max(h, r.sausageHeight(x, z));
+      return h;
+    },
+    blocked: (x, z) => {
+      let hit = null;
+      for (const r of roads) {
+        const h = r.blocked?.(x, z);
+        if (h && (!hit || h.depth > hit.depth)) hit = h;
+      }
+      return hit;
+    },
+  };
+  return net;
 }
 
 // Open map, the island of Montreal: streets, buildings, trees and the rivers
@@ -328,8 +386,9 @@ const lap = { start: null, last: null, done: false, best: {}, sector: 3, visited
 function setLayout(kind) {
   layout = kind;
   try { localStorage.setItem('layout', kind); } catch {}
-  world = buildWorld(kind);
+  if (!world || world.kind !== MAPS[kind]) world = buildWorld(kind);
   track = world.track;
+  if (world.circuits) track.key = kind;
   ghost = new Ghost(kind);
   lap.best = Object.fromEntries(Object.keys(VARIANTS).map((v) => [v, ghost.best(v)]));
   lap.last = null;
@@ -372,6 +431,21 @@ function switchLayout() {
   if (!world) return;
   setLayout(LAYOUT_ORDER[(LAYOUT_ORDER.indexOf(layout) + 1) % LAYOUT_ORDER.length]);
   resetRace();
+}
+
+// Drove from one Nürburgring circuit onto the other: time that one from its
+// next start/finish line, without moving the car.
+function followCircuit(where) {
+  if (!world.circuits || !where.onTrack) return;
+  const key = Object.keys(world.circuits).find((k) => world.circuits[k] === where.road);
+  if (!key || key === layout) return;
+  setLayout(key);
+  const at = track.locate(car.x, car.z);
+  lap.start = null;
+  lap.done = false;
+  lap.sector = Math.floor((at.index / track.points.length) * 4);
+  lap.visited.clear();
+  ghost.stop();
 }
 
 function updateLap(index, now) {
@@ -706,7 +780,11 @@ function frame(now) {
   car.update(dt, controls, surface, terrainSample(car.x, car.z));
   world.traffic?.update(dt, playerState());
   collide();
-  const after = track.locate(car.x, car.z);
+  let after = track.locate(car.x, car.z);
+  if (world.circuits && after.onTrack && after.road !== track.circuit) {
+    followCircuit(after);
+    after = track.locate(car.x, car.z);
+  }
   if (!track.open) updateLap(after.index, now); // the open map has no clock
   if (lap.start !== null && !lap.done) ghost.record(now - lap.start, car);
   wheelPositions().forEach((w, i) => skids.track(i, w.x, w.y, w.z, w.sliding));

@@ -1,23 +1,25 @@
 // The ground, shared by the ground mesh, the road and the car physics.
 //
-// The Nordschleife ('ring') uses real ground (nordschleife.js): a 30 m
-// elevation grid from the Copernicus DEM, plus the road's own smoothed
-// height profile. Near the road the ground takes the road's height (flat
-// across it), then blends back into the elevation grid over BLEND meters.
+// The Nürburgring ('ring' and 'gp', one map) uses real ground
+// (nordschleife.js): a 30 m elevation grid from the Copernicus DEM, plus the
+// roads' own smoothed height profiles (the Nordschleife, the GP circuit and
+// the two links between them). Near a road the ground takes the road's height
+// (flat across it), then blends back into the elevation grid over BLEND meters.
 //
 // Montreal ('montreal') is flat (the island, Mount Royal aside, is low and level), and wide.
 
-import { NORDSCHLEIFE } from './nordschleife.js';
+import { NORDSCHLEIFE, GP_STRECKE, RING_LINKS } from './nordschleife.js';
 
 // flat: half-size (m) of the ground's fine middle part.
 const LANDS = {
   ring: { real: true },
+  gp: { real: true },
   montreal: { flat: 3000 },
 };
 let land = LANDS.ring;
 let bumps = null; // (x, z) -> extra height (m, >= 0) on the road, or null
 
-// Picks the ground for a layout ('ring' or 'montreal'); call before building anything on it.
+// Picks the ground for a layout ('ring', 'gp' or 'montreal'); call before building anything on it.
 export function setTerrain(kind) {
   land = LANDS[kind];
   bumps = null;
@@ -93,46 +95,52 @@ export function terrainMesh(half, cell) {
   return { positions, normals, indices };
 }
 
-// --- Nordschleife ground -------------------------------------------------
+// --- Nürburgring ground -------------------------------------------------
 
-export const RING_FLAT = 9;   // m from the centerline: ground at the road's height
+export const RING_FLAT = 9;   // m from a 4.5 m half-width road's centerline: ground at the road's height
 export const RING_BLEND = 40; // m beyond that to blend into the elevation grid
 export const RING_VERGE = 62; // m: the verge strips (track.js) reach this far
 const RING_CELL = 20;         // m: lookup grid for road segments
+// The roads on the map: `halfWidth` of asphalt (track.js lays them out with
+// it); the ground is flat across them out to `flat` meters from the centerline.
+export const RING_ROADS = [
+  { id: 'ring', data: NORDSCHLEIFE, closed: true, halfWidth: 4.5, flat: RING_FLAT },
+  { id: 'gp', data: GP_STRECKE, closed: true, halfWidth: 6, flat: RING_FLAT + 1.5 },
+  ...RING_LINKS.map((l, k) => ({ id: `link${k}`, data: l, closed: false, halfWidth: 4.5, flat: RING_FLAT })),
+];
 let ring = null;
 
-// Decodes the elevation grid and indexes the road's segments, once.
+// Decodes the elevation grid and indexes all the roads' segments, once.
+// Segment g is segment segIdx[g] (joining points i and i + 1) of road segRoad[g].
 function ringData() {
   if (ring) return ring;
-  const { dem, road } = NORDSCHLEIFE;
+  const { dem } = NORDSCHLEIFE;
   const bin = atob(dem.data), h = new Float32Array(dem.nx * dem.nz);
   for (let i = 0; i < h.length; i++) h[i] = (((bin.charCodeAt(2 * i) | (bin.charCodeAt(2 * i + 1) << 8)) << 16) >> 16) / 10;
-  const n = road.length, along = [0];
-  for (let i = 1; i <= n; i++) {
-    const a = road[i - 1], b = road[i % n];
-    along.push(along[i - 1] + Math.hypot(b[0] - a[0], b[1] - a[1]));
-  }
+  const roads = RING_ROADS.map((spec) => {
+    const road = spec.data.road, n = road.length, segs = spec.closed ? n : n - 1, along = [0];
+    for (let i = 1; i <= segs; i++) {
+      const a = road[i - 1], b = road[i % n];
+      along.push(along[i - 1] + Math.hypot(b[0] - a[0], b[1] - a[1]));
+    }
+    return { ...spec, road, n, segs, along, length: along[segs] };
+  });
+  const segRoad = [], segIdx = [];
+  roads.forEach((r, k) => { for (let i = 0; i < r.segs; i++) { segRoad.push(k); segIdx.push(i); } });
   const reach = RING_VERGE, cells = new Map();
-  for (let i = 0; i < n; i++) {
-    const a = road[i], b = road[(i + 1) % n];
+  for (let g = 0; g < segRoad.length; g++) {
+    const { road, n } = roads[segRoad[g]], i = segIdx[g], a = road[i], b = road[(i + 1) % n];
     const x0 = Math.floor((Math.min(a[0], b[0]) - reach) / RING_CELL), x1 = Math.floor((Math.max(a[0], b[0]) + reach) / RING_CELL);
     const z0 = Math.floor((Math.min(a[1], b[1]) - reach) / RING_CELL), z1 = Math.floor((Math.max(a[1], b[1]) + reach) / RING_CELL);
     for (let cx = x0; cx <= x1; cx++) {
       for (let cz = z0; cz <= z1; cz++) {
         const k = cx * 100003 + cz;
         if (!cells.has(k)) cells.set(k, []);
-        cells.get(k).push(i);
+        cells.get(k).push(g);
       }
     }
   }
-  // Cells reached by more than one stretch of road (> 150 m apart along it).
-  const multi = new Set();
-  for (const [k, list] of cells) {
-    const s0 = along[list[0]];
-    if (list.some((i) => { const ds = Math.abs(along[i] - s0); return Math.min(ds, along[n] - ds) > 150; })) multi.add(k);
-  }
-  for (const k of multi) cells.get(k).multi = true;
-  ring = { dem, h, road, n, along, length: along[n], cells };
+  ring = { dem, h, roads, segRoad, segIdx, cells };
   return ring;
 }
 
@@ -151,17 +159,17 @@ function demHeight(x, z) {
   return sum;
 }
 
-// Road height `t` of the way along segment i: Catmull-Rom through the
-// profile, so the grade changes smoothly.
-function roadAt(R, i, t) {
-  const p = (k) => R.road[(k + R.n) % R.n][2];
-  const a = p(i - 1), b = p(i), c = p(i + 1), d = p(i + 2), t2 = t * t;
+// Height of road r `t` of the way along its segment i: Catmull-Rom through
+// the profile, so the grade changes smoothly (an open road repeats its ends).
+function roadAt(r, i, t) {
+  const { road, n } = r, at = (k) => (r.closed ? (k + n) % n : k < 0 ? 0 : k >= n ? n - 1 : k);
+  const a = road[at(i - 1)][2], b = road[i][2], c = road[at(i + 1)][2], d = road[at(i + 2)][2], t2 = t * t;
   return 0.5 * (2 * b + (-a + c) * t + (2 * a - 5 * b + 4 * c - d) * t2 + (-a + 3 * b - 3 * c + d) * t2 * t);
 }
 
-// Weight of the road's height at distance d from it: 1 on it, 0 past the blend.
-function roadWeight(d) {
-  return 1 - smooth((d - RING_FLAT) / RING_BLEND);
+// Weight of a road's height at distance d from it: 1 on it, 0 past the blend.
+function roadWeight(d, flat) {
+  return 1 - smooth((d - flat) / RING_BLEND);
 }
 // Smootherstep of t clamped to [0, 1]: no kink in the curvature at either end.
 function smooth(t) {
@@ -169,50 +177,68 @@ function smooth(t) {
   return t * t * t * (t * (6 * t - 15) + 10);
 }
 
-// The nearest point of the road and, when another stretch of it is also near
-// (more than 150 m further along), the nearest point of that one too. Both
-// pull the ground to their height; on the line halfway between them they
-// pull equally, so the ground has no step there.
+// Squared distance from (x, z) to segment g; its position along it goes in scratch.t.
+function probe(g, x, z) {
+  const R = ring, { road, n } = R.roads[R.segRoad[g]], i = R.segIdx[g];
+  const a = road[i], b = road[i + 1 === n ? 0 : i + 1], ex = b[0] - a[0], ez = b[1] - a[1];
+  let t = ((x - a[0]) * ex + (z - a[1]) * ez) / (ex * ex + ez * ez);
+  t = t < 0 ? 0 : t > 1 ? 1 : t;
+  const dx = x - a[0] - ex * t, dz = z - a[1] - ez * t;
+  scratch.t = t;
+  return dx * dx + dz * dz;
+}
+
+// Every road segment near (x, z) pulls the ground toward the road's height
+// at its nearest point. They share by inverse distance, so on a road's asphalt
+// its own nearest segment all but decides the height; how far the ground
+// follows the roads is set by the strongest weight (1 on a road, fading to 0
+// past the blend). Each term changes smoothly with (x, z), so the ground has
+// no step anywhere, even where several roads meet.
+let shares = new Float64Array(256), ts = new Float64Array(256);
 function ringHeight(x, z) {
   const R = ringData(), base = demHeight(x, z);
   const list = R.cells.get(Math.floor(x / RING_CELL) * 100003 + Math.floor(z / RING_CELL));
   if (!list) return base;
-  const { road, n, along, length } = R;
-  // Squared distance and position along segment i, in scratch.
-  const probe = (i) => {
-    const a = road[i], b = road[i + 1 === n ? 0 : i + 1], ex = b[0] - a[0], ez = b[1] - a[1];
-    let t = ((x - a[0]) * ex + (z - a[1]) * ez) / (ex * ex + ez * ez);
-    t = t < 0 ? 0 : t > 1 ? 1 : t;
-    const dx = x - a[0] - ex * t, dz = z - a[1] - ez * t;
-    scratch.t = t;
-    return dx * dx + dz * dz;
-  };
-  let d1 = Infinity, i1 = -1, t1 = 0;
+  if (shares.length < list.length) { shares = new Float64Array(list.length * 2); ts = new Float64Array(list.length * 2); }
+  let most = 0, sum = 0, top = 0;
   for (let k = 0; k < list.length; k++) {
-    const d = probe(list[k]);
-    if (d < d1) { d1 = d; i1 = list[k]; t1 = scratch.t; }
+    const g = list[k], d2 = probe(g, x, z), r = R.roads[R.segRoad[g]], far = r.flat + RING_BLEND;
+    shares[k] = 0;
+    if (d2 >= far * far) continue;
+    const d = Math.sqrt(d2), w = roadWeight(d, r.flat);
+    if (w <= 0) continue;
+    const q = (d + 0.5) * (d + 0.5), share = w / (q * q);
+    shares[k] = share; ts[k] = scratch.t;
+    sum += share;
+    if (share > top) top = share;
+    if (w > most) most = w;
   }
-  const s1 = along[i1] + (along[i1 + 1] - along[i1]) * t1;
-  let d2 = Infinity, i2 = -1, t2 = 0;
-  for (let k = 0; list.multi && k < list.length; k++) {
-    const i = list[k];
-    let ds = Math.abs(along[i] - s1);
-    ds = Math.min(ds, length - ds);
-    if (ds < 150) continue;
-    const d = probe(i);
-    if (d < d2) { d2 = d; i2 = i; t2 = scratch.t; }
+  if (sum === 0) return base;
+  // Segments with a millionth of the top share or less change nothing that shows.
+  let near = 0;
+  for (let k = 0; k < list.length; k++) {
+    if (shares[k] <= top * 1e-6) continue;
+    const g = list[k];
+    near += shares[k] * (roadAt(R.roads[R.segRoad[g]], R.segIdx[g], ts[k]) - base);
   }
-  const w1 = roadWeight(Math.sqrt(d1)), w2 = i2 < 0 ? 0 : roadWeight(Math.sqrt(d2));
-  if (w1 + w2 === 0) return base;
-  // Shares: the nearer road wins outright when the car is on it.
-  const g1 = w2 === 0 ? 1 : w1 + w2 >= 2 ? 0.5 : (1 - w2) / (2 - w1 - w2);
-  let h = base + w1 * g1 * (roadAt(R, i1, t1) - base);
-  if (w2 > 0) h += w2 * (1 - g1) * (roadAt(R, i2, t2) - base);
-  return h;
+  return base + most * (near / sum);
 }
 const scratch = { t: 0 };
 
-// Ground for the Nordschleife: square chunks of a grid of `cell` meters
+// Meters from (x, z) to the edge of the asphalt of the nearest road other than
+// `except` (a RING_ROADS id): negative on it, Infinity when none is near.
+export function roadClearance(x, z, except) {
+  const R = ringData(), list = R.cells.get(Math.floor(x / RING_CELL) * 100003 + Math.floor(z / RING_CELL));
+  let best = Infinity;
+  for (const g of list ?? []) {
+    const r = R.roads[R.segRoad[g]];
+    if (r.id === except) continue;
+    best = Math.min(best, Math.sqrt(probe(g, x, z)) - r.halfWidth);
+  }
+  return best;
+}
+
+// Ground for the Nürburgring: square chunks of a grid of `cell` meters
 // covering the elevation data, each with its center and radius so far ones can
 // be skipped. Near the road the verge strips (track.js) show the exact ground,
 // so the grid there is pushed down a little to never poke through them.
@@ -261,14 +287,11 @@ export function ringTerrainChunks(cell, chunkCells = 48) {
   return chunks;
 }
 
-// Distance to the Nordschleife's centerline polyline (Infinity when far).
+// Distance to the nearest road's centerline (Infinity when far), less how
+// much wider than RING_FLAT its flat strip is.
 function nearRoad(x, z) {
   const R = ringData(), list = R.cells.get(Math.floor(x / RING_CELL) * 100003 + Math.floor(z / RING_CELL));
   let best = Infinity;
-  for (const i of list ?? []) {
-    const a = R.road[i], b = R.road[(i + 1) % R.n], ex = b[0] - a[0], ez = b[1] - a[1];
-    const t = Math.max(0, Math.min(1, ((x - a[0]) * ex + (z - a[1]) * ez) / (ex * ex + ez * ez)));
-    best = Math.min(best, Math.hypot(x - a[0] - ex * t, z - a[1] - ez * t));
-  }
+  for (const g of list ?? []) best = Math.min(best, Math.sqrt(probe(g, x, z)) - (R.roads[R.segRoad[g]].flat - RING_FLAT));
   return best;
 }
