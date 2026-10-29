@@ -63,8 +63,11 @@ const BASE = {
   mass: 1200,          // kg
   yawInertia: 2100,    // kg m^2
   cgHeight: 0.45,      // m, sets how much weight shifts under accel/brake
+  // Full lock for hairpins, shrinking with speed so the same wheel input
+  // needs fewer degrees to stay controllable at speed.
+  // ~0.30 rad at 36 km/h, 0.15 at 108 km/h, 0.10 at 180 km/h.
   maxSteer: 0.6,       // rad at standstill
-  steerFalloff: 0.05,  // lock = maxSteer / (1 + speed * steerFalloff), speed in m/s
+  steerFalloff: 0.1,   // lock = maxSteer / (1 + speed * steerFalloff), speed in m/s
   maxDrive: 5500,      // N at the tires (low speed)
   power: 140000,       // W at the tires, caps drive force at speed
   topSpeed: Infinity,  // m/s, electronic limiter
@@ -134,12 +137,6 @@ export const VARIANTS = {
     // so the car is slower to start and to stop rotating (the pendulum).
     yawInertia: 2400,
     cgHeight: 0.43,
-    // Full lock for hairpins, but the lock shrinks twice as fast with speed:
-    // the car rotates quicker and grips harder than the Yaris, so at speed
-    // the same wheel input needs fewer degrees to stay controllable.
-    // ~0.30 rad at 36 km/h, 0.15 at 108 km/h, 0.10 at 180 km/h.
-    maxSteer: 0.6,
-    steerFalloff: 0.1,
     maxDrive: 14000,     // 470 Nm through 1st gear is more than the rears can take
     power: 340000,       // 375 kW at the crank, ~10% lost on the way to the tires
     brakeForce: 20000,   // ~1.35 g: 100-0 km/h in ~32 m, about what the tires hold
@@ -271,7 +268,7 @@ export class Car {
     const surf = SURFACES[surface] ?? SURFACES.road;
     if (ground) this.ground = ground;
     // The wheel input is already gradual (see input.js); map it to road-wheel
-    // angle. Lock shrinks only a little with speed, so cranking the wheel at
+    // angle. Lock shrinks with speed, but cranking the wheel at
     // speed still overloads the tires: that's the punishment for rough steering.
     const lock = this.maxSteer / (1 + Math.abs(this.vx) * this.steerFalloff);
     this.steer = c.steer * lock;
