@@ -33,7 +33,7 @@ Montreal isn't a track: it's the whole island of Montreal, to drive around freel
 the island, from Senneville and Sainte-Anne-de-Bellevue in the west to Pointe-aux-Trembles in the east, from
 Verdun and Lachine on the St. Lawrence to Cartierville and Montréal-Nord on the Rivière des Prairies, plus
 Île Bizard over its bridge: about 490 km², ~50 km from end to end. No laps or timers; the HUD shows the
-street you're on and a heading-up minimap. You start on Rue Wellington in Verdun, by Rue de l'Église.
+street you're on and a heading-up minimap. You start downtown on Rue Sainte-Catherine Ouest, by Rue Peel.
 
 - **Data**: [Overture Maps](https://overturemaps.org) (release 2026-10-21; mostly OpenStreetMap data,
   © OpenStreetMap contributors, ODbL): the agglomeration's boundary, ~8,000 km of streets with their names,

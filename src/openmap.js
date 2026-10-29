@@ -464,7 +464,7 @@ export function buildOpenMap() {
     return out;
   };
 
-  // Start: on Rue Wellington, Verdun's main street, by Rue de l'Église.
+  // Start: downtown, on Rue Sainte-Catherine Ouest by Rue Peel.
   const [sx, sz, sh] = MONTREAL.start;
 
   return {
