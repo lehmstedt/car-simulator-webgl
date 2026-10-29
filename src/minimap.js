@@ -15,8 +15,9 @@ export class Minimap {
     this.city = null;
   }
 
-  // Shows the city's map (null hides the minimap). Features are listed by
-  // tile so a tile only draws what touches it.
+  // Shows the city's map (null hides the minimap). Water is listed by tile;
+  // buildings and streets come from the map (city.buildingsIn, roadsIn) when
+  // a tile is drawn.
   set(city) {
     if (!this.canvas) return;
     this.canvas.hidden = !city;
@@ -28,7 +29,7 @@ export class Minimap {
       for (let i = Math.floor(x0 / TILE); i <= Math.floor(x1 / TILE); i++) {
         for (let j = Math.floor(z0 / TILE); j <= Math.floor(z1 / TILE); j++) {
           const k = `${i},${j}`;
-          if (!index.has(k)) index.set(k, { water: [], buildings: [], roads: [] });
+          if (!index.has(k)) index.set(k, { water: [] });
           index.get(k)[item.kind].push(item.v);
         }
       }
@@ -42,8 +43,6 @@ export class Minimap {
       const tri = [[t[i], t[i + 1]], [t[i + 2], t[i + 3]], [t[i + 4], t[i + 5]]];
       add({ kind: 'water', v: tri }, ...bounds(tri));
     }
-    for (const b of city.buildings) add({ kind: 'buildings', v: b.ring }, b.box[0], b.box[1], b.box[2], b.box[3]);
-    for (const r of city.roads) add({ kind: 'roads', v: r }, ...bounds(r.pts).map((v, i) => v + (i % 2 ? r.w : -r.w)));
     this.index = index;
     this.city = city;
   }
@@ -67,10 +66,19 @@ export class Minimap {
     };
     g.fillStyle = OUTSIDE;
     g.fillRect(0, 0, n, n);
+    // The land: the shore ring, minus lakes and canals.
     g.fillStyle = LAND;
-    path(this.city.area, true);
-    g.fill();
-    const f = this.index.get(k) ?? { water: [], buildings: [], roads: [] };
+    g.beginPath();
+    for (const ring of this.city.area) {
+      ring.forEach((p, q) => g[q ? 'lineTo' : 'moveTo'](...P(p)));
+      g.closePath();
+    }
+    g.fill('evenodd');
+    const f = {
+      water: this.index.get(k)?.water ?? [],
+      buildings: this.city.buildingsIn(x0, x0 + TILE, z0, z0 + TILE).map((b) => b.ring),
+      roads: this.city.roadsIn(x0, x0 + TILE, z0, z0 + TILE),
+    };
     g.fillStyle = WATER;
     for (const tri of f.water) { path(tri, true); g.fill(); }
     g.fillStyle = BUILDING;

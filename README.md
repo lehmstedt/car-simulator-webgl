@@ -1,14 +1,14 @@
 # Car Simulator (WebGL)
 
 Barebone car simulator in raw WebGL2 — no frameworks, no build step.
-Drive freely from Verdun to downtown Montreal, or lap the Nürburgring Nordschleife through the Eifel forest
+Drive freely around the whole island of Montreal, or lap the Nürburgring Nordschleife through the Eifel forest
 (switch in settings or with **M**).
 The grass is slippery and slow (about 45 km/h max) but you can drive back on.
 Surfaces are textured and catch the light by material (`src/shading.js`): car paint and
 windows mirror the sky with a sharp sun highlight, asphalt has a speckle of stones and a soft
 sheen toward the horizon, while grass stays matte.
 
-Switch maps with **M** or the Track button (Verdun–Downtown ↔ Nordschleife).
+Switch maps with **M** or the Track button (Montreal ↔ Nordschleife).
 
 ## Nordschleife
 
@@ -27,49 +27,50 @@ start/finish at T13, built from public geographic data:
 `scripts/nordschleife.py` rebuilds `src/nordschleife.js` from those sources. It reads only the parts of
 the OSM planet file (AWS Open Data) it needs, using HTTP range requests.
 
-## Verdun–Downtown (open map)
+## Montreal (open map)
 
-Verdun–Downtown isn't a track: it's Montreal from Verdun up to downtown, to drive around freely. It covers all of
-mainland Verdun (between the aqueduct canal and the St. Lawrence), then north through Pointe-Saint-Charles,
-across the Lachine Canal into Griffintown and Little Burgundy, and downtown up to about Sherbrooke, from
-Atwater to the edge of Old Montreal: about 16 km², 7.8 km from end to end. No laps or timers; the HUD
-shows the street you're on and a heading-up minimap. You start on Rue Wellington in Verdun, by Rue de l'Église.
-Rue Wellington itself takes you all the way to the canal and downtown.
+Montreal isn't a track: it's the whole island of Montreal, to drive around freely. Every borough and town on
+the island, from Senneville and Sainte-Anne-de-Bellevue in the west to Pointe-aux-Trembles in the east, from
+Verdun and Lachine on the St. Lawrence to Cartierville and Montréal-Nord on the Rivière des Prairies, plus
+Île Bizard over its bridge: about 490 km², ~50 km from end to end. No laps or timers; the HUD shows the
+street you're on and a heading-up minimap. You start on Rue Wellington in Verdun, by Rue de l'Église.
 
 - **Data**: [Overture Maps](https://overturemaps.org) (release 2026-10-21; mostly OpenStreetMap data,
-  © OpenStreetMap contributors, ODbL): the borough boundaries, ~355 km of streets with their names, ~23,000
-  building footprints and heights, ~28,000 individually mapped trees, and the river and canals.
+  © OpenStreetMap contributors, ODbL): the agglomeration's boundary, ~8,000 km of streets with their names,
+  ~340,000 building footprints and heights, ~350,000 individually mapped trees, and the rivers, lakes and canals.
 - **Streets**: asphalt by road class (main streets wider, back lanes narrow), sidewalks on the bigger ones
   (they drive like road; lawns and yards are grass). Motorways, their ramps and tunnels are left out.
 - **Road markings**, on streets wide enough for them: a double yellow line down two-way main streets, a
   dashed yellow one down two-way side streets, and dashed white lines between the lanes of one-way main
   streets (Sainte-Catherine, De Maisonneuve…). One-way side streets (one-way comes from the map data) are
   narrower and unmarked. White stop lines cross the lanes at every stop sign and light.
-- **Traffic lights**: at the ~250 crossings the map has signals for. They cycle in 60 s: the main street's
+- **Traffic lights**: at the ~3,000 crossings the map has signals for. They cycle in 60 s: the main street's
   way gets 26 s of green, 3 s of yellow and a second of all-red, then the cross street's. Close crossings
   (divided streets) change together.
 - **Stop signs** (red ARRÊT octagons): the ones mapped in OpenStreetMap, plus the Montreal habit
   where the map has none: side streets stop where they meet a bigger street, and crossings of residential
-  streets are all-way stops (~1,200 stop approaches in all).
+  streets are all-way stops (~44,000 stop approaches in all).
 - **Traffic**: about 70 cars of three shapes drive around you, keeping right and to one-way streets. They
   slow for turns, stop at red and yellow lights, come to a full stop at stop signs and go in turn once the
   crossing is clear, yield to oncoming cars before turning left on a green, and brake for the car ahead,
   yours too (their brake lights come on). Cars stay within ~500 m: far ones go away and new ones appear on
   streets out of sight. They're solid: hit one and you stop against it. The minimap shows them as dots.
-- **Bridges**: the street bridges over the Lachine Canal (Charlevoix, des Seigneurs, Wellington, Mill) and
-  the aqueduct canal are drivable, with railings.
+- **Bridges**: the street bridges over the Lachine Canal, the aqueduct canal and to Île Bizard are drivable,
+  with railings. Bridges off the island (to Laval, the South Shore, Nuns' Island) are left out: the street
+  ends at the shore.
 - **Buildings**: footprints pushed up to their height (from the data, or the number of floors, or the
   building type), in four brick colors with windows; towers 35 m and up are glass. You can't drive
   through them: hit one and the car stops against it.
-- **Edges**: the river and canals, and a low concrete barrier where the map ends on land. Nuns' Island is
-  left out (only motorway bridges reach it). The ground is flat, though downtown really climbs ~50 m
-  from the canal to Sherbrooke.
-- **Streaming**: buildings and trees come in 300 m cells whose meshes are made as the car approaches and
-  freed once it's far, so only the nearby part of the city uses memory. The minimap is drawn in cached tiles.
+- **Edges**: the rivers and lakes all around, the canals and ponds, and a low concrete barrier where the
+  map ends on land. The ground is flat, though Mount Royal really rises to 233 m.
+- **Streaming**: the map is packed into the page (~11 MB) and unpacked at start. Streets, paint, lights and
+  signs, buildings and trees come in 300 m cells whose meshes are made as the car approaches and freed once
+  it's far; buildings and trees stay packed until a cell near the car needs them, and traffic lanes are made
+  only where cars drive. The minimap is drawn in cached tiles.
 
-`scripts/verdun.py` rebuilds `src/verdun.js` from Overture's GeoParquet files on AWS Open Data, reading only
-the parts that cover the map with HTTP range requests. One-way streets come from the segments' access
-restrictions; traffic signals and stop signs from the base theme's infrastructure points (OSM
+`scripts/montreal.py` rebuilds `src/montreal.js` from Overture's GeoParquet files on AWS Open Data, reading only
+the parts that cover the map with HTTP range requests, and packs it by cell (varints, deflated). One-way
+streets come from the segments' access restrictions; traffic signals and stop signs from the base theme's infrastructure points (OSM
 `highway=traffic_signals` and `highway=stop`, with `stop=all`), matched to the crossing they stand at.
 The traffic itself is `src/traffic.js`.
 
@@ -193,7 +194,7 @@ With the keyboard, holding A/D turns the wheel gradually; let go and it returns 
 | T              | Switch car (FWD/RWD/GT3) |
 | G              | Toggle ghost    |
 | C              | Chase / cockpit view |
-| M              | Switch map (Verdun–Downtown, Nordschleife) |
+| M              | Switch map (Montreal, Nordschleife)        |
 | R              | Reset           |
 
 ## Layout
@@ -209,7 +210,7 @@ With the keyboard, holding A/D turns the wheel gradually; let go and it returns 
 - `src/bot-lap.js` — Claude's runs (generated by `scripts/autodrive.mjs`)
 - `src/gl.js` — shader/mesh helpers
 - `src/geometry.js` — cube, torus (ground grid is drawn in the shader)
-- `src/terrain.js` — the ground: the Nordschleife's real terrain, flat for Verdun
+- `src/terrain.js` — the ground: the Nordschleife's real terrain, flat for Montreal
 - `src/bodies.js` — lofted car bodies (the GT3), built from the physics dimensions
 - `src/math.js` — mat4 helpers
 - `src/input.js` — keyboard and touch controls

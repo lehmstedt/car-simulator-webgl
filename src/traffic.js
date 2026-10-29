@@ -6,7 +6,7 @@
 //   (one on one-way streets), a little right of its middle, cut back at both
 //   ends so cars stop before the crossing. Through a crossing a car follows a
 //   curve from the end of its lane to the start of the next one.
-// - Traffic lights (from the map data, at ~250 crossings) cycle in 60 s: the
+// - Traffic lights (from the map data, at ~3,000 crossings) cycle in 60 s: the
 //   main street's way is green, then the cross street's, with a yellow and a
 //   second of all-red between. Lights of close crossings change together.
 // - Stop signs (map data, plus the Montreal habit filled in where the data has
@@ -14,8 +14,11 @@
 //   ways). A car stops fully, then goes when the crossing is clear, in turn.
 // - Cars live within ~500 m of the player: far ones are taken away and new
 //   ones put on streets out of sight, so the traffic around stays the same.
+// - The island has ~185,000 pieces of street: their lanes are made only when
+//   a car comes near (a crossing's lanes when a car reaches it), and the
+//   lights and signs per map cell, when it is drawn.
 
-import { VERDUN } from './verdun.js';
+import { nodeKey } from './openmap.js';
 import { cube, cylinder } from './geometry.js';
 import { ROAD_LIFT } from './track.js';
 
@@ -34,7 +37,6 @@ export function signalState(t, offset, phase) {
   return u < SIGNAL_GREEN ? 'green' : u < SIGNAL_GREEN + SIGNAL_YELLOW ? 'yellow' : 'red';
 }
 
-const nodeKey = ([x, z]) => `${Math.round(x)},${Math.round(z)}`;
 const polyLength = (pts) => pts.reduce((s, p, i) => (i ? s + Math.hypot(p[0] - pts[i - 1][0], p[1] - pts[i - 1][1]) : 0), 0);
 
 // A polyline with its running lengths, for positions along it.
@@ -83,16 +85,17 @@ export class Traffic {
   }
 
   // --- the street graph --------------------------------------------------
+  // Nodes (street ends) for every street open to cars; lanes come later.
   buildGraph() {
-    const U = VERDUN.unit;
     const nodes = new Map();
     const node = (p) => {
       const k = nodeKey(p);
-      if (!nodes.has(k)) nodes.set(k, { key: k, x: p[0], z: p[1], roads: [], out: [], into: [], signal: null, inside: new Set(), queue: [], r: 0 });
-      return nodes.get(k);
+      let n = nodes.get(k);
+      if (!n) nodes.set(k, (n = { key: k, x: p[0], z: p[1], roads: [], signal: null, r: 0, crossing: false, full: false, out: null, into: null, inside: null, queue: null }));
+      return n;
     };
-    const roads = this.map.roads.filter((r) => r.cars && r.cls in LANE_SPEED);
-    for (const r of roads) {
+    for (const r of this.map.roads) {
+      if (!r.cars || !(r.cls in LANE_SPEED)) continue;
       r.a = node(r.pts[0]); r.b = node(r.pts[r.pts.length - 1]);
       r.a.roads.push(r); r.b.roads.push(r);
     }
@@ -102,54 +105,72 @@ export class Traffic {
       n.r = n.crossing ? Math.max(...n.roads.map((r) => r.w)) + 1.5 : 1;
     }
     const groups = new Map();
-    const s = VERDUN.signals;
-    for (let i = 0; i < s.length; i += 4) {
-      const n = nodes.get(nodeKey([s[i] * U, s[i + 1] * U]));
+    for (const s of this.map.signals) {
+      const n = nodes.get(nodeKey([s.x, s.z]));
       if (!n) continue;
-      const g = s[i + 3];
-      if (!groups.has(g)) groups.set(g, (g * 23.7) % SIGNAL_CYCLE);
-      n.signal = { axis: s[i + 2] / 1000, offset: groups.get(g) };
-    }
-    const stops = new Set(VERDUN.stops);
-
-    this.lanes = [];
-    for (const r of roads) {
-      const len = polyLength(r.pts);
-      // Lane: right of the middle (the inner lane of a wide street); a one-way
-      // street's is the right lane, or the middle one of three or more.
-      const perDir = r.oneWay ? Math.max(1, Math.floor((2 * r.w) / 3.4)) : Math.max(1, Math.floor(r.w / 3.3));
-      const lw = (r.oneWay ? 2 * r.w : r.w) / perDir;
-      const off = r.oneWay ? (perDir === 1 ? 0.5 : r.w - lw * (perDir >= 3 ? 1.5 : 0.5)) : perDir === 1 ? Math.min(r.w / 2, 2.2) : lw / 2 + 0.15;
-      for (const dir of r.oneWay ? [1] : [1, -1]) {
-        const from = dir > 0 ? r.a : r.b, to = dir > 0 ? r.b : r.a;
-        let t0 = from.r, t1 = to.r;
-        if (t0 + t1 > len - 0.5) { const k = Math.max(0, len - 0.5) / (t0 + t1); t0 *= k; t1 *= k; }
-        const pts = polyOffset(polySlice(dir > 0 ? r.pts : [...r.pts].reverse(), t0, len - t1), off);
-        const lane = { id: this.lanes.length, road: r, dir, from, to, off, speed: LANE_SPEED[r.cls], cars: [], ...polyPath(pts) };
-        const end = pointAt(lane, lane.len, {});
-        lane.endDir = [end.dx, end.dz];
-        const st = pointAt(lane, 0, {});
-        lane.startDir = [st.dx, st.dz];
-        // What stands at its end: lights, a stop sign or nothing.
-        const e = 2 * r.index + (dir > 0 ? 1 : 0);
-        if (to.signal) {
-          lane.control = 'signal';
-          const a = to.signal.axis;
-          lane.phase = Math.abs(Math.cos(Math.atan2(end.dz, end.dx) - a)) > Math.SQRT1_2 ? 0 : 1;
-        } else if (to.crossing && stops.has(e)) lane.control = 'stop';
-        else lane.control = to.crossing ? 'yield' : null;
-        this.lanes.push(lane);
-        from.out.push(lane);
-        to.into.push(lane);
-      }
+      if (!groups.has(s.group)) groups.set(s.group, (s.group * 23.7) % SIGNAL_CYCLE);
+      n.signal = { axis: s.axis, offset: groups.get(s.group) };
     }
     this.nodes = nodes;
+    this.used = new Set(); // nodes with lanes
+    this.laneCount = 0;
     this.connectors = new Map();
+  }
+
+  // A node ready for lanes.
+  prep(n) {
+    if (n.out) return;
+    n.out = []; n.into = []; n.inside = new Set(); n.queue = [];
+    this.used.add(n);
+  }
+
+  // All the lanes in and out of node n.
+  ensure(n) {
+    if (n.full) return n;
+    n.full = true;
+    for (const r of n.roads) this.lanesOf(r);
+    return n;
+  }
+
+  // Road r's lanes (made the first time): one each way, one on a one-way street.
+  lanesOf(r) {
+    if (r.lanes || !r.a) return r.lanes ?? [];
+    r.lanes = [];
+    this.prep(r.a); this.prep(r.b);
+    const len = polyLength(r.pts);
+    // Lane: right of the middle (the inner lane of a wide street); a one-way
+    // street's is the right lane, or the middle one of three or more.
+    const perDir = r.oneWay ? Math.max(1, Math.floor((2 * r.w) / 3.4)) : Math.max(1, Math.floor(r.w / 3.3));
+    const lw = (r.oneWay ? 2 * r.w : r.w) / perDir;
+    const off = r.oneWay ? (perDir === 1 ? 0.5 : r.w - lw * (perDir >= 3 ? 1.5 : 0.5)) : perDir === 1 ? Math.min(r.w / 2, 2.2) : lw / 2 + 0.15;
+    for (const dir of r.oneWay ? [1] : [1, -1]) {
+      const from = dir > 0 ? r.a : r.b, to = dir > 0 ? r.b : r.a;
+      let t0 = from.r, t1 = to.r;
+      if (t0 + t1 > len - 0.5) { const k = Math.max(0, len - 0.5) / (t0 + t1); t0 *= k; t1 *= k; }
+      const pts = polyOffset(polySlice(dir > 0 ? r.pts : [...r.pts].reverse(), t0, len - t1), off);
+      const lane = { id: this.laneCount++, road: r, dir, from, to, off, speed: LANE_SPEED[r.cls], cars: [], ...polyPath(pts) };
+      const end = pointAt(lane, lane.len, {});
+      lane.endDir = [end.dx, end.dz];
+      const st = pointAt(lane, 0, {});
+      lane.startDir = [st.dx, st.dz];
+      // What stands at its end: lights, a stop sign or nothing.
+      const e = 2 * r.index + (dir > 0 ? 1 : 0);
+      if (to.signal) {
+        lane.control = 'signal';
+        const a = to.signal.axis;
+        lane.phase = Math.abs(Math.cos(Math.atan2(end.dz, end.dx) - a)) > Math.SQRT1_2 ? 0 : 1;
+      } else if (to.crossing && this.map.stops.has(e)) lane.control = 'stop';
+      else lane.control = to.crossing ? 'yield' : null;
+      r.lanes.push(lane);
+      from.out.push(lane);
+      to.into.push(lane);
+    }
+    return r.lanes;
   }
 
   // The curve from the end of lane a to the start of lane b, through their node.
   connector(a, b) {
-    const k = a.id * 100000 + b.id;
+    const k = a.id * 4194304 + b.id;
     let c = this.connectors.get(k);
     if (c) return c;
     const p0 = a.pts[a.pts.length - 1], p2 = b.pts[0];
@@ -179,6 +200,7 @@ export class Traffic {
   // Where a car goes after lane a: mostly straight on, sometimes a turn; back
   // the way it came only at a dead end.
   choose(a) {
+    this.ensure(a.to);
     let opts = a.to.out.filter((b) => b.road !== a.road && b.len > 0.5);
     if (!opts.length) opts = a.to.out.filter((b) => b.len > 0.5);
     if (!opts.length) return null;
@@ -192,13 +214,27 @@ export class Traffic {
   reset(player) {
     for (const c of this.cars) this.remove(c, false);
     this.cars = [];
-    for (const n of this.nodes.values()) { n.inside.clear(); n.queue = []; }
+    for (const n of this.used) { n.inside.clear(); n.queue = []; }
+    this.near = null;
     for (let i = 0; i < TRAFFIC_COUNT * 3 && this.cars.length < TRAFFIC_COUNT; i++) this.spawn(player, 25, SPAWN_NEAR);
   }
 
+  // Streets open to cars around the player (refreshed as the player moves).
+  roadsAround(player) {
+    if (!this.near || Math.hypot(player.x - this.near.x, player.z - this.near.z) > 100) {
+      const roads = this.map.roadsNear(player.x, player.z, SPAWN_NEAR + 100).filter((r) => r.a);
+      this.near = { x: player.x, z: player.z, roads };
+    }
+    return this.near.roads;
+  }
+
   spawn(player, minD, maxD) {
+    const roads = this.roadsAround(player);
+    if (!roads.length) return null;
     for (let tries = 0; tries < 40; tries++) {
-      const lane = this.lanes[Math.floor(Math.random() * this.lanes.length)];
+      const lanes = this.lanesOf(roads[Math.floor(Math.random() * roads.length)]);
+      const lane = lanes[Math.floor(Math.random() * lanes.length)];
+      if (!lane) continue;
       if (lane.len < 12) continue;
       const s = 3 + Math.random() * (lane.len - 6), p = pointAt(lane, s, {});
       const d = Math.hypot(p.x - player.x, p.z - player.z);
@@ -262,7 +298,7 @@ export class Traffic {
 
   // May car c, waiting at the end of its lane, go into the crossing now?
   clear(c, player) {
-    const lane = c.lane, n = lane.to;
+    const lane = c.lane, n = this.ensure(lane.to);
     if (n.inside.size) return false;
     // Nothing coming on the streets that don't stop, and not the player.
     for (const l of n.into) {
@@ -282,6 +318,7 @@ export class Traffic {
   // Must car c stop at the end of its lane (as things stand now)?
   mustStop(c, player, dEnd) {
     const lane = c.lane;
+    this.ensure(lane.to);
     if (!c.next) return true;
     if (lane.control === 'signal') {
       const st = signalState(this.clock, lane.to.signal.offset, lane.phase);
@@ -411,8 +448,8 @@ export class Traffic {
 
   // --- what stands at the crossings --------------------------------------
   // Traffic lights (pole and heads; lamps lit by the shader) and stop signs,
-  // with white stop lines across the lanes.
-  furniture() {
+  // with white stop lines across the lanes, at the ends of the given roads.
+  furniture(roads) {
     const poles = { positions: [], normals: [] }, lamps = { positions: [], normals: [], uvs: [] };
     const signs = { positions: [], normals: [], uvs: [] }, backs = { positions: [], normals: [] };
     const lines = { positions: [], normals: [] };
@@ -443,7 +480,7 @@ export class Traffic {
       put(p[0] + nx, p[1] + nz); put(p[0] - nx, p[1] - nz); put(q[0] - nx, q[1] - nz);
       put(p[0] + nx, p[1] + nz); put(q[0] - nx, q[1] - nz); put(q[0] + nx, q[1] + nz);
     };
-    for (const lane of this.lanes) {
+    for (const lane of roads.flatMap((r) => this.lanesOf(r))) {
       if (lane.control !== 'signal' && lane.control !== 'stop') continue;
       const r = lane.road, [dx, dz] = lane.endDir, rgt = [-dz, dx], face = [-dx, -dz];
       const end = lane.pts[lane.pts.length - 1];

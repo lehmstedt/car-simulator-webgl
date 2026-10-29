@@ -144,7 +144,7 @@ export function buildTrees(clear, height, road = null, opts = {}) {
   return { pieces: [...pieces.values()], count };
 }
 
-// Trees standing at given spots (Verdun's mapped street and park trees):
+// Trees standing at given spots (Montreal's mapped street and park trees):
 // broadleaf only, a little leaner than the forest's, in square pieces of
 // `chunk` meters so far ones can be skipped.
 export function buildTreesAt(spots, height, chunk = 400) {

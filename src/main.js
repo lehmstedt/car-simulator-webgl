@@ -12,7 +12,7 @@ import { buildTrack, LAYOUTS, ROAD_LIFT } from './track.js';
 import { Signs, createTexture } from './signs.js';
 import { Traffic, carMeshes } from './traffic.js';
 import { buildTrees, buildTreesAt } from './trees.js';
-import { buildOpenMap, BRICKS } from './openmap.js';
+import { buildOpenMap, loadOpenMap, BRICKS } from './openmap.js';
 import { Minimap } from './minimap.js';
 import { Sky, HORIZON, ZENITH, SUN_DIR } from './sky.js';
 import { SCENE_VS, SCENE_FS, MAT } from './shading.js';
@@ -67,13 +67,16 @@ const SUN = (() => { const l = Math.hypot(...SUN_DIR); return SUN_DIR.map((v) =>
 const sky = new Sky(gl);
 
 // Everything that depends on the layout ('ring', the Nordschleife, or
-// 'verdun', the open map of Verdun): the ground, the road, signs, trees and
-// buildings. Rebuilt when the layout changes.
+// 'montreal', the open map of the island of Montreal): the ground, the road,
+// signs, trees and buildings. Rebuilt when the layout changes.
 // M / the Track button cycles through them in this order.
-const LAYOUT_ORDER = ['verdun', 'ring'];
-const LAYOUT_NAMES = { ring: 'Nordschleife', verdun: 'Verdun–Downtown' };
-let layout = 'verdun';
-try { const v = localStorage.getItem('layout'); if (LAYOUT_ORDER.includes(v)) layout = v; } catch {}
+const LAYOUT_ORDER = ['montreal', 'ring'];
+const LAYOUT_NAMES = { ring: 'Nordschleife', montreal: 'Montreal' };
+let layout = 'montreal';
+try {
+  const v = localStorage.getItem('layout');
+  if (LAYOUT_ORDER.includes(v)) layout = v;
+} catch {}
 // Scenery further than this (m) isn't drawn: past the far plane, or lost in the haze.
 const DRAW_DISTANCE = 1100;
 let world = null, track = null;
@@ -86,7 +89,7 @@ function buildWorld(kind) {
     if (world.streetSigns) gl.deleteTexture(world.streetSigns.texture);
   }
   setTerrain(kind);
-  return kind === 'verdun' ? buildVerdunWorld() : buildRingWorld();
+  return kind === 'montreal' ? buildMontrealWorld() : buildRingWorld();
 }
 
 // The Nordschleife: the road with its kerbs and guardrails, corner boards and
@@ -132,38 +135,36 @@ function buildRingWorld() {
   };
 }
 
-// Open map, Verdun to downtown: streets, buildings, trees and the river from
-// map data (openmap.js). Buildings and trees come in cells whose meshes are
-// made when the car comes near and freed when it's far (see streamCells).
-function buildVerdunWorld() {
+// Open map, the island of Montreal: streets, buildings, trees and the rivers
+// from map data (openmap.js). Streets, buildings, trees, lights and signs come
+// in cells whose meshes are made when the car comes near and freed when it's
+// far (see streamCells).
+function buildMontrealWorld() {
   const t = buildOpenMap();
   const gpu = [];
   const upload = (m) => { const mesh = createMesh(gl, program, m); gpu.push(mesh); return mesh; };
   const signs = new Signs(gl, program, []);
   gpu.push(signs.faces);
-  // Traffic, and the lights and stop signs at the crossings.
-  const traffic = new Traffic(t);
-  const f = traffic.furniture();
   return {
-    kind: 'verdun',
-    traffic,
-    streetSigns: {
-      poles: upload(f.poles), lamps: upload(f.lamps), backs: upload(f.backs), faces: upload(f.signs),
-      texture: createTexture(gl, stopSignCanvas()),
-    },
+    kind: 'montreal',
+    // Traffic, and the lights and stop signs at the crossings.
+    traffic: new Traffic(t),
+    streetSigns: { texture: createTexture(gl, stopSignCanvas()) },
     track: t,
     // Lots of buildings and trees: far ones (mostly lost in the haze) aren't drawn.
     drawDistance: 800,
     treeDistance: 500,
-    ground: [{ mesh: upload(terrainMesh(6000, 250)), x: 0, z: 0, radius: Infinity }],
+    // The ground: a flat square that follows the car (in steps of its grid).
+    ground: [{ mesh: upload(terrainMesh(6000, 250)), x: 0, z: 0, radius: Infinity, follow: 250 }],
     groundLook: [[0.3, 0.55, 0.3], 'grass'],
     far: 1000,
     offTrack: () => 'grass', // lawns and yards
-    layers: [...t.layers, { mesh: f.lines, color: [0.92, 0.92, 0.9], mat: 'line', top: true }].map((l) => ({ ...l, mesh: upload(l.mesh) })),
+    layers: t.layers.map((l) => ({ ...l, mesh: upload(l.mesh) })),
     signs,
     signParts: [],
     barriers: upload(t.barriers),
-    cells: t.cells.map((data) => ({ x: data.x, z: data.z, radius: data.radius, data, buildings: null, trees: null, gpu: [] })),
+    cells: t.cells.map((data) => ({ x: data.x, data, buildings: null, trees: null, gpu: [], get z() { return data.z; }, get radius() { return data.radius; } })),
+    loaded: new Set(),
     trees: [],
     gpu,
   };
@@ -210,17 +211,27 @@ function drawTraffic(eye) {
 // What the traffic needs to know of the player's car.
 const playerState = () => ({ x: car.x, z: car.z, speed: car.speed, vx: -Math.sin(car.heading) * car.speed, vz: -Math.cos(car.heading) * car.speed });
 
-// Makes a cell's meshes (open map).
+// Makes a cell's meshes (open map): streets, lights and signs, buildings, trees.
 function loadCell(c) {
   const upload = (m) => { const mesh = createMesh(gl, program, m); c.gpu.push(mesh); return mesh; };
   const m = track.cellMeshes(c.data);
+  const f = world.traffic.furniture(c.data.roads);
+  c.layers = [
+    [m.walk, [0.62, 0.62, 0.6], 'concrete', false],
+    [m.asphalt, [0.3, 0.31, 0.33], 'asphalt', false],
+    [m.yellow, [0.95, 0.75, 0.15], 'line', true],
+    [m.white, [0.92, 0.92, 0.9], 'line', true],
+    [f.lines, [0.92, 0.92, 0.9], 'line', true],
+  ].filter(([mesh]) => mesh.positions.length).map(([mesh, ...rest]) => [upload(mesh), ...rest]);
+  c.furniture = f.poles.positions.length ? { poles: upload(f.poles), lamps: upload(f.lamps), backs: upload(f.backs), faces: upload(f.signs) } : null;
+  world.loaded.add(c);
   c.buildings = [
     ...m.walls.map((w, i) => [w.positions.length && upload(w), BRICKS[i][0], 'facade']),
     [m.towers.positions.length && upload(m.towers), [0.32, 0.42, 0.5], 'curtain'],
     [m.sheds.positions.length && upload(m.sheds), [0.55, 0.5, 0.44], 'concrete'],
     [m.roofs.positions.length && upload(m.roofs), [0.27, 0.27, 0.28], 'concrete'],
   ].filter(([mesh]) => mesh);
-  const p = buildTreesAt(c.data.trees, terrainHeight, 1e9).pieces[0];
+  const p = buildTreesAt(m.trees, terrainHeight, 1e9).pieces[0];
   c.trees = p ? [
     [upload(p.trunks), [0.36, 0.25, 0.16], 'bark'],
     [upload(p.leaves), [0.22, 0.45, 0.17], 'leaves'],
@@ -230,7 +241,8 @@ function loadCell(c) {
 function unloadCell(c) {
   for (const m of c.gpu) deleteMesh(gl, m);
   c.gpu = [];
-  c.buildings = c.trees = null;
+  c.buildings = c.trees = c.layers = c.furniture = null;
+  world?.loaded?.delete(c);
 }
 // Loads cells coming within reach of (x, z), nearest first (one per frame
 // unless `all`, so driving never stutters), and frees those left far behind.
@@ -328,9 +340,9 @@ function setLayout(kind) {
   for (const el of document.querySelectorAll('.lap-only')) el.hidden = !!track.open;
   minimap.set(track.open ? track : null);
 }
-setLayout(layout);
 
 function switchDrive() {
+  if (!world) return;
   const names = Object.keys(VARIANTS);
   car.setVariant(names[(names.indexOf(car.variant) + 1) % names.length]);
   try { localStorage.setItem('drive', car.variant); } catch {}
@@ -356,9 +368,9 @@ function resetRace() {
   skids.clear();
   driveEl.querySelector('b').textContent = VARIANTS[car.variant].label;
 }
-resetRace();
 
 function switchLayout() {
+  if (!world) return;
   setLayout(LAYOUT_ORDER[(LAYOUT_ORDER.indexOf(layout) + 1) % LAYOUT_ORDER.length]);
   resetRace();
 }
@@ -781,15 +793,24 @@ function frame(now) {
   // z-fighting with it (and the start line and skids with the road) far away.
   gl.disable(gl.CULL_FACE);
   const seen = (c, far = world.drawDistance ?? DRAW_DISTANCE) => Math.hypot(c.x - eyePos[0], c.z - eyePos[2]) - c.radius < far;
-  for (const g of world.ground) if (seen(g)) draw(g.mesh, identity(), ...world.groundLook);
+  for (const g of world.ground) {
+    if (!seen(g)) continue;
+    // A ground that follows the car moves in whole steps of its grid.
+    const at = g.follow ? basis([Math.round(eyePos[0] / g.follow) * g.follow, 0, Math.round(eyePos[2] / g.follow) * g.follow], [1, 0, 0], [0, 1, 0], [0, 0, 1]) : identity();
+    draw(g.mesh, at, ...world.groundLook);
+  }
+  // The open map's cells in view, with their meshes made.
+  const cells = world.loaded ? [...world.loaded].filter((c) => seen(c)) : [];
   gl.enable(gl.POLYGON_OFFSET_FILL);
   gl.polygonOffset(-1, -2);
   for (const l of world.layers) if (!l.top) draw(l.mesh, identity(), l.color, l.mat);
+  for (const c of cells) for (const [mesh, color, mat, top] of c.layers) if (!top) draw(mesh, identity(), color, mat);
   gl.polygonOffset(-2, -4);
   for (const l of world.layers) if (l.top) draw(l.mesh, identity(), l.color, l.mat);
+  for (const c of cells) for (const [mesh, color, mat, top] of c.layers) if (top) draw(mesh, identity(), color, mat);
   if (skids.used) draw(skids.mesh, identity(), [0.12, 0.12, 0.13], 'rubber');
   gl.disable(gl.POLYGON_OFFSET_FILL);
-  for (const c of world.cells ?? []) {
+  for (const c of cells) {
     if (!c.trees || !seen(c, world.treeDistance)) continue;
     for (const [mesh, color, mat] of c.trees) draw(mesh, identity(), color, mat);
   }
@@ -798,8 +819,7 @@ function frame(now) {
     for (const [mesh, color, mat] of t.parts) draw(mesh, identity(), color, mat); // open cones: no culling
   }
   gl.enable(gl.CULL_FACE);
-  for (const c of world.cells ?? []) {
-    if (!c.buildings || !seen(c)) continue;
+  for (const c of cells) {
     for (const [mesh, color, mat] of c.buildings) draw(mesh, identity(), color, mat);
   }
   if (world.barriers) draw(world.barriers, identity(), [0.7, 0.7, 0.68], 'concrete');
@@ -813,12 +833,15 @@ function frame(now) {
     const ss = world.streetSigns;
     drawTraffic(eyePos);
     gl.disable(gl.CULL_FACE);
-    draw(ss.poles, identity(), [0.2, 0.22, 0.2], 'metal');
-    draw(ss.backs, identity(), [0.6, 0.62, 0.64], 'metal');
-    draw(ss.lamps, identity(), [1, 1, 1], 'signal');
+    const lit = cells.filter((c) => c.furniture);
+    for (const { furniture: f } of lit) {
+      draw(f.poles, identity(), [0.2, 0.22, 0.2], 'metal');
+      draw(f.backs, identity(), [0.6, 0.62, 0.64], 'metal');
+      draw(f.lamps, identity(), [1, 1, 1], 'signal');
+    }
     gl.uniform1i(uTextured, 1);
     gl.bindTexture(gl.TEXTURE_2D, ss.texture);
-    draw(ss.faces, identity(), [1, 1, 1]);
+    for (const { furniture: f } of lit) draw(f.faces, identity(), [1, 1, 1]);
     gl.uniform1i(uTextured, 0);
     gl.enable(gl.CULL_FACE);
   }
@@ -859,4 +882,10 @@ function frame(now) {
 
   requestAnimationFrame(frame);
 }
-requestAnimationFrame(frame);
+// Start once the open map's data is unpacked (it's packed in the page).
+loadOpenMap().then(() => {
+  setLayout(layout);
+  resetRace();
+  last = performance.now();
+  requestAnimationFrame(frame);
+});

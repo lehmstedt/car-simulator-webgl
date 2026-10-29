@@ -5,19 +5,19 @@
 // height profile. Near the road the ground takes the road's height (flat
 // across it), then blends back into the elevation grid over BLEND meters.
 //
-// Verdun ('verdun') is flat: about 20 m above sea level all over, and wide.
+// Montreal ('montreal') is flat (the island, Mount Royal aside, is low and level), and wide.
 
 import { NORDSCHLEIFE } from './nordschleife.js';
 
 // flat: half-size (m) of the ground's fine middle part.
 const LANDS = {
   ring: { real: true },
-  verdun: { flat: 3000 },
+  montreal: { flat: 3000 },
 };
 let land = LANDS.ring;
 let bumps = null; // (x, z) -> extra height (m, >= 0) on the road, or null
 
-// Picks the ground for a layout ('ring' or 'verdun'); call before building anything on it.
+// Picks the ground for a layout ('ring' or 'montreal'); call before building anything on it.
 export function setTerrain(kind) {
   land = LANDS[kind];
   bumps = null;
