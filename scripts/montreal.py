@@ -40,7 +40,7 @@ REL = 'release/2026-10-21.0'
 BUCKET = 'https://overturemaps-us-west-2.s3.amazonaws.com'
 BBOX = (-74.0, 45.39, -73.46, 45.72)      # lon/lat box of the data downloaded
 AGGLO = 'Agglomération de Montréal'       # the map: this, minus the water
-HOME = (-73.5685, 45.4615)                # a point in Verdun (Wellington / de l'Église), on the map
+HOME = (-73.5728, 45.5004)                # a point downtown (Sainte-Catherine / Peel), on the map
 UNIT = 0.2                                # m per step in the packed data
 CHUNK = 300                               # m: cell size
 S = requests.Session()
@@ -427,16 +427,16 @@ for p in getattr(wview, 'geoms', [wview]):
         wtri += [(round(x), round(z)) for x, z in list(t.exterior.coords)[:3]]  # whole meters
 print(f'water: {len(wtri) // 3} triangles')
 
-# --- start: on Rue Wellington, 40 m before Rue de l'Église, facing it -------
+# --- start: downtown, on Rue Sainte-Catherine Ouest, 40 m before Rue Peel ---
 def lines_named(n):
     return [LineString(r[3] * UNIT) for r in roads if names[r[1]] == n]
-well = shapely.line_merge(unary_union(lines_named('Rue Wellington')))
-church = unary_union(lines_named("Rue de l'Église"))
+well = shapely.line_merge(unary_union(lines_named('Rue Sainte-Catherine Ouest')))
+church = unary_union(lines_named('Rue Peel'))
 hit = well.intersection(church)
-cross = min(getattr(hit, 'geoms', [hit]), key=lambda q: q.distance(home))  # the one in Verdun
+cross = min(getattr(hit, 'geoms', [hit]), key=lambda q: q.distance(home))  # the one downtown
 line = min(getattr(well, 'geoms', [well]), key=lambda l: l.distance(cross))
 s0 = line.project(cross)
-# 40 m south of the crossing (Wellington runs about north there), facing it.
+# 40 m southwest of the crossing, facing it: eastbound, with the one-way.
 p0, p1 = max(([line.interpolate(s0 - 40), line.interpolate(s0 - 39)], [line.interpolate(s0 + 40), line.interpolate(s0 + 39)]), key=lambda c: c[0].y)
 start = [round(p0.x, 1), round(p0.y, 1), round(math.atan2(-(p1.x - p0.x), -(p1.y - p0.y)), 3)]
 print('start', start)
