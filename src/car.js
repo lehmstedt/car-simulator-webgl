@@ -64,6 +64,7 @@ const BASE = {
   yawInertia: 2100,    // kg m^2
   cgHeight: 0.45,      // m, sets how much weight shifts under accel/brake
   maxSteer: 0.6,       // rad at standstill
+  steerFalloff: 0.05,  // lock = maxSteer / (1 + speed * steerFalloff), speed in m/s
   maxDrive: 5500,      // N at the tires (low speed)
   power: 140000,       // W at the tires, caps drive force at speed
   reverseForce: 4000,  // N
@@ -109,9 +110,12 @@ export const VARIANTS = {
     // so the car is slower to start and to stop rotating (the pendulum).
     yawInertia: 2400,
     cgHeight: 0.43,
-    // Quicker to rotate and grippier than the road cars, so it needs less lock
-    // for the same wheel input to stay controllable.
-    maxSteer: 0.45,
+    // Full lock for hairpins, but the lock shrinks twice as fast with speed:
+    // the car rotates quicker and grips harder than the road cars, so at speed
+    // the same wheel input needs fewer degrees to stay controllable.
+    // ~0.30 rad at 36 km/h, 0.15 at 108 km/h, 0.10 at 180 km/h.
+    maxSteer: 0.6,
+    steerFalloff: 0.1,
     maxDrive: 14000,     // 470 Nm through 1st gear is more than the rears can take
     power: 340000,       // 375 kW at the crank, ~10% lost on the way to the tires
     brakeForce: 20000,   // ~1.35 g: 100-0 km/h in ~32 m, about what the tires hold
@@ -245,7 +249,7 @@ export class Car {
     // The wheel input is already gradual (see input.js); map it to road-wheel
     // angle. Lock shrinks only a little with speed, so cranking the wheel at
     // speed still overloads the tires: that's the punishment for rough steering.
-    const lock = this.maxSteer / (1 + Math.abs(this.vx) * 0.05);
+    const lock = this.maxSteer / (1 + Math.abs(this.vx) * this.steerFalloff);
     this.steer = c.steer * lock;
 
     // Pedals ramp in (keys are on/off) but release twice as fast.
