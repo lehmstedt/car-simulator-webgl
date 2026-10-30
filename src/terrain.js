@@ -117,8 +117,9 @@ function ringData() {
   const { dem } = NORDSCHLEIFE;
   const bin = atob(dem.data), h = new Float32Array(dem.nx * dem.nz);
   for (let i = 0; i < h.length; i++) h[i] = (((bin.charCodeAt(2 * i) | (bin.charCodeAt(2 * i + 1) << 8)) << 16) >> 16) / 10;
+  const loops = RING_ROADS.filter((r) => r.closed).map((r) => smoothProfile(r.data.road, true));
   const roads = RING_ROADS.map((spec) => {
-    const road = spec.data.road, n = road.length, segs = spec.closed ? n : n - 1, along = [0];
+    const road = spec.closed ? loops[RING_ROADS.filter((r) => r.closed).indexOf(spec)] : smoothProfile(spec.data.road, false, loops), n = road.length, segs = spec.closed ? n : n - 1, along = [0];
     for (let i = 1; i <= segs; i++) {
       const a = road[i - 1], b = road[i % n];
       along.push(along[i - 1] + Math.hypot(b[0] - a[0], b[1] - a[1]));
@@ -142,6 +143,38 @@ function ringData() {
   }
   ring = { dem, h, roads, segRoad, segIdx, cells };
   return ring;
+}
+
+// The roads' height profiles come smoothed over ~20 m, which still leaves
+// short dips and rises from the elevation data that throw the car about at
+// speed. Smooth them again (Gaussian, PROFILE_SIGMA meters) on a copy. An open
+// road (a link) eases its ends to the smoothed circuit it joins (`loops`).
+const PROFILE_SIGMA = 18; // m
+function smoothProfile(road, closed, loops = []) {
+  const n = road.length, at = (k) => (closed ? ((k % n) + n) % n : Math.max(0, Math.min(n - 1, k)));
+  const step = Math.hypot(road[1][0] - road[0][0], road[1][1] - road[0][1]) || 6;
+  const sig = PROFILE_SIGMA / step, reach = Math.ceil(3 * sig), w = [];
+  for (let k = -reach; k <= reach; k++) w.push(Math.exp(-(k * k) / (2 * sig * sig)));
+  // Height at each end: the nearest smoothed circuit point, or its own.
+  const endHeight = (p) => {
+    let best = 15, h = p[2];
+    for (const l of loops) for (const q of l) { const d = Math.hypot(q[0] - p[0], q[1] - p[1]); if (d < best) { best = d; h = q[2]; } }
+    return h;
+  };
+  const h0 = closed ? 0 : endHeight(road[0]), h1 = closed ? 0 : endHeight(road[n - 1]);
+  return road.map((p, i) => {
+    let sum = 0, tot = 0;
+    for (let k = -reach; k <= reach; k++) { const q = road[at(i + k)]; sum += w[k + reach] * q[2]; tot += w[k + reach]; }
+    let h = sum / tot;
+    if (!closed) {
+      // Shift by the change at each end (blended along the road), then ease
+      // into the circuits' heights over the last few samples.
+      const f = i / (n - 1), shift = (h0 - road[0][2]) * (1 - f) + (h1 - road[n - 1][2]) * f;
+      const e = Math.min(1, Math.min(i, n - 1 - i) / reach), k = e * e * (3 - 2 * e);
+      h = p[2] + shift + (h - p[2] - shift) * k;
+    }
+    return [p[0], p[1], h];
+  });
 }
 
 // Elevation grid, bicubic (Catmull-Rom) so slopes have no kinks.
