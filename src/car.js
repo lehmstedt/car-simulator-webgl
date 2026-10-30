@@ -54,7 +54,7 @@ export function tempGrip(t) {
   return Math.max(0.6, 1 - loss);
 }
 
-const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+export const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 // Sign that fades to 0 near zero, so forces don't chatter at standstill.
 const softSign = (v, eps = 0.3) => clamp(v / eps, -1, 1);
 
@@ -236,7 +236,8 @@ export class Car {
     // Per-axle tire state: share of peak cornering grip on hand right now,
     // whether it is sliding, and how much of its grip it is using (0..1+).
     // `temp` is the tire temperature (deg C); `heat` how fast it is changing (deg C/s).
-    const tire = () => ({ grip: 1, sliding: false, use: 0, temp: TIRE_TEMP.start, heat: 0 });
+    // `scrub` is how fast the contact patch slides over the road (m/s), for the tire sound.
+    const tire = () => ({ grip: 1, sliding: false, use: 0, temp: TIRE_TEMP.start, heat: 0, scrub: 0 });
     this.tires = { front: tire(), rear: tire() };
     this.gLong = this.gLat = 0; // tire acceleration in g (forward, left), smoothed
     this.gripLimit = 1;     // what the tires can give in total, in g
@@ -313,6 +314,7 @@ export class Car {
       const v = Math.max(Math.hypot(u, w), 0.5);
       tire.sliding = Math.hypot(u, w) > 1;
       tire.use = 1;
+      tire.scrub = Math.hypot(u, w);
       // All the friction work goes into the rubber: locked wheels heat fast.
       this.heatTire(tire, 0.9 * max * Math.hypot(u, w), 0.9 * max, load, u, h);
       return { fx: -0.9 * max * u / v, fy: -0.9 * max * w / v, slip };
@@ -335,6 +337,8 @@ export class Car {
     // drive/brake force times the wheel's slip (small normally, a lot more
     // when it spins).
     const slipSpeed = Math.abs(u) * 0.03 * Math.min(demand, 1) + spin * 4;
+    // Sideways slide past the grip peak, plus wheelspin or lock-up.
+    tire.scrub = Math.abs(w) * Math.min(1, past * 2) + spin * Math.max(4, Math.abs(u) * 0.3);
     this.heatTire(tire, Math.abs(fy * w) + Math.abs(fx) * slipSpeed, Math.hypot(fx, fy), load, u, h);
     return { fx, fy, slip };
   }

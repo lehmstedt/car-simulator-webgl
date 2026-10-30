@@ -74,7 +74,7 @@
   #settings[hidden] { display: none; }
   #settings button { display: flex; justify-content: space-between; gap: 16px; text-align: left; }
   #settings button b { color: var(--accent); font-weight: 700; }
-  #ghost[aria-pressed="false"] b { color: var(--hud-dim); }
+  #ghost[aria-pressed="false"] b, #sound[aria-pressed="false"] b { color: var(--hud-dim); }
   #balance {
     font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
     min-height: 1.2em;
@@ -204,6 +204,7 @@
     <button id="view" type="button" aria-label="Switch camera view (C)">Camera <b>Cockpit</b></button>
     <button id="drive" type="button" aria-label="Switch car (T)">Car <b>GT3</b></button>
     <button id="ghost" type="button" aria-pressed="true" aria-label="Show ghosts: your best lap and Claude's (G)">Ghost <b>On</b></button>
+    <button id="sound" type="button" aria-pressed="true" aria-label="Engine and tire sounds (N)">Sound <b>On</b></button>
   </div>
   <div class="gmeter" id="gmeter">
     <svg viewBox="-44 -44 88 88" role="img" aria-label="G-force meter: dot is the force felt, dashed ring is the grip limit">

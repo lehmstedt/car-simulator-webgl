@@ -234,6 +234,7 @@ With the keyboard, holding A/D turns the wheel gradually; let go and it returns 
 | G              | Toggle ghost    |
 | C              | Chase / cockpit view |
 | M              | Switch track (Montreal, Nordschleife, GP)  |
+| N              | Sound on / off  |
 | R              | Reset           |
 
 ## Layout
@@ -241,6 +242,7 @@ With the keyboard, holding A/D turns the wheel gradually; let go and it returns 
 - `src/main.js` — setup, render loop, chase and cockpit cameras, lap timing, HUD
 - `src/track.js` — road spline, road/kerb/guardrail meshes, surface test
 - `src/nordschleife.js` — Nürburgring paths (Nordschleife, GP circuit, links), road heights and ground grid (generated)
+- `src/audio.js` — synthesized engine (GT3 flat-six with auto-shifting PDK, Yaris three-cylinder e-CVT and motor whine) and tire sounds (squeal, off-road crunch, kerb rumble, road roar, wind)
 - `src/trees.js` — low-poly trees, merged into a few meshes
 - `src/sky.js` — sky dome with sun and clouds; its horizon color is the distance haze
 - `src/car.js` — car physics (dynamic bicycle model, tire grip) and the cars' specs
