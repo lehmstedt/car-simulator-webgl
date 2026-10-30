@@ -40,9 +40,11 @@ export function groundHeight(x, z) {
   return land.real ? ringHeight(x, z) : 0;
 }
 
-// Height, gradient (gx = dh/dx, gz = dh/dz) and second derivatives at (x, z).
+// Height, gradient (gx = dh/dx, gz = dh/dz) and second derivatives at (x, z),
+// for the car. Slopes and curvature are taken over 1.5 m either way, about
+// what tires and springs smooth over, so kinks shorter than that don't jolt it.
 export function terrainSample(x, z, f = terrainHeight) {
-  const e = 0.5;
+  const e = 1.5;
   const h = f(x, z);
   const xp = f(x + e, z), xm = f(x - e, z), zp = f(x, z + e), zm = f(x, z - e);
   return {
@@ -124,7 +126,16 @@ function ringData() {
       const a = road[i - 1], b = road[i % n];
       along.push(along[i - 1] + Math.hypot(b[0] - a[0], b[1] - a[1]));
     }
-    return { ...spec, road, n, segs, along, length: along[segs] };
+    // Normals at each point, along the bisector of the two segments meeting
+    // there and stretched (miter) so the road's parallels pass through them.
+    const normals = road.map((p, i) => {
+      const seg = (j) => { const a = road[j], b = road[(j + 1) % n], l = Math.hypot(b[0] - a[0], b[1] - a[1]); return [-(b[1] - a[1]) / l, (b[0] - a[0]) / l]; };
+      const prev = spec.closed || i > 0 ? seg((i - 1 + n) % n) : null, next = spec.closed || i < n - 1 ? seg(i) : null;
+      if (!prev || !next) return prev ?? next;
+      const bx = prev[0] + next[0], bz = prev[1] + next[1], l = Math.hypot(bx, bz), c = Math.max(0.5, (bx * next[0] + bz * next[1]) / l);
+      return [bx / l / c, bz / l / c];
+    });
+    return { ...spec, road, n, segs, along, normals, length: along[segs] };
   });
   const segRoad = [], segIdx = [];
   roads.forEach((r, k) => { for (let i = 0; i < r.segs; i++) { segRoad.push(k); segIdx.push(i); } });
@@ -174,7 +185,28 @@ function smoothProfile(road, closed, loops = []) {
       h = p[2] + shift + (h - p[2] - shift) * k;
     }
     return [p[0], p[1], h];
+  }).map((p, i, out) => {
+    if (closed) return p;
+    // Where a link runs alongside a circuit it takes the circuit's height,
+    // easing off as they part, so the two never disagree side by side.
+    const { d, h } = nearestOn(loops, p[0], p[1]), k = smooth((d - 1) / 30);
+    return [p[0], p[1], h + (p[2] - h) * k];
   });
+}
+
+// Distance from (x, z) to the nearest of the `loops` (closed roads) and the
+// height there, interpolated along that segment.
+function nearestOn(loops, x, z) {
+  let d = Infinity, h = 0;
+  for (const l of loops) {
+    for (let i = 0; i < l.length; i++) {
+      const a = l[i], b = l[(i + 1) % l.length], ex = b[0] - a[0], ez = b[1] - a[1];
+      const t = Math.max(0, Math.min(1, ((x - a[0]) * ex + (z - a[1]) * ez) / (ex * ex + ez * ez)));
+      const e = Math.hypot(x - a[0] - ex * t, z - a[1] - ez * t);
+      if (e < d) { d = e; h = a[2] + (b[2] - a[2]) * t; }
+    }
+  }
+  return { d, h };
 }
 
 // Elevation grid, bicubic (Catmull-Rom) so slopes have no kinks.
@@ -221,33 +253,84 @@ function probe(g, x, z) {
   return dx * dx + dz * dz;
 }
 
-// Every road segment near (x, z) pulls the ground toward the road's height
-// at its nearest point. They share by inverse distance, so on a road's asphalt
-// its own nearest segment all but decides the height; how far the ground
-// follows the roads is set by the strongest weight (1 on a road, fading to 0
-// past the blend). Each term changes smoothly with (x, z), so the ground has
-// no step anywhere, even where several roads meet.
-let shares = new Float64Array(256), ts = new Float64Array(256);
+// Where (x, z) lies across segment g: the point along it (t, in scratch.t)
+// whose normal, blended between the normals at its two ends, passes through
+// (x, z). Across neighboring segments t moves on without a jump, so heights
+// taken off the road's centerline follow it smoothly. Returns the distance
+// along that normal, or Infinity when (x, z) is beyond the segment's ends
+// (open roads reach on past their last points).
+function across(g, x, z) {
+  const R = ring, r = R.roads[R.segRoad[g]], { road, n, normals } = r, i = R.segIdx[g], j = i + 1 === n ? 0 : i + 1;
+  const a = road[i], b = road[j], na = normals[i], nb = normals[j];
+  const ex = b[0] - a[0], ez = b[1] - a[1], qx = x - a[0], qz = z - a[1], dx = nb[0] - na[0], dz = nb[1] - na[1];
+  // cross(q - t e, na + t dn) = 0: a quadratic in t.
+  const cross = (u0, u1, v0, v1) => u0 * v1 - u1 * v0;
+  const c0 = cross(qx, qz, na[0], na[1]), c1 = cross(qx, qz, dx, dz) - cross(ex, ez, na[0], na[1]), c2 = -cross(ex, ez, dx, dz);
+  let t;
+  if (Math.abs(c2) < 1e-9) t = -c0 / c1;
+  else {
+    const disc = c1 * c1 - 4 * c2 * c0;
+    if (disc < 0) return Infinity;
+    const sq = Math.sqrt(disc), t1 = (-c1 + sq) / (2 * c2), t2 = (-c1 - sq) / (2 * c2);
+    t = Math.abs(t1 - 0.5) < Math.abs(t2 - 0.5) ? t1 : t2;
+  }
+  const E = 1e-6;
+  if (!(t >= -E && t <= 1 + E)) {
+    // Past an open road's end: the distance to that end.
+    if (r.closed || !((t < 0 && i === 0) || (t > 1 && i === r.segs - 1))) return Infinity;
+    t = t < 0 ? 0 : 1;
+    scratch.t = t;
+    return Math.hypot(qx - ex * t, qz - ez * t);
+  }
+  t = t < 0 ? 0 : t > 1 ? 1 : t;
+  scratch.t = t;
+  const nx = na[0] + t * dx, nz = na[1] + t * dz;
+  return Math.abs(((qx - ex * t) * nx + (qz - ez * t) * nz) / (nx * nx + nz * nz));
+}
+
+// Every road near (x, z) pulls the ground toward its height at the point
+// across from (x, z) (the nearest stretch of it, when a road passes by more
+// than once). They share by inverse distance, so on a road's asphalt its own
+// height all but decides; how far the ground follows the roads is set by the
+// strongest weight (1 on a road, fading to 0 past the blend).
+let shares = new Float64Array(256), ts = new Float64Array(256), ds = new Float64Array(256);
 function ringHeight(x, z) {
   const R = ringData(), base = demHeight(x, z);
   const list = R.cells.get(Math.floor(x / RING_CELL) * 100003 + Math.floor(z / RING_CELL));
   if (!list) return base;
-  if (shares.length < list.length) { shares = new Float64Array(list.length * 2); ts = new Float64Array(list.length * 2); }
+  if (shares.length < list.length) { const m = list.length * 2; shares = new Float64Array(m); ts = new Float64Array(m); ds = new Float64Array(m); }
+  for (let k = 0; k < list.length; k++) {
+    const g = list[k], r = R.roads[R.segRoad[g]], far = r.flat + RING_BLEND;
+    ds[k] = Infinity;
+    const d = across(g, x, z);
+    if (d < far) { ds[k] = d; ts[k] = scratch.t; }
+  }
+  // Of a road's nearby segments, only the closest counts (its neighbors
+  // agree with it where they meet).
   let most = 0, sum = 0, top = 0;
   for (let k = 0; k < list.length; k++) {
-    const g = list[k], d2 = probe(g, x, z), r = R.roads[R.segRoad[g]], far = r.flat + RING_BLEND;
     shares[k] = 0;
-    if (d2 >= far * far) continue;
-    const d = Math.sqrt(d2), w = roadWeight(d, r.flat);
+    const d = ds[k];
+    if (d === Infinity) continue;
+    const g = list[k], ri = R.segRoad[g], r = R.roads[ri];
+    let beaten = false;
+    for (let j = 0; j < list.length && !beaten; j++) {
+      if (j === k || ds[j] === Infinity || R.segRoad[list[j]] !== ri) continue;
+      let gap = Math.abs(R.segIdx[list[j]] - R.segIdx[g]);
+      if (r.closed) gap = Math.min(gap, r.n - gap);
+      if (gap <= NEIGHBORS && (ds[j] < d || (ds[j] === d && j < k))) beaten = true;
+    }
+    if (beaten) continue;
+    const w = roadWeight(d, r.flat);
     if (w <= 0) continue;
     const q = (d + 0.5) * (d + 0.5), share = w / (q * q);
-    shares[k] = share; ts[k] = scratch.t;
+    shares[k] = share;
     sum += share;
     if (share > top) top = share;
     if (w > most) most = w;
   }
   if (sum === 0) return base;
-  // Segments with a millionth of the top share or less change nothing that shows.
+  // Roads with a millionth of the top share or less change nothing that shows.
   let near = 0;
   for (let k = 0; k < list.length; k++) {
     if (shares[k] <= top * 1e-6) continue;
@@ -256,6 +339,7 @@ function ringHeight(x, z) {
   }
   return base + most * (near / sum);
 }
+const NEIGHBORS = 12; // segments: closer than this along a road is the same stretch of it
 const scratch = { t: 0 };
 
 // Meters from (x, z) to the edge of the asphalt of the nearest road other than
