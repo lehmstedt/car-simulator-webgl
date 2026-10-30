@@ -6,6 +6,7 @@ import { terrainHeight, terrainNormal, terrainSample, terrainMesh, ringTerrainCh
 import { readControls, resetWheel, wheelAngle } from './input.js';
 import { Car, VARIANTS, TIRE_TEMP, tempGrip, variantSpec, wheelLayout } from './car.js';
 import { Skids } from './skids.js';
+import { Sound } from './audio.js';
 import { Ghost } from './ghost.js';
 import { BOT_LAPS } from './bot-lap.js';
 import { buildTrack, LAYOUTS, LINK_LAYOUTS, ROAD_LIFT } from './track.js';
@@ -28,6 +29,7 @@ const balanceEl = document.getElementById('balance');
 const ghostBtn = document.getElementById('ghost');
 const viewBtn = document.getElementById('view');
 const layoutBtn = document.getElementById('layout');
+const soundBtn = document.getElementById('sound');
 const sectionRowEl = document.getElementById('section-row');
 const sectionEl = document.getElementById('section');
 const loadEl = document.getElementById('load');
@@ -347,6 +349,12 @@ let savedDrive = DEFAULT_CAR;
 try { savedDrive = localStorage.getItem('drive') in VARIANTS ? localStorage.getItem('drive') : DEFAULT_CAR; } catch {}
 const car = new Car(savedDrive);
 const skids = new Skids(gl, program);
+const sound = new Sound();
+const updateSoundBtn = () => {
+  soundBtn?.setAttribute('aria-pressed', String(sound.on));
+  const v = soundBtn?.querySelector('b'); if (v) v.textContent = sound.on ? 'On' : 'Off';
+};
+updateSoundBtn();
 let ghost = null;
 let showGhost = true;
 try { showGhost = localStorage.getItem('showGhost') !== 'off'; } catch {}
@@ -765,12 +773,14 @@ function collide() {
 
 let last = performance.now();
 function frame(now) {
-  const dt = Math.min(0.05, (now - last) / 1000);
+  // rAF timestamps can be a little older than performance.now(): never step back in time.
+  const dt = Math.max(0, Math.min(0.05, (now - last) / 1000));
   last = now;
 
   const controls = readControls(dt);
   if (controls.toggleGhost) toggleGhost();
   if (controls.toggleView) toggleView();
+  if (controls.toggleSound) { sound.toggle(); updateSoundBtn(); }
   if (controls.switchLayout) switchLayout();
   else if (controls.switchDrive) switchDrive();
   else if (controls.reset) resetRace();
@@ -788,6 +798,7 @@ function frame(now) {
   if (!track.open) updateLap(after.index, now); // the open map has no clock
   if (lap.start !== null && !lap.done) ghost.record(now - lap.start, car);
   wheelPositions().forEach((w, i) => skids.track(i, w.x, w.y, w.z, w.sliding));
+  sound.update(dt, car, surface);
 
   // Body lean follows the accelerations, smoothed like a damped spring.
   const kt = Math.min(1, dt * 6);
