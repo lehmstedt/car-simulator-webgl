@@ -16,6 +16,17 @@
 // Per car (VARIANTS): aero downforce (grip grows with speed squared) and tire
 // load sensitivity (a tire's grip grows less than its load), which makes a
 // tail-heavy car like the 911 let go at the rear when weight comes off it.
+//
+// Suspension (see `suspension`): the body rides on springs and dampers, so
+// weight doesn't move instantly. Springs set how far the body dives, squats
+// and rolls; dampers set how quickly it gets there and whether it overshoots.
+// The load the springs and dampers carry is what the tires feel, so:
+// - Stiff, well-damped cars (GT3) take a set fast and respond crisply.
+// - Soft, lightly damped cars (Yaris) wallow: the load arrives late and swings past.
+// - Crests and dips load the tires through the springs, with a bounce after.
+// - Cornering moves load to the outside tires; with load sensitivity the pair
+//   grips less than when evenly loaded, more so at the end with the stiffer
+//   roll resistance (`rollFront`).
 
 const G = 9.81;
 
@@ -84,8 +95,13 @@ const BASE = {
   // mu * (load / ref)^-loadSens, with ref the load per tire that its width is
   // made for (N per mm of tread). 0 = off.
   loadSens: 0, refLoadPerMm: 13,
-  // Visual body lean per unit of accel (pitch) and of lateral accel (roll).
+  // Body lean at rest per m/s^2 of accel (pitch) and of lateral accel (roll):
+  // the spring stiffness.
   pitchGain: 0.006, rollGain: 0.005,
+  // Body motion modes: natural frequencies (Hz) and damping ratio (1 = critical,
+  // no overshoot). Dampers are stiffer in rebound than in bump (see BUMP/REBOUND).
+  heaveHz: 1.6, pitchHz: 1.8, rollHz: 2.2, damping: 0.45,
+  rollFront: 0.5,      // front share of the roll stiffness (anti-roll bars)
   // Geometry (m), shared by physics (kerb hits, skids) and the drawn car.
   trackFront: 1.9, trackRear: 1.9,
   wheelRadiusFront: 0.35, wheelRadiusRear: 0.35,
@@ -118,6 +134,9 @@ export const VARIANTS = {
     // only steps out on a lift or a big brake mid-corner.
     muFront: 0.98, muRear: 1.06, loadSens: 0.1,
     pitchGain: 0.009, rollGain: 0.008, // soft springs: it dives and leans
+    // Comfort setup: soft springs, light damping, so it floats and bobs a bit.
+    // A stiff front anti-roll bar (as most front drivers) adds to the understeer.
+    heaveHz: 1.3, pitchHz: 1.4, rollHz: 1.7, damping: 0.32, rollFront: 0.66,
     trackFront: 1.531, trackRear: 1.52,
     wheelRadiusFront: 0.311, wheelRadiusRear: 0.311, // 185/65 R15
     tireWidthFront: 0.185, tireWidthRear: 0.185,
@@ -153,6 +172,8 @@ export const VARIANTS = {
     // heavy tail is the first to let go, and lifting off makes it worse.
     muFront: 1.3, muRear: 1.36, loadSens: 0.15,
     pitchGain: 0.004, rollGain: 0.003, // stiff springs and anti-roll bars
+    // Track springs and firm adaptive dampers: it settles at once.
+    heaveHz: 2.2, pitchHz: 2.5, rollHz: 3, damping: 0.65, rollFront: 0.42,
     trackFront: 1.6, trackRear: 1.553,
     wheelRadiusFront: 0.343, wheelRadiusRear: 0.361, // 20" and 21" with their sidewalls
     tireWidthFront: 0.255, tireWidthRear: 0.315,
@@ -195,6 +216,11 @@ export const SURFACES = {
 const KERB_GRIP = 0.7;      // grip multiplier for an axle on a sausage
 const KERB_SPEED = 25;      // m/s at which a hit is at full strength
 
+// Heave damping in bump (wheel moving up into the body) and rebound, as
+// multiples of `damping`: rebound is firmer so the body doesn't spring back up.
+const BUMP = 0.7, REBOUND = 1.3;
+const TAU = 2 * Math.PI;
+
 const STEP = 1 / 240; // fixed physics step; tire forces are stiff
 
 export class Car {
@@ -224,7 +250,12 @@ export class Car {
     this.steer = 0;         // road wheel angle (rad)
     this.throttle = 0;      // smoothed pedals, 0..1
     this.brake = 0;
-    this.accel = 0;         // filtered longitudinal accel, drives weight transfer
+    this.accel = 0;         // filtered longitudinal accel, drives body pitch
+    this.accelLat = 0;      // filtered lateral tire accel (+ left), drives body roll
+    // Body on its suspension: heave (m, + = springs compressed), pitch (rad,
+    // + = nose up) and roll (rad, + = leaning right), and their rates.
+    this.body = { heave: 0, pitch: 0, roll: 0, vHeave: 0, vPitch: 0, vRoll: 0 };
+    this.shiftFront = this.shiftRear = 0; // N moved from the inside to the outside tire
     this.slipFront = 0;     // slip angles (rad), for HUD / visuals
     this.slipRear = 0;
     this.ground = { gx: 0, gz: 0, hxx: 0, hxz: 0, hzz: 0 }; // terrain under the car
@@ -300,8 +331,8 @@ export class Car {
 
   // Forces from one axle's tires, in that axle's wheel frame (x along the wheel).
   // `tire` is that axle's state in this.tires; `h` the time step.
-  axle(u, w, load, mu, fxDemand, locked, tire, h, ref) {
-    const max = mu * load * tempGrip(tire.temp) * this.loadGrip(load, ref);
+  axle(u, w, load, mu, fxDemand, locked, tire, h, ref, shift) {
+    const max = mu * load * tempGrip(tire.temp) * this.loadGrip(load, ref, shift);
     const slip = Math.atan2(w, Math.max(Math.abs(u), 3));
     const ease = (target) => {
       const tau = target < tire.grip ? GRIP_LOSS_TIME : GRIP_GAIN_TIME;
@@ -343,16 +374,51 @@ export class Car {
     return { fx, fy, slip };
   }
 
-  // Friction multiplier from load sensitivity, for an axle carrying `load` (two tires).
-  loadGrip(load, ref) {
-    return this.loadSens ? Math.pow(Math.max(load, 1) / (2 * ref), -this.loadSens) : 1;
+  // Friction multiplier from load sensitivity, for an axle carrying `load` on
+  // two tires, `shift` of it moved from the inside tire to the outside one.
+  // Each tire grips mu * F * (F / ref)^-loadSens, so the pair grips less the
+  // more unevenly it is loaded.
+  loadGrip(load, ref, shift = 0) {
+    if (!this.loadSens) return 1;
+    load = Math.max(load, 1);
+    const inner = Math.max(0, load / 2 - Math.abs(shift)), outer = load - inner;
+    const e = 1 - this.loadSens;
+    return (Math.pow(ref, this.loadSens) * (Math.pow(inner, e) + Math.pow(outer, e))) / load;
   }
 
   // Peak force an axle's tires can give on asphalt (N).
   axleGrip(axle, load) {
     const front = axle === 'front';
     return (front ? this.muFront : this.muRear) * load * tempGrip(this.tires[axle].temp)
-      * this.loadGrip(load, front ? this.refLoadFront : this.refLoadRear);
+      * this.loadGrip(load, front ? this.refLoadFront : this.refLoadRear, front ? this.shiftFront : this.shiftRear);
+  }
+
+  // Advance the body on its springs and dampers by `h` seconds. `aLong` is
+  // the accel the tires push the car with (+ forward), `aLat` the lateral one
+  // (+ left), `aUp` the ground's vertical accel under the car (dips +, crests -).
+  // Each mode is a mass on a spring and damper: the body lags what drives it,
+  // and the load the tires feel is what its spring and damper push with.
+  // Returns those loads as equivalent accels (m/s^2).
+  suspension(h, aLong, aLat, aUp) {
+    const s = this.body, z = this.damping;
+    // Heave: the ground accelerating up compresses the springs.
+    const wH = TAU * this.heaveHz;
+    const cH = 2 * z * wH * (s.vHeave > 0 ? BUMP : REBOUND);
+    s.vHeave += (aUp - wH * wH * s.heave - cH * s.vHeave) * h;
+    s.heave += s.vHeave * h;
+    // Pitch and roll head for their lean at rest for the accel (the spring),
+    // slowed by the damper.
+    const wP = TAU * this.pitchHz, wR = TAU * this.rollHz;
+    s.vPitch += (wP * wP * (this.pitchGain * aLong - s.pitch) - 2 * z * wP * s.vPitch) * h;
+    s.pitch += s.vPitch * h;
+    s.vRoll += (wR * wR * (-this.rollGain * aLat - s.roll) - 2 * z * wR * s.vRoll) * h;
+    s.roll += s.vRoll * h;
+    // Spring + damper force, in units of the accel that would hold it at rest.
+    return {
+      up: wH * wH * s.heave + cH * s.vHeave,
+      long: (s.pitch + (2 * z / wP) * s.vPitch) / this.pitchGain,
+      lat: -(s.roll + (2 * z / wR) * s.vRoll) / this.rollGain,
+    };
   }
 
   // `scrub`: power lost sliding (W); `force`: total tire force (N).
@@ -377,16 +443,23 @@ export class Car {
     const sinPitch = pitch / Math.hypot(1, pitch), sinBank = bank / Math.hypot(1, bank);
     this.grade = pitch;
 
-    // Total load: the share of gravity pressing into the slope, plus the push from
-    // following the road's vertical curvature (v^2 * h''): crests go light, dips heavy.
+    // Following the road's vertical curvature (v^2 * h'') accelerates the car
+    // up in dips and down over crests; the springs pass that on to the tires.
     const wx = -sh * vx - ch * vy, wz = -ch * vx + sh * vy; // world velocity
     const bump = g.hxx * wx * wx + 2 * g.hxz * wx * wz + g.hzz * wz * wz;
-    const normal = m * G * clamp(1 / Math.hypot(1, pitch, bank) + bump / G, 0.15, 2.5);
+    const susp = this.suspension(h, this.accel + G * sinPitch, this.accelLat, bump);
+    // Total load: the share of gravity pressing into the slope, plus what the
+    // springs and dampers push with: crests go light, dips heavy.
+    const normal = m * G * clamp(1 / Math.hypot(1, pitch, bank) + susp.up / G, 0.15, 2.5);
 
-    // Weight transfer: whatever the tires push the car along with (accelerating,
-    // or holding it against gravity uphill) loads the rear; braking and going
-    // downhill load the front.
-    const transfer = (m * (this.accel + G * sinPitch) * this.cgHeight) / L;
+    // Weight transfer, through the springs and dampers: whatever the tires
+    // push the car along with (accelerating, or holding it against gravity
+    // uphill) loads the rear; braking and going downhill load the front.
+    const transfer = (m * susp.long * this.cgHeight) / L;
+    // Cornering loads the outside tires, split between the axles by roll stiffness.
+    const roll = m * Math.abs(susp.lat) * this.cgHeight;
+    this.shiftFront = (roll * this.rollFront) / this.trackFront;
+    this.shiftRear = (roll * (1 - this.rollFront)) / this.trackRear;
     const minLoad = 0.05 * m * G;
     // Aero downforce grows with the square of speed, split by the wing's balance.
     const aero = this.downforce * vx * vx;
@@ -420,8 +493,8 @@ export class Car {
     const demandF = (fwd ? drive : 0) - brake * this.brakeFront * softSign(uF);
     const demandR = (fwd ? 0 : drive) - brake * (1 - this.brakeFront) * softSign(vx);
     const kF = this.onKerb.front ? KERB_GRIP : 1, kR = this.onKerb.rear ? KERB_GRIP : 1;
-    const front = this.axle(uF, wF, loadF, this.muFront * grip * kF, demandF, false, this.tires.front, h, this.refLoadFront);
-    const rear = this.axle(vx, vyR, loadR, this.muRear * grip * kR, demandR, !!c.handbrake, this.tires.rear, h, this.refLoadRear);
+    const front = this.axle(uF, wF, loadF, this.muFront * grip * kF, demandF, false, this.tires.front, h, this.refLoadFront, this.shiftFront);
+    const rear = this.axle(vx, vyR, loadR, this.muRear * grip * kR, demandR, !!c.handbrake, this.tires.rear, h, this.refLoadRear, this.shiftRear);
 
     // Into the body frame.
     const fxF = front.fx * cs - front.fy * sn;
@@ -444,7 +517,10 @@ export class Car {
     this.vx += (fx / m + r * vy) * h;
     this.vy += (fy / m - r * vx) * h;
     this.yawRate += ((a * fyF - b * rear.fy) / this.yawInertia) * h;
-    this.accel += (fx / m - this.accel) * Math.min(1, h * 6); // springs: weight shifts over ~0.15 s
+    // Lightly filtered (tire and bushing compliance): the springs do the rest.
+    const kA = Math.min(1, h * 30);
+    this.accel += (fx / m - this.accel) * kA;
+    this.accelLat += ((fyF + rear.fy) / m - this.accelLat) * kA;
 
     // Let the car come to rest instead of creeping, unless the slope is steep
     // enough to roll it (the handbrake holds it on any hill).

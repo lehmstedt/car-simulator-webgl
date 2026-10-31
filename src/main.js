@@ -4,7 +4,7 @@ import { gt3Body, yarisBody } from './bodies.js';
 import { perspective, lookAt, multiply, identity, basis, rotate } from './math.js';
 import { terrainHeight, terrainNormal, terrainSample, terrainMesh, ringTerrainChunks, setTerrain } from './terrain.js';
 import { readControls, resetWheel, wheelAngle } from './input.js';
-import { Car, VARIANTS, TIRE_TEMP, tempGrip, variantSpec, wheelLayout } from './car.js';
+import { Car, VARIANTS, TIRE_TEMP, tempGrip, variantSpec, wheelLayout, clamp } from './car.js';
 import { Skids } from './skids.js';
 import { Sound } from './audio.js';
 import { Ghost } from './ghost.js';
@@ -382,7 +382,6 @@ function toggleView() {
   updateViewBtn();
 }
 let glance = 0; // cockpit head turn into corners (rad), smoothed
-const tilt = { pitch: 0, roll: 0 }; // body lean from weight transfer (visual only)
 // Bounce over sausage kerbs: the body springs up, pitches and rolls with the
 // wheels it rides on (visual only), and the wheels lift onto the humps.
 const kerb = { lift: 0, vlift: 0, pitch: 0, vpitch: 0, roll: 0, vroll: 0, wheels: [0, 0, 0, 0] };
@@ -423,7 +422,7 @@ function resetRace() {
   cam.x = car.x + Math.sin(car.heading) * 9;
   cam.z = car.z + Math.cos(car.heading) * 9;
   cam.y = terrainHeight(car.x, car.z) + 3.5;
-  tilt.pitch = tilt.roll = glance = 0;
+  glance = 0;
   Object.assign(kerb, { lift: 0, vlift: 0, pitch: 0, vpitch: 0, roll: 0, vroll: 0, wheels: [0, 0, 0, 0] });
   lap.start = null;
   lap.done = false;
@@ -800,11 +799,9 @@ function frame(now) {
   wheelPositions().forEach((w, i) => skids.track(i, w.x, w.y, w.z, w.sliding));
   sound.update(dt, car, surface);
 
-  // Body lean follows the accelerations, smoothed like a damped spring.
-  const kt = Math.min(1, dt * 6);
-  tilt.pitch += (car.accel * car.pitchGain - tilt.pitch) * kt;
-  tilt.roll += (-car.vx * car.yawRate * car.rollGain - tilt.roll) * kt;
-  lean = { pitch: tilt.pitch + kerb.pitch, roll: tilt.roll + kerb.roll, lift: kerb.lift, wheels: kerb.wheels };
+  // The body as the suspension holds it (see car.js), plus the kerb bounce.
+  const b = car.body;
+  lean = { pitch: b.pitch + kerb.pitch, roll: b.roll + kerb.roll, lift: kerb.lift - clamp(b.heave, -0.1, 0.1), wheels: kerb.wheels };
   const carY = terrainHeight(car.x, car.z);
 
   // Chase camera: lag behind the car, smoothed.
