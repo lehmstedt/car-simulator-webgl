@@ -4,7 +4,7 @@ import { gt3Body, yarisBody } from './bodies.js';
 import { perspective, lookAt, multiply, identity, basis, rotate } from './math.js';
 import { terrainHeight, terrainNormal, terrainSample, terrainMesh, ringTerrainChunks, setTerrain } from './terrain.js';
 import { readControls, resetWheel, wheelAngle } from './input.js';
-import { Car, VARIANTS, TIRE_TEMP, tempGrip, variantSpec, wheelLayout, clamp } from './car.js';
+import { Car, PHYSICS_STEP, VARIANTS, TIRE_TEMP, tempGrip, variantSpec, wheelLayout, clamp } from './car.js';
 import { Skids } from './skids.js';
 import { Sound } from './audio.js';
 import { Ghost } from './ghost.js';
@@ -633,7 +633,7 @@ function drawBeam(B, a, b, w, h, color, mat) {
 
 // Dashboard, pillars, roof edge, mirror and a steering wheel that follows the input.
 function drawCockpit() {
-  const B = bodyFrame(carFrame(car), lean);
+  const B = bodyFrame(carFrame(shown), lean);
   const box = (x, y, z, sx, sy, sz, c) => draw(meshes.cube, basis(toWorld(B, x, y, z), B.right, B.up, B.back, sx, sy, sz), c);
   const ck = model(car.variant).cockpit;
   const eye = eyeOf(car.variant);
@@ -677,7 +677,7 @@ function drawGhost(now) {
   for (const [pose, colors] of ghosts) {
     if (!pose) continue;
     // Fade it out when it overlaps the player's car so the view stays clear.
-    const d = Math.hypot(pose.x - car.x, pose.z - car.z);
+    const d = Math.hypot(pose.x - shown.x, pose.z - shown.z);
     const alpha = 0.45 * Math.min(1, Math.max(0.5, d / 8));
     drawCar(pose, colors, alpha, { pitch: 0, roll: 0 });
   }
@@ -770,6 +770,43 @@ function collide() {
   }
 }
 
+// Physics runs on its own fixed clock, faster than the screen refreshes: each
+// frame runs however many physics ticks fit in the time that passed (often
+// several), and the car is drawn between the last two ticks so motion stays
+// smooth whatever the display rate.
+const PHYSICS_HZ = Math.round(1 / PHYSICS_STEP);
+const MAX_TICKS = Math.ceil(0.05 * PHYSICS_HZ); // after a stall, slow down rather than spiral
+let physicsLag = 0;  // simulated time owed (s)
+let simTime = 0;     // physics clock (ms): lap times and the ghost run on it
+let prevPose = null; // car pose before the last physics tick
+let where = null, after = null, surface = 'road';
+let shown = null;    // the car's pose to draw this frame
+
+const poseOf = (c) => ({ x: c.x, z: c.z, heading: c.heading });
+function syncPose() {
+  prevPose = poseOf(car);
+  physicsLag = 0;
+}
+
+// One fixed physics step of the player's car and everything it touches.
+function physicsTick(h, controls) {
+  prevPose = poseOf(car);
+  where = track.locate(car.x, car.z);
+  surface = where.surface ?? world.offTrack(car.x, car.z, where);
+  updateKerbs(h);
+  car.update(h, controls, surface, terrainSample(car.x, car.z));
+  collide();
+  simTime += h * 1000;
+  after = track.locate(car.x, car.z);
+  if (world.circuits && after.onTrack && after.road !== track.circuit) {
+    followCircuit(after);
+    after = track.locate(car.x, car.z);
+  }
+  if (!track.open) updateLap(after.index, simTime); // the open map has no clock
+  if (lap.start !== null && !lap.done) ghost.record(simTime - lap.start, car);
+  wheelPositions().forEach((w, i) => skids.track(i, w.x, w.y, w.z, w.sliding));
+}
+
 let last = performance.now();
 function frame(now) {
   // rAF timestamps can be a little older than performance.now(): never step back in time.
@@ -783,31 +820,40 @@ function frame(now) {
   if (controls.switchLayout) switchLayout();
   else if (controls.switchDrive) switchDrive();
   else if (controls.reset) resetRace();
-  const where = track.locate(car.x, car.z);
-  const surface = where.surface ?? world.offTrack(car.x, car.z, where);
-  updateKerbs(dt);
-  car.update(dt, controls, surface, terrainSample(car.x, car.z));
-  world.traffic?.update(dt, playerState());
-  collide();
-  let after = track.locate(car.x, car.z);
-  if (world.circuits && after.onTrack && after.road !== track.circuit) {
-    followCircuit(after);
-    after = track.locate(car.x, car.z);
+  if (prevPose === null || controls.switchLayout || controls.switchDrive || controls.reset) syncPose();
+
+  physicsLag += dt;
+  let ticks = 0;
+  for (; physicsLag >= PHYSICS_STEP && ticks < MAX_TICKS; ticks++) {
+    physicsTick(PHYSICS_STEP, controls);
+    physicsLag -= PHYSICS_STEP;
   }
-  if (!track.open) updateLap(after.index, now); // the open map has no clock
-  if (lap.start !== null && !lap.done) ghost.record(now - lap.start, car);
-  wheelPositions().forEach((w, i) => skids.track(i, w.x, w.y, w.z, w.sliding));
+  if (ticks === MAX_TICKS) physicsLag = Math.min(physicsLag, PHYSICS_STEP);
+  if (!where) { where = after = track.locate(car.x, car.z); surface = where.surface ?? world.offTrack(car.x, car.z, where); }
+  // Traffic is scripted, not simulated: it moves once a frame by the physics time that passed.
+  world.traffic?.update(ticks * PHYSICS_STEP, playerState());
   sound.update(dt, car, surface);
+
+  // Where the car is drawn: between the last two physics ticks.
+  const a = physicsLag / PHYSICS_STEP;
+  let dh = car.heading - prevPose.heading;
+  dh -= Math.round(dh / (2 * Math.PI)) * 2 * Math.PI;
+  shown = Object.create(car, {
+    x: { value: prevPose.x + (car.x - prevPose.x) * a },
+    z: { value: prevPose.z + (car.z - prevPose.z) * a },
+    heading: { value: car.heading - dh * (1 - a) },
+  });
+  const clock = simTime + physicsLag * 1000; // the physics clock at this frame
 
   // The body as the suspension holds it (see car.js), plus the kerb bounce.
   const b = car.body;
   lean = { pitch: b.pitch + kerb.pitch, roll: b.roll + kerb.roll, lift: kerb.lift - clamp(b.heave, -0.1, 0.1), wheels: kerb.wheels };
-  const carY = terrainHeight(car.x, car.z);
+  const carY = terrainHeight(shown.x, shown.z);
 
   // Chase camera: lag behind the car, smoothed.
   const back = 9, height = 3.5;
-  const tx = car.x + Math.sin(car.heading) * back;
-  const tz = car.z + Math.cos(car.heading) * back;
+  const tx = shown.x + Math.sin(shown.heading) * back;
+  const tz = shown.z + Math.cos(shown.heading) * back;
   const k = Math.min(1, dt * 4);
   cam.x += (tx - cam.x) * k;
   cam.z += (tz - cam.z) * k;
@@ -826,14 +872,14 @@ function frame(now) {
   if (cockpit) {
     // Eye rides the leaning body; it looks a touch down and glances into turns.
     glance += (Math.max(-0.25, Math.min(0.25, car.yawRate * 0.12)) - glance) * Math.min(1, dt * 3);
-    const B = bodyFrame(carFrame(car), lean);
+    const B = bodyFrame(carFrame(shown), lean);
     const eye = toWorld(B, ...eyeOf(car.variant));
     const dir = rotate(rotate(B.back.map((v) => -v), B.right, -0.08), B.up, glance);
     viewMat = lookAt(eye, [0, 1, 2].map((i) => eye[i] + dir[i]), B.up);
     eyePos = eye;
   } else {
     eyePos = [cam.x, cam.y, cam.z];
-    viewMat = lookAt(eyePos, [car.x, carY + 1, car.z], [0, 1, 0]);
+    viewMat = lookAt(eyePos, [shown.x, carY + 1, shown.z], [0, 1, 0]);
   }
   const proj = perspective(cockpit ? fovy * 1.1 : fovy, aspect, cockpit ? 0.05 : 0.1, world.far);
   const viewProj = multiply(proj, viewMat);
@@ -903,14 +949,14 @@ function frame(now) {
     gl.uniform1i(uTextured, 0);
     gl.enable(gl.CULL_FACE);
   }
-  drawCar(car, CAR_COLORS, 1, lean, !cockpit);
+  drawCar(shown, CAR_COLORS, 1, lean, !cockpit);
   if (cockpit) drawCockpit();
-  drawGhost(now);
+  drawGhost(clock);
 
   speedEl.textContent = Math.abs(car.speed * 3.6).toFixed(0).padStart(3, ' ');
   speedEl.classList.toggle('grass', !where.onTrack && surface !== 'road');
   gearEl.textContent = car.speed < -0.3 ? 'R' : Math.abs(car.speed) < 0.3 ? 'N' : 'D';
-  lapEl.textContent = fmt(lap.done ? lap.last : lap.start === null ? null : now - lap.start);
+  lapEl.textContent = fmt(lap.done ? lap.last : lap.start === null ? null : clock - lap.start);
   bestEl.textContent = fmt(lap.best[car.variant]);
   botEl.textContent = fmt(BOT_LAPS[layout]?.[car.variant]?.time ?? null);
   balanceEl.textContent = car.balance === 'over' ? 'Oversteer' : car.balance === 'under' ? 'Understeer' : '';

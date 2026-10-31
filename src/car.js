@@ -221,7 +221,8 @@ const KERB_SPEED = 25;      // m/s at which a hit is at full strength
 const BUMP = 0.7, REBOUND = 1.3;
 const TAU = 2 * Math.PI;
 
-const STEP = 1 / 240; // fixed physics step; tire forces are stiff
+export const PHYSICS_STEP = 1 / 240;
+const STEP = PHYSICS_STEP; // fixed physics step; tire forces are stiff
 
 export class Car {
   constructor(variant = 'gt3') {
