@@ -265,6 +265,8 @@ export class Car {
     this.frontSliding = false;
     this.rearSliding = false;
     this.balance = null;    // 'under' | 'over' | null
+    // Crash damage per side of the car, 0 (fine) .. 1 (crushed); see damage().
+    this.damage = { front: 0, rear: 0, left: 0, right: 0 };
     // Per-axle tire state: share of peak cornering grip on hand right now,
     // whether it is sliding, and how much of its grip it is using (0..1+).
     // `temp` is the tire temperature (deg C); `heat` how fast it is changing (deg C/s).
@@ -296,6 +298,32 @@ export class Car {
     }
   }
 
+  // A crash: `speed` (m/s) is how fast the car went into what it hit, `zone`
+  // the side that took it. Below ~7 km/h it's a scrape; damage grows with the
+  // square of the speed (the energy), so a 50 km/h wall crushes a third of that side.
+  crash(zone, speed) {
+    const amount = Math.max(0, speed - 2) ** 2 * 0.0024;
+    if (amount <= 0) return 0;
+    this.damage[zone] = Math.min(1, this.damage[zone] + amount);
+    return amount;
+  }
+
+  // What's left of the car, 1 .. 0 (wrecked: it won't drive).
+  get health() {
+    const d = this.damage;
+    return Math.max(0, 1 - (d.front + d.rear + d.left + d.right) / 1.6);
+  }
+  get wrecked() { return this.health <= 0; }
+
+  // Damage on the way the car drives: a smashed engine bay (the front of the
+  // Yaris, the rear of the 911) loses power and top speed; a bent side pulls
+  // the steering toward it; wrecked, it doesn't drive at all.
+  get powerLeft() {
+    if (this.wrecked) return 0;
+    const d = this.damage, engine = this.drive === 'front' ? d.front : d.rear;
+    return clamp(1 - 0.6 * engine - 0.15 * (d.front + d.rear - engine) - 0.1 * (d.left + d.right), 0.15, 1);
+  }
+
   // `surface` is a SURFACES key; `ground` is terrainSample() at the car's position.
   update(dt, c, surface = 'road', ground = null) {
     const surf = SURFACES[surface] ?? SURFACES.road;
@@ -304,7 +332,7 @@ export class Car {
     // angle. Lock shrinks with speed, but cranking the wheel at
     // speed still overloads the tires: that's the punishment for rough steering.
     const lock = this.maxSteer / (1 + Math.abs(this.vx) * this.steerFalloff);
-    this.steer = c.steer * lock;
+    this.steer = c.steer * lock + (this.damage.left - this.damage.right) * 0.03 * clamp(Math.abs(this.vx) / 10, 0, 1);
 
     // Pedals ramp in (keys are on/off) but release twice as fast.
     const ramp = (cur, want) => cur + clamp(want - cur, -2 * this.pedalRate * dt, this.pedalRate * dt);
@@ -472,11 +500,12 @@ export class Car {
 
     // Drive and brake demand.
     let drive = 0, brake = 0;
-    if (c.throttle) drive += c.throttle * Math.min(this.maxDrive, this.power / Math.max(Math.abs(vx), 1))
-      * clamp(this.topSpeed - vx, 0, 1); // the limiter fades drive out over the last 1 m/s
+    const left = this.powerLeft;
+    if (c.throttle) drive += c.throttle * left * Math.min(this.maxDrive, this.power / Math.max(Math.abs(vx), 1))
+      * clamp(this.topSpeed * (0.55 + 0.45 * left) - vx, 0, 1); // the limiter fades drive out over the last 1 m/s
     if (c.brake) {
       if (vx > 0.5) brake = c.brake * this.brakeForce;
-      else if (vx > -this.maxReverse) drive -= c.brake * this.reverseForce;
+      else if (vx > -this.maxReverse) drive -= c.brake * this.reverseForce * (left > 0 ? 1 : 0);
     }
 
     // Contact patch velocities (front is rotated by the steering angle).

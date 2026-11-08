@@ -509,7 +509,13 @@ export function buildOpenMap() {
     locate(x, z) {
       const r = nearestRoad(x, z);
       const onTrack = !!r && r.edge <= r.road.walk + 0.3;
-      return { distance: r ? r.distance : Infinity, along: 0, index: 0, onTrack, surface: onTrack ? 'road' : null, sand: false, sandEdge: 0, name: r && r.edge < r.road.walk + 6 ? r.road.name : '' };
+      return {
+        distance: r ? r.distance : Infinity, along: 0, index: 0, onTrack, surface: onTrack ? 'road' : null, sand: false, sandEdge: 0,
+        name: r && r.edge < r.road.walk + 6 ? r.road.name : '',
+        // For the driving rules (rules.js): the street, how far past its
+        // roadway's edge (< 0 on the asphalt), and the way its points run there.
+        road: r?.road ?? null, edge: r ? r.edge : Infinity, tangent: r?.tangent ?? null,
+      };
     },
     sausageHeight: () => 0,
     // Whether (x, z) is inside a building or off the map, and if so the way

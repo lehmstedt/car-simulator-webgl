@@ -175,13 +175,81 @@
     .pad.pedal.gas { height: 100px; }
     .pad.pedal.brake { height: 76px; }
   }
-  @media (prefers-reduced-motion: reduce) { .pad { transition: none; } }
+  /* Speed limit (Montreal): a white sign with a red ring; it turns red when you're well over. */
+  .limit {
+    align-self: center; margin-left: 2px;
+    width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center;
+    background: #fff; color: #111; border: 3px solid #d0202a;
+    font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1;
+  }
+  .limit[hidden] { display: none; }
+  .limit.over { background: #d0202a; color: #fff; border-color: #fff; }
+  /* Car health: a bar under the speed; it flashes when the car takes a hit. */
+  .health { display: flex; align-items: center; gap: 6px; }
+  .health .bar { flex: 1; min-width: 50px; height: 6px; border-radius: 3px; background: rgba(255, 255, 255, 0.15); overflow: hidden; }
+  .health .bar i { display: block; height: 100%; width: 100%; background: var(--gas); transition: width .2s; }
+  .health.hit { animation: hit .5s; }
+  @keyframes hit { 0%, 40% { color: var(--brake); transform: translateX(-2px); } 20% { transform: translateX(2px); } }
+  /* Wanted level: stars light up amber; the status says what the police are doing. */
+  #wanted-row { display: flex; align-items: baseline; gap: 8px; white-space: nowrap; }
+  #wanted-row[hidden] { display: none; }
+  #stars { font-size: 15px; letter-spacing: 2px; color: var(--hud-dim); line-height: 1.1; }
+  #stars.on { color: var(--accent); }
+  #wanted { font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--hud-dim); }
+  #stars.on + #wanted { color: var(--brake); }
+  /* An offence, briefly, in the middle, over the panels. */
+  #toast {
+    position: fixed; left: 50%; top: 56%; transform: translate(-50%, -6px); z-index: 20;
+    max-width: calc(100vw - 32px); box-sizing: border-box;
+    background: rgba(160, 20, 24, 0.85); color: #fff; border-radius: 8px; padding: 7px 12px;
+    font-size: 13px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; text-align: center;
+    pointer-events: none; opacity: 0; transition: opacity .25s, transform .25s;
+  }
+  #toast.show { opacity: 1; transform: translate(-50%, 0); }
+  /* Busted / Wrecked, in the middle of the screen. */
+  #banner {
+    position: fixed; left: 50%; top: 40%; transform: translate(-50%, -50%); z-index: 20;
+    max-width: calc(100vw - 32px); box-sizing: border-box;
+    background: rgba(14, 20, 28, 0.86); border-radius: 14px; padding: 14px 22px; text-align: center;
+    display: grid; gap: 4px; pointer-events: none;
+  }
+  #banner[hidden] { display: none; }
+  #banner b { font-size: 40px; letter-spacing: .12em; text-transform: uppercase; line-height: 1; }
+  #banner span { font-size: 13px; color: var(--hud-dim); }
+  #banner.busted b { color: #6ea8ff; }
+  #banner.wrecked b { color: var(--brake); }
+  /* Patrol cars close: red and blue glow at the screen's edges. */
+  #pursuit {
+    position: fixed; inset: 0; pointer-events: none; opacity: 0; transition: opacity .4s;
+    animation: siren .5s steps(1) infinite;
+  }
+  @keyframes siren {
+    0% { box-shadow: inset 60px 0 60px -40px rgba(255, 40, 40, .55), inset -60px 0 60px -40px rgba(40, 90, 255, .25); }
+    50% { box-shadow: inset 60px 0 60px -40px rgba(255, 40, 40, .25), inset -60px 0 60px -40px rgba(40, 90, 255, .55); }
+  }
+  /* A cracked windshield (cockpit view, front damage). */
+  #crack { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; opacity: 0; }
+  #crack path { fill: none; stroke: rgba(235, 240, 245, 0.6); stroke-width: 1.4; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+  @media (prefers-reduced-motion: reduce) {
+    .pad { transition: none; }
+    #pursuit { animation: none; box-shadow: inset 0 0 60px rgba(255, 60, 60, .4); }
+    .health.hit { animation: none; }
+  }
 </style>
 </head>
 <body>
 <canvas id="gl" aria-label="3D driving view"></canvas>
+<svg id="crack" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+  <path d="M30 62 L18 48 L9 44 M30 62 L22 75 L14 92 M30 62 L44 54 L58 50 L71 41 M30 62 L41 71 L52 88 M30 62 L27 44 L31 28 M30 62 L12 63 L2 60 M22 75 L30 80 M44 54 L46 44 M18 48 L22 41 M41 71 L50 67 M58 50 L60 60"/>
+  <path d="M26 58 L34 60 L33 66 L27 67 Z"/>
+</svg>
+<div id="pursuit" aria-hidden="true"></div>
+<div id="toast" role="status"></div>
+<div id="banner" hidden role="alert"><b></b><span></span></div>
 <div id="hud">
-  <div class="row"><span id="speed">  0</span><span class="unit">km/h</span><span id="gear">N</span></div>
+  <div class="row"><span id="speed">  0</span><span class="unit">km/h</span><span id="gear">N</span><span id="limit" class="limit" hidden title="Speed limit (km/h)">50</span></div>
+  <div class="times health" title="What's left of the car: crashes damage it"><span class="unit">Car</span><span id="health">100%</span><span class="bar"><i id="health-bar"></i></span></div>
+  <div id="wanted-row" class="times" hidden aria-live="polite"><span id="stars" title="Wanted level">☆☆☆☆☆</span><span id="wanted"></span></div>
   <div class="times" id="section-row" hidden><span id="section"></span></div>
   <div class="times lap-only"><span class="unit" id="lap-label">Lap</span><span id="lap">–:––.––</span></div>
   <div class="times lap-only"><span class="unit">Best</span><span id="best">–:––.––</span></div>

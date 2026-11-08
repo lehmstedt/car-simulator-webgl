@@ -12,6 +12,8 @@ import { BOT_LAPS } from './bot-lap.js';
 import { buildTrack, LAYOUTS, LINK_LAYOUTS, ROAD_LIFT } from './track.js';
 import { Signs, createTexture } from './signs.js';
 import { Traffic, carMeshes } from './traffic.js';
+import { Rules } from './rules.js';
+import { Police } from './police.js';
 import { buildTrees, buildTreesAt } from './trees.js';
 import { buildOpenMap, loadOpenMap, BRICKS } from './openmap.js';
 import { Minimap } from './minimap.js';
@@ -45,6 +47,16 @@ const tireTextEls = { front: document.getElementById('tire-f'), rear: document.g
 const tireStateEl = document.getElementById('tire-state');
 const tiresEl = document.getElementById('tires');
 const minimap = new Minimap(document.getElementById('minimap'));
+const healthEl = document.getElementById('health');
+const healthBarEl = document.getElementById('health-bar');
+const wantedRowEl = document.getElementById('wanted-row');
+const starsEl = document.getElementById('stars');
+const wantedEl = document.getElementById('wanted');
+const limitEl = document.getElementById('limit');
+const toastEl = document.getElementById('toast');
+const bannerEl = document.getElementById('banner');
+const pursuitEl = document.getElementById('pursuit');
+const crackEl = document.getElementById('crack');
 const G_SCALE = 28; // px per g on the G-meter (grid rings at 0.5 g and 1 g)
 const gTrail = [];
 const gl = canvas.getContext('webgl2', { antialias: true });
@@ -205,10 +217,14 @@ function buildMontrealWorld() {
   const upload = (m) => { const mesh = createMesh(gl, program, m); gpu.push(mesh); return mesh; };
   const signs = new Signs(gl, program, []);
   gpu.push(signs.faces);
+  const traffic = new Traffic(t);
   return {
     kind: 'montreal',
     // Traffic, and the lights and stop signs at the crossings.
-    traffic: new Traffic(t),
+    traffic,
+    // The rules of the road, and the police who come after those who break them.
+    rules: new Rules(t, traffic),
+    police: new Police(t, traffic),
     streetSigns: { texture: createTexture(gl, stopSignCanvas()) },
     track: t,
     // Lots of buildings and trees: far ones (mostly lost in the haze) aren't drawn.
@@ -268,8 +284,85 @@ function drawTraffic(eye) {
   }
 }
 
+// Patrol cars: the traffic's sedan in white with a blue stripe and a light
+// bar on the roof, flashing red and blue while they chase.
+const POLICE_WHITE = [0.92, 0.93, 0.95], POLICE_BLUE = [0.04, 0.12, 0.42];
+function drawPolice(eye, t) {
+  const m = TRAFFIC_CARS[0];
+  const flash = Math.floor(t * 5) % 2 === 0;
+  for (const u of world.police.units) {
+    if (Math.hypot(u.x - eye[0], u.z - eye[2]) > TRAFFIC_DRAW) continue;
+    const F = { o: [u.x, ROAD_LIFT, u.z], right: [-u.dz, 0, u.dx], up: [0, 1, 0], back: [-u.dx, 0, -u.dz] };
+    const B = basis(F.o, F.right, F.up, F.back);
+    draw(m.paint, B, POLICE_WHITE, 'paint');
+    draw(m.glass, B, [0.1, 0.12, 0.15], 'glass');
+    draw(m.trim, B, [0.06, 0.06, 0.07], 'rubber');
+    draw(m.head, B, [0.86, 0.88, 0.9], 'glass');
+    draw(m.tail, B, [0.5, 0.05, 0.05], 'paint');
+    const box = (x, y, z, sx, sy, sz, color, mat) => draw(meshes.cube, basis(toWorld(F, x, y, z), F.right, F.up, F.back, sx, sy, sz), color, mat);
+    for (const side of [-1, 1]) box(side * 0.915, 0.58, 0, 0.02, 0.16, 3.9, POLICE_BLUE, 'paint'); // stripes
+    box(0, 0.83, -0.2, 1.5, 0.01, 1.0, POLICE_BLUE, 'paint');                                     // hood
+    box(0, 1.47, 0.2, 1.15, 0.06, 0.3, [0.1, 0.1, 0.12], 'matte');                               // light bar
+    box(-0.3, 1.54, 0.2, 0.48, 0.1, 0.26, flash ? [1, 0.1, 0.08] : [0.35, 0.04, 0.04], flash ? 'lamp' : 'glass');
+    box(0.3, 1.54, 0.2, 0.48, 0.1, 0.26, flash ? [0.08, 0.1, 0.3] : [0.15, 0.35, 1], flash ? 'glass' : 'lamp');
+  }
+}
+
+// Smoke from a damaged engine and sparks from crashes: small boxes that
+// drift, fade and fall. Drawn see-through, after everything else.
+const puffs = [];
+function puff(p) { if (puffs.length < 400) puffs.push(p); }
+function sparks(x, y, z, nx, nz, strength) {
+  const n = Math.min(40, Math.round(8 + strength * 30));
+  for (let i = 0; i < n; i++) {
+    const sp = 3 + Math.random() * 6 * (0.5 + strength);
+    const a = Math.random() * Math.PI * 2;
+    puff({
+      x, y, z, vx: nx * sp + Math.cos(a) * sp * 0.6, vy: 1 + Math.random() * 3, vz: nz * sp + Math.sin(a) * sp * 0.6,
+      age: 0, life: 0.25 + Math.random() * 0.35, size: 0.05, grow: 0, spark: true, gravity: 9.8,
+    });
+  }
+}
+let smokeWait = 0;
+function updatePuffs(dt) {
+  // Smoke out of the engine bay (the front of the Yaris, the rear of the 911) once it's hurt.
+  const d = car.damage, engine = car.drive === 'front' ? d.front : d.rear, h = car.health;
+  const hurt = Math.max(engine * 1.2, 1 - h);
+  if (hurt > 0.45 && (smokeWait -= dt) <= 0) {
+    smokeWait = 0.07 / Math.min(2, hurt);
+    const v = model(car.variant).spec, F = carFrame(car);
+    const z = car.drive === 'front' ? -(v.cgToFront + v.overhangFront) * 0.7 : (v.length - v.cgToFront - v.overhangFront) * 0.7;
+    const [x, y, zz] = toWorld(F, (Math.random() - 0.5) * 0.6, 0.85, z);
+    const dark = hurt > 0.8 || car.wrecked;
+    puff({ x, y, z: zz, vx: (Math.random() - 0.5) * 0.8, vy: 0.8 + Math.random() * 0.8, vz: (Math.random() - 0.5) * 0.8, age: 0, life: 1.2 + Math.random() * 0.8, size: 0.22, grow: 2.2, shade: dark ? 0.15 : 0.6, gravity: -0.2, spin: Math.random() * 3 });
+  }
+  for (let i = puffs.length - 1; i >= 0; i--) {
+    const p = puffs[i];
+    p.age += dt;
+    if (p.age > p.life) { puffs.splice(i, 1); continue; }
+    p.vy -= p.gravity * dt;
+    p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
+    if (p.spark && p.y < 0.05) { p.y = 0.05; p.vy *= -0.3; p.vx *= 0.6; p.vz *= 0.6; }
+  }
+}
+function drawPuffs() {
+  if (!puffs.length) return;
+  gl.enable(gl.BLEND);
+  gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE);
+  gl.depthMask(false);
+  for (const p of puffs) {
+    const k = p.age / p.life, s = p.size * (1 + p.grow * k);
+    const a = (p.spin ?? 0) + p.age, c = Math.cos(a), sn = Math.sin(a);
+    const M = basis([p.x, p.y, p.z], [c, 0, -sn], [0, 1, 0], [sn, 0, c], s, s, s);
+    if (p.spark) draw(meshes.cube, M, [1, 0.75 - 0.4 * k, 0.25], 'lamp', 1 - k);
+    else draw(meshes.cube, M, [p.shade, p.shade, p.shade], 'matte', 0.32 * (1 - k) * Math.min(1, p.age * 6));
+  }
+  gl.depthMask(true);
+  gl.disable(gl.BLEND);
+}
+
 // What the traffic needs to know of the player's car.
-const playerState = () => ({ x: car.x, z: car.z, speed: car.speed, vx: -Math.sin(car.heading) * car.speed, vz: -Math.cos(car.heading) * car.speed });
+const playerState = () => ({ x: car.x, z: car.z, heading: car.heading, speed: car.speed, vx: -Math.sin(car.heading) * car.speed, vz: -Math.cos(car.heading) * car.speed });
 
 // Makes a cell's meshes (open map): streets, lights and signs, buildings, trees.
 function loadCell(c) {
@@ -431,6 +524,11 @@ function resetRace() {
   lap.visited.clear();
   ghost.stop();
   skids.clear();
+  world.rules?.reset();
+  world.police?.reset();
+  puffs.length = 0;
+  held = null;
+  shake = 0;
   driveEl.querySelector('b').textContent = VARIANTS[car.variant].label;
 }
 
@@ -533,6 +631,13 @@ function wheelPositions(pose = car, m = model(car.variant)) {
 }
 
 const CAR_COLORS = { body: [0.85, 0.15, 0.15], cabin: [0.2, 0.2, 0.25], wheel: [0.08, 0.08, 0.08] };
+// The paint gets scuffed and dull with damage.
+function damagedColors() {
+  const k = (1 - car.health) * 0.55;
+  if (k <= 0) return CAR_COLORS;
+  const mix = (c, to) => c.map((v, i) => v + (to[i] - v) * k);
+  return { ...CAR_COLORS, body: mix(CAR_COLORS.body, [0.28, 0.24, 0.22]), cabin: mix(CAR_COLORS.cabin, [0.45, 0.47, 0.5]) };
+}
 const GHOST_COLORS = { body: [0.75, 0.9, 1], cabin: [0.55, 0.7, 0.85], wheel: [0.45, 0.55, 0.65], trim: [0.55, 0.7, 0.85], light: [0.75, 0.9, 1], tail: [0.75, 0.9, 1], rim: [0.45, 0.55, 0.65] };
 // Claude's run (scripts/autodrive.mjs): same physics, amber so it's told apart.
 const BOT_COLORS = { body: [1, 0.72, 0.2], cabin: [0.8, 0.55, 0.15], wheel: [0.55, 0.42, 0.2], trim: [0.8, 0.55, 0.15], light: [1, 0.72, 0.2], tail: [1, 0.72, 0.2], rim: [0.55, 0.42, 0.2] };
@@ -735,9 +840,12 @@ function updateTires() {
   tiresEl.setAttribute('aria-label', `Tire temperatures: front ${Math.round(front.temp)}, rear ${Math.round(rear.temp)} degrees, ${state.toLowerCase()}`);
 }
 
-// Buildings and the map's edge (open map only): points around the car's
-// outline that end up inside one push it back out, and the speed into the
-// wall is lost (a little bounce, some scrub along it).
+// Buildings, the map's edge and other cars (open map; the guardrails at the
+// Nürburgring): points around the car's outline that end up inside one push it
+// back out, and the speed into it is lost (a little bounce, some scrub along
+// it). How fast it went in, against what the obstacle was doing, is the
+// crash: it damages the side of the car that took it (car.js crash()).
+let shake = 0; // camera shake after a crash (m), decays
 function collide() {
   if (!track.blocked) return;
   const v = model(car.variant).spec;
@@ -745,29 +853,129 @@ function collide() {
   const outline = [];
   for (const a of [f, f / 2, 0, -r / 2, -r]) for (const b of [-hw, hw]) outline.push([a, b]);
   outline.push([f, 0], [-r, 0]);
+  let impact = null;
   for (let pass = 0; pass < 3; pass++) {
     const s = Math.sin(car.heading), c = Math.cos(car.heading);
-    let hit = null;
+    let hit = null, at = null;
     for (const [a, b] of outline) {
       // forward = (-sin, -cos), right = (cos, -sin)
       const px = car.x - s * a + c * b, pz = car.z - c * a - s * b;
-      const h = track.blocked(px, pz) ?? world.traffic?.blocked(px, pz);
-      if (h && (!hit || h.depth > hit.depth)) hit = h;
+      let h = track.blocked(px, pz);
+      if (h) h.what = 'wall';
+      else if ((h = world.traffic?.blocked(px, pz))) h.what = 'car';
+      else if ((h = world.police?.blocked(px, pz))) h.what = 'police';
+      if (h && (!hit || h.depth > hit.depth)) { hit = h; at = [px, pz]; }
     }
-    if (!hit) return;
+    if (!hit) break;
     car.x += hit.nx * (hit.depth + 0.02);
     car.z += hit.nz * (hit.depth + 0.02);
+    // The obstacle's own velocity along the push (other cars move).
+    const o = hit.car ?? hit.police;
+    const on = o ? (o.dx * hit.nx + o.dz * hit.nz) * o.v : 0;
     const wx = -s * car.vx - c * car.vy, wz = -c * car.vx + s * car.vy;
-    const vn = wx * hit.nx + wz * hit.nz;
-    if (vn < 0) {
-      // Remove the push into the wall (plus a 20% bounce), scrub 30% of the slide along it.
-      const tx = (wx - vn * hit.nx) * 0.7, tz = (wz - vn * hit.nz) * 0.7;
-      const ux = tx - vn * 0.2 * hit.nx, uz = tz - vn * 0.2 * hit.nz;
+    const wn = wx * hit.nx + wz * hit.nz, rel = wn - on;
+    if (rel < 0) {
+      // Remove the push into it (plus a 20% bounce), scrub 30% of the slide along it.
+      const tx = (wx - wn * hit.nx) * 0.7, tz = (wz - wn * hit.nz) * 0.7;
+      const n = on - rel * 0.2;
+      const ux = tx + n * hit.nx, uz = tz + n * hit.nz;
       car.vx = -s * ux - c * uz;
       car.vy = -c * ux + s * uz;
       car.yawRate *= 0.5;
+      if (!impact || -rel > impact.speed) impact = { speed: -rel, hit, at, own: wn < -2 };
     }
   }
+  if (impact) crashed(impact);
+}
+
+// The car hit something at impact.speed (m/s).
+function crashed({ speed, hit, at, own }) {
+  // Which side took it: where the obstacle is, in the car's frame.
+  const s = Math.sin(car.heading), c = Math.cos(car.heading);
+  const ahead = -hit.nx * -s + -hit.nz * -c, right = -hit.nx * c + -hit.nz * -s;
+  const zone = Math.abs(ahead) > 0.6 ? (ahead > 0 ? 'front' : 'rear') : right > 0 ? 'right' : 'left';
+  const amount = car.crash(zone, speed);
+  if (speed < 2.5) return;
+  const k = Math.min(1, speed / 20);
+  sound.crash(k);
+  shake = Math.max(shake, 0.04 + 0.25 * k);
+  if (speed > 4) sparks(at[0], ROAD_LIFT + 0.4, at[1], hit.nx, hit.nz, k);
+  // Your doing: driving into another car (a patrol car is worse).
+  if (own && world.rules && hit.what !== 'wall') world.rules.report(hit.what === 'police' ? 'ramPolice' : 'crash');
+  if (amount > 0.02) flashDamage();
+}
+
+// --- the police and the HUD around them --------------------------------------
+let held = null; // busted: { until } (ms), the car waits, then goes back to the start
+let toastTimer = 0;
+function toast(text) {
+  if (!toastEl) return;
+  toastEl.textContent = text;
+  toastEl.classList.remove('show');
+  void toastEl.offsetWidth; // restart the fade
+  toastEl.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.remove('show'), 2600);
+}
+function flashDamage() {
+  const row = healthEl?.parentElement;
+  if (!row) return;
+  row.classList.remove('hit');
+  void row.offsetWidth;
+  row.classList.add('hit');
+}
+function banner(title, sub = '', kind = '') {
+  if (!bannerEl) return;
+  bannerEl.hidden = !title;
+  bannerEl.className = kind;
+  bannerEl.querySelector('b').textContent = title;
+  bannerEl.querySelector('span').textContent = sub;
+}
+
+function updatePolice(h, now) {
+  const p = world.police;
+  p.update(h, playerState(), car.wrecked);
+  world.traffic.extra = p.units;
+  for (const e of p.take()) {
+    if (e.kind === 'busted') {
+      const fine = 150 + e.points * 120;
+      held = { until: now + 3500 };
+      banner('Busted', `Fine: $${fine.toLocaleString('en-CA')} · back to the start`, 'busted');
+    } else if (e.kind === 'escaped') {
+      toast('You lost them');
+    }
+  }
+  let nearest = Infinity;
+  for (const u of p.units) nearest = Math.min(nearest, Math.hypot(u.x - car.x, u.z - car.z));
+  sound.sirens(p.state === 'pursuit' ? nearest : Infinity);
+}
+
+// Health, wanted level and speed limit, and the overlays: busted, wrecked,
+// red and blue at the screen's edges while patrol cars are close.
+function updateLawHud(cockpit) {
+  const hp = Math.round(car.health * 100);
+  healthEl.textContent = `${hp}%`;
+  healthBarEl.style.width = `${hp}%`;
+  healthBarEl.style.background = hp > 60 ? 'var(--gas)' : hp > 30 ? 'var(--accent)' : 'var(--brake)';
+  const p = world.police, limit = world.rules?.limit ?? null;
+  wantedRowEl.hidden = !p || p.state === 'clear'; // only while wanted
+  limitEl.hidden = !limit;
+  if (limit && limitEl.textContent !== String(limit)) limitEl.textContent = limit;
+  limitEl.classList.toggle('over', !!limit && Math.abs(car.speed * 3.6) > limit + 10);
+  if (p) {
+    const stars = '★'.repeat(p.level) + '☆'.repeat(5 - p.level);
+    if (starsEl.textContent !== stars) starsEl.textContent = stars;
+    starsEl.classList.toggle('on', p.wanted);
+    const st = p.status();
+    if (wantedEl.textContent !== st) wantedEl.textContent = st;
+    let near = Infinity;
+    for (const u of p.units) near = Math.min(near, Math.hypot(u.x - car.x, u.z - car.z));
+    pursuitEl.style.opacity = p.state === 'pursuit' ? Math.max(0.15, Math.min(1, 1 - near / 200)).toFixed(2) : '0';
+  } else pursuitEl.style.opacity = '0';
+  if (!held) banner(car.wrecked ? 'Wrecked' : '', car.wrecked ? 'Press Reset (R) to tow it and repair' : '', 'wrecked');
+  // A cracked windshield, seen from the seat.
+  const crack = cockpit ? Math.max(0, Math.min(1, (car.damage.front - 0.2) / 0.5)) : 0;
+  crackEl.style.opacity = crack.toFixed(2);
 }
 
 // Physics runs on its own fixed clock, faster than the screen refreshes: each
@@ -803,6 +1011,13 @@ function physicsTick(h, controls) {
     after = track.locate(car.x, car.z);
   }
   if (!track.open) updateLap(after.index, simTime); // the open map has no clock
+  if (world.rules && !held) {
+    world.rules.update(h, car, after);
+    for (const o of world.rules.take()) {
+      world.police.add(o.points);
+      toast(`${o.label}  +${o.points}`);
+    }
+  }
   if (lap.start !== null && !lap.done) ghost.record(simTime - lap.start, car);
   wheelPositions().forEach((w, i) => skids.track(i, w.x, w.y, w.z, w.sliding));
 }
@@ -814,6 +1029,9 @@ function frame(now) {
   last = now;
 
   const controls = readControls(dt);
+  // Busted: the car is held (brakes on) until it's taken back to the start.
+  if (held) Object.assign(controls, { throttle: 0, brake: 0, steer: 0, handbrake: 1 });
+  if (held && now > held.until) { held = null; controls.reset = true; }
   if (controls.toggleGhost) toggleGhost();
   if (controls.toggleView) toggleView();
   if (controls.toggleSound) { sound.toggle(); updateSoundBtn(); }
@@ -832,6 +1050,8 @@ function frame(now) {
   if (!where) { where = after = track.locate(car.x, car.z); surface = where.surface ?? world.offTrack(car.x, car.z, where); }
   // Traffic is scripted, not simulated: it moves once a frame by the physics time that passed.
   world.traffic?.update(ticks * PHYSICS_STEP, playerState());
+  if (world.police) updatePolice(ticks * PHYSICS_STEP, now);
+  updatePuffs(dt);
   sound.update(dt, car, surface);
 
   // Where the car is drawn: between the last two physics ticks.
@@ -847,7 +1067,14 @@ function frame(now) {
 
   // The body as the suspension holds it (see car.js), plus the kerb bounce.
   const b = car.body;
-  lean = { pitch: b.pitch + kerb.pitch, roll: b.roll + kerb.roll, lift: kerb.lift - clamp(b.heave, -0.1, 0.1), wheels: kerb.wheels };
+  // A crushed corner sits lower: the nose (or tail) drops, the body leans to
+  // the hit side (seen from outside; from the seat it would just tilt the view).
+  const dmg = car.damage, sag = view === 'cockpit' ? 0 : 1;
+  lean = {
+    pitch: b.pitch + kerb.pitch + sag * (-0.05 * dmg.front + 0.04 * dmg.rear),
+    roll: b.roll + kerb.roll + sag * 0.045 * (dmg.left - dmg.right),
+    lift: kerb.lift - clamp(b.heave, -0.1, 0.1), wheels: kerb.wheels,
+  };
   const carY = terrainHeight(shown.x, shown.z);
 
   // Chase camera: lag behind the car, smoothed.
@@ -881,6 +1108,13 @@ function frame(now) {
     eyePos = [cam.x, cam.y, cam.z];
     viewMat = lookAt(eyePos, [shown.x, carY + 1, shown.z], [0, 1, 0]);
   }
+  if (shake > 0.002) {
+    // After a crash the view jolts, then settles.
+    const j = [0, 1, 2].map(() => (Math.random() - 0.5) * shake);
+    eyePos = eyePos.map((v, i) => v + j[i]);
+    viewMat = multiply(viewMat, basis([-j[0], -j[1], -j[2]], [1, 0, 0], [0, 1, 0], [0, 0, 1]));
+  }
+  shake *= Math.exp(-dt * 7);
   const proj = perspective(cockpit ? fovy * 1.1 : fovy, aspect, cockpit ? 0.05 : 0.1, world.far);
   const viewProj = multiply(proj, viewMat);
   streamCells(eyePos[0], eyePos[2]);
@@ -936,6 +1170,7 @@ function frame(now) {
   if (world.traffic) {
     const ss = world.streetSigns;
     drawTraffic(eyePos);
+    if (world.police) drawPolice(eyePos, now / 1000);
     gl.disable(gl.CULL_FACE);
     const lit = cells.filter((c) => c.furniture);
     for (const { furniture: f } of lit) {
@@ -949,9 +1184,10 @@ function frame(now) {
     gl.uniform1i(uTextured, 0);
     gl.enable(gl.CULL_FACE);
   }
-  drawCar(shown, CAR_COLORS, 1, lean, !cockpit);
+  drawCar(shown, damagedColors(), 1, lean, !cockpit);
   if (cockpit) drawCockpit();
   drawGhost(clock);
+  drawPuffs();
 
   speedEl.textContent = Math.abs(car.speed * 3.6).toFixed(0).padStart(3, ' ');
   speedEl.classList.toggle('grass', !where.onTrack && surface !== 'road');
@@ -969,11 +1205,12 @@ function frame(now) {
   loadEl.classList.toggle('light', front + rear < 85);
   updateGMeter();
   updateTires();
+  updateLawHud(cockpit);
   if (track.open) {
     // The street the car is on (or beside).
     const name = after.name || ' ';
     if (sectionEl.textContent !== name) sectionEl.textContent = name;
-    minimap.draw(car, world.traffic?.cars);
+    minimap.draw(car, world.traffic?.cars, world.police?.units, now / 1000);
   } else if (track.sections) {
     // Name of the corner or stretch the car is in (the last one started).
     const s = track.sections;

@@ -81,6 +81,7 @@ export class Traffic {
     this.clock = 0;
     this.cars = [];
     this.nextId = 1;
+    this.extra = []; // other cars to brake for: the police's
     this.buildGraph();
   }
 
@@ -288,6 +289,7 @@ export class Traffic {
       }
     }
     test(player.x, player.z, 4.6, player.speed, null);
+    for (const u of this.extra) test(u.x, u.z, u.length, u.v, null); // patrol cars (police.js)
     // Two cars that see each other (nose to nose in a crossing): the older one goes.
     if (best?.other) {
       const o = best.other, rx = c.x - o.x, rz = c.z - o.z, f = rx * o.dx + rz * o.dz;
@@ -438,6 +440,7 @@ export class Traffic {
       if (Math.abs(f) > hl || Math.abs(l) > hw) return;
       const df = hl - Math.abs(f), dl = hw - Math.abs(l);
       const r = df < dl ? { nx: c.dx * Math.sign(f), nz: c.dz * Math.sign(f), depth: df } : { nx: -c.dz * Math.sign(l), nz: c.dx * Math.sign(l), depth: dl };
+      r.car = c; // what was hit, for how fast it was going (crash damage)
       if (!best || r.depth > best.depth) best = r;
     };
     // The cell and its neighbors: a car can reach over a cell's edge.

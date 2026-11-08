@@ -98,8 +98,8 @@ export class Minimap {
     return c;
   }
 
-  // others: the traffic, as dots.
-  draw(car, others = []) {
+  // others: the traffic, as dots; police: patrol cars, flashing red and blue.
+  draw(car, others = [], police = [], t = 0) {
     if (!this.city) return;
     const c = this.canvas, dpr = Math.min(devicePixelRatio, 2);
     const W = Math.round(c.clientWidth * dpr), H = Math.round(c.clientHeight * dpr);
@@ -132,6 +132,13 @@ export class Minimap {
     for (const o of others) {
       g.beginPath();
       g.arc((o.x - car.x) / SCALE, (o.z - car.z) / SCALE, 2.6, 0, 2 * Math.PI);
+      g.fill();
+    }
+    const flash = Math.floor(t * 4) % 2 === 0;
+    for (const u of police) {
+      g.fillStyle = flash ? '#ff3b30' : '#3b7bff';
+      g.beginPath();
+      g.arc((u.x - car.x) / SCALE, (u.z - car.z) / SCALE, 6, 0, 2 * Math.PI);
       g.fill();
     }
     g.setTransform(1, 0, 0, 1, 0, 0);

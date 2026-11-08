@@ -132,7 +132,56 @@ export class Sound {
     t.kerb = gain(0);
     t.kerbOsc.connect(filter('lowpass', 180, 1)).connect(t.kerb).connect(master);
 
+    // Police siren: two detuned square waves, swept by sirens().
+    const sr = this.s = {};
+    sr.a = osc('square', 700);
+    sr.b = osc('square', 703);
+    sr.gain = gain(0);
+    const sirenLp = filter('lowpass', 2600, 0.7);
+    sr.a.connect(sirenLp); sr.b.connect(sirenLp);
+    sirenLp.connect(sr.gain).connect(master);
+    this.noise = noise;
+    this.filter = filter;
+    this.gain = gain;
+
     if (!this.on || document.hidden) ctx.suspend();
+  }
+
+  // A crash: a burst of crunching noise and a thump, louder the harder (0..1).
+  crash(strength) {
+    if (!this.ctx || this.ctx.state !== 'running' || strength <= 0) return;
+    const ctx = this.ctx, now = ctx.currentTime, k = Math.min(1, strength);
+    const src = ctx.createBufferSource();
+    src.buffer = this.noise;
+    const lp = this.filter('lowpass', 900 + 2500 * k, 0.8), g = this.gain(0);
+    src.connect(lp).connect(g).connect(this.master);
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(0.25 + 0.9 * k, now + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.25 + 0.5 * k);
+    src.start(now, Math.random());
+    src.stop(now + 0.9);
+    const o = ctx.createOscillator(), og = this.gain(0);
+    o.type = 'sine';
+    o.frequency.setValueAtTime(90, now);
+    o.frequency.exponentialRampToValueAtTime(35, now + 0.25);
+    o.connect(og).connect(this.master);
+    og.gain.setValueAtTime(0.6 * k, now);
+    og.gain.exponentialRampToValueAtTime(0.0001, now + 0.3);
+    o.start(now);
+    o.stop(now + 0.35);
+  }
+
+  // Sirens of the nearest patrol car `d` m away (Infinity: none): a slow wail,
+  // a fast yelp when it's close.
+  sirens(d) {
+    if (!this.ctx || this.ctx.state !== 'running') return;
+    const now = this.ctx.currentTime, sr = this.s;
+    const loud = Number.isFinite(d) ? clamp(1 - d / 400, 0, 1) ** 1.5 : 0;
+    const period = d < 70 ? 0.4 : 3.6, u = (now % period) / period;
+    const f = d < 70 ? 650 + 700 * (u < 0.5 ? u * 2 : 2 - u * 2) : 650 + 650 * (0.5 - 0.5 * Math.cos(2 * Math.PI * u));
+    sr.a.frequency.setTargetAtTime(f, now, 0.01);
+    sr.b.frequency.setTargetAtTime(f * 1.004, now, 0.01);
+    sr.gain.gain.setTargetAtTime(0.07 * loud, now, 0.05);
   }
 
   // Engine speed for this car, and the gear it's in (GT3).
