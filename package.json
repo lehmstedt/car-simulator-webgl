@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "npx --yes http-server -c-1 -p 8080 .",
-    "bundle": "node scripts/bundle.mjs"
+    "bundle": "node scripts/bundle.mjs",
+    "test": "node scripts/smoke.mjs"
   }
 }

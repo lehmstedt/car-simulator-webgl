@@ -7,13 +7,17 @@
 //   seen at a low angle, over a speckle of light stones;
 // - sand, grass, gravel: rough, no reflection; sand glints in the sun;
 // - city walls (facade, curtain): a grid of windows from the wall's UVs (meters
-//   along the wall, meters up), glassy and mirroring the sky.
+//   along the wall, meters up), glassy and mirroring the sky. Some stretches of a
+//   brick wall's ground floor are shops: a wide window under a colored awning.
+//   Walls darken toward the sidewalk, where less of the sky reaches them;
+// - shadow: the soft dark patch under a car, or a pool of light, in the draw's
+//   color (a quad with UVs from -1 to 1).
 // Fine detail fades out with distance (per pixel footprint), so it never shimmers.
 
 export const MAT = {
   matte: 0, grass: 1, asphalt: 2, sand: 3, gravel: 4, paint: 5, glass: 6, rubber: 7,
   line: 8, metal: 9, concrete: 10, leaves: 11, bark: 12, kerb: 13, straw: 14,
-  facade: 15, curtain: 16, water: 17, lamp: 18, signal: 19,
+  facade: 15, curtain: 16, water: 17, lamp: 18, signal: 19, shadow: 20,
 };
 
 export const SCENE_VS = `#version 300 es
@@ -94,6 +98,7 @@ void main() {
   float refl = 0.08;  // how much of the environment it mirrors
   float metal = 0.0, h = 0.0, sparkle = 0.0, wrap = 0.0, fmin = 0.0;
   float emit = 0.0; // lamps: their own light, no shading
+  float alpha = uAlpha;
 
   if (uMat == M_GRASS) {
     float mid = tn(p, 0.25), blade = tc(p, 14.0);
@@ -150,8 +155,34 @@ void main() {
     float win = step(0.24, f.x) * step(f.x, 0.76) * step(0.3, f.y) * step(f.y, 0.85);
     win = mix(win, 0.28, smoothstep(0.1, 0.35, fp / 2.6));
     alb *= 0.86 + 0.16 * tn(p, 0.7) + 0.05 * tc(p, 12.0);
-    alb = mix(alb, vec3(0.09, 0.12, 0.16) + 0.07 * hash(floor(g) + 3.1), win);
-    gloss = mix(0.15, 0.92, win); refl = mix(0.03, 0.7, win);
+    // Some windows have their blinds down, a few a lamp on.
+    float room = hash(floor(g) + 3.1);
+    vec3 pane = vec3(0.09, 0.12, 0.16) + 0.07 * room;
+    pane = mix(pane, vec3(0.55, 0.53, 0.47), step(0.82, room) * step(f.y, 0.3 + 0.55 * fract(room * 7.0)) * 0.8);
+    pane = mix(pane, vec3(0.75, 0.6, 0.35), step(room, 0.07) * 0.6);
+    float glassy = win;
+    // Shops: every 7.8 m of wall may be one, with a wide window and an awning over it.
+    vec2 shop = vec2(floor(vUV.x / 7.8), floor(N.x * 3.0 + 0.5) + 5.0 * floor(N.z * 3.0 + 0.5));
+    float kind = hash(shop + 17.0), sx = fract(vUV.x / 7.8);
+    if (kind > 0.62 && vUV.y < 3.4) {
+      float inShop = step(0.06, sx) * step(sx, 0.94);
+      float front = inShop * step(0.5, vUV.y) * step(vUV.y, 2.55);
+      float door = step(0.78, sx) * step(sx, 0.9) * step(vUV.y, 2.3) * step(0.08, vUV.y);
+      float awn = inShop * step(2.55, vUV.y) * step(vUV.y, 3.15);
+      float lod = smoothstep(0.25, 0.9, fp);
+      vec3 tint = 0.25 + 0.6 * vec3(hash(shop + 1.0), hash(shop + 2.0), hash(shop + 3.0));
+      win = mix(max(front, door), win, lod);
+      glassy = win * (1.0 - awn);
+      // What's in the window: dark, with the goods on display in the shop's color lower down.
+      pane = mix(vec3(0.16, 0.17, 0.18) + 0.25 * tint * step(vUV.y, 1.1 + 0.5 * hash(floor(vec2(vUV.x * 1.3, 2.0)))), pane, lod);
+      // Striped or plain awning in the shop's color.
+      vec3 cloth = tint * (kind > 0.8 ? 0.75 + 0.25 * step(0.5, fract(vUV.x / 0.5)) : 1.0);
+      alb = mix(alb, cloth, awn * (1.0 - lod));
+    }
+    alb = mix(alb, pane, win);
+    // Less sky reaches the foot of a wall.
+    alb *= mix(0.72, 1.0, smoothstep(0.0, 2.2, vUV.y));
+    gloss = mix(0.15, 0.92, glassy); refl = mix(0.03, 0.7, glassy);
   } else if (uMat == M_CURTAIN) {
     // Glass tower: tinted panes in a grid of light mullions.
     vec2 g = vec2(vUV.x / 1.6, vUV.y / 3.8), f = fract(g);
@@ -175,6 +206,12 @@ void main() {
     float state = u < 26.0 ? 2.0 : u < 29.0 ? 1.0 : 0.0;
     vec3 col = lamp < 0.5 ? vec3(1.0, 0.12, 0.08) : lamp < 1.5 ? vec3(1.0, 0.7, 0.1) : vec3(0.25, 1.0, 0.65);
     alb = abs(state - lamp) < 0.5 ? col * 1.4 : col * 0.06 + 0.02;
+    emit = 1.0;
+  } else if (uMat == M_SHADOW) {
+    // Darkest under the middle of the car, gone at the quad's edge.
+    vec2 q = abs(vUV);
+    float edge = max(q.x, q.y), corner = length(max(q - 0.55, 0.0)) / 0.45;
+    alpha *= (1.0 - smoothstep(0.55, 1.0, max(edge, corner)));
     emit = 1.0;
   } else if (uMat == M_STRAW) {
     alb *= 0.72 + 0.5 * tn(p, 7.0) * (0.7 + 0.3 * tc(p, 30.0));
@@ -211,5 +248,5 @@ void main() {
   if (emit > 0.5) c = alb;
   // Haze: far things fade into the sky's horizon color.
   float fog = smoothstep(120.0, 750.0, distance(vWorld, uCam)) * 0.85;
-  outColor = vec4(mix(c, uFog, fog), uAlpha);
+  outColor = vec4(mix(c, uFog, fog), uMat == M_SHADOW ? alpha * (1.0 - fog) : alpha);
 }`;

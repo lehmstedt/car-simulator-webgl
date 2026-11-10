@@ -99,7 +99,7 @@ export class Minimap {
   }
 
   // others: the traffic, as dots; police: patrol cars, flashing red and blue.
-  draw(car, others = [], police = [], t = 0) {
+  draw(car, others = [], police = [], t = 0, heli = null) {
     if (!this.city) return;
     const c = this.canvas, dpr = Math.min(devicePixelRatio, 2);
     const W = Math.round(c.clientWidth * dpr), H = Math.round(c.clientHeight * dpr);
@@ -140,6 +140,13 @@ export class Minimap {
       g.beginPath();
       g.arc((u.x - car.x) / SCALE, (u.z - car.z) / SCALE, 6, 0, 2 * Math.PI);
       g.fill();
+    }
+    if (heli) {
+      // The helicopter: a ring, filled while it has the player in sight.
+      const hx = (heli.x - car.x) / SCALE, hz = (heli.z - car.z) / SCALE;
+      g.strokeStyle = '#ffffff'; g.lineWidth = 2.5;
+      g.beginPath(); g.arc(hx, hz, 9, 0, 2 * Math.PI); g.stroke();
+      if (heli.sees) { g.fillStyle = flash ? 'rgba(255,255,255,.75)' : 'rgba(255,255,255,.35)'; g.fill(); }
     }
     g.setTransform(1, 0, 0, 1, 0, 0);
     // The car: an arrow pointing up.

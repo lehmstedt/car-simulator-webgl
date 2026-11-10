@@ -140,6 +140,12 @@ export class Sound {
     const sirenLp = filter('lowpass', 2600, 0.7);
     sr.a.connect(sirenLp); sr.b.connect(sirenLp);
     sirenLp.connect(sr.gain).connect(master);
+    // Helicopter: low noise chopped by the blades, set by heli().
+    const hl = this.h = {};
+    hl.gain = gain(0);
+    const chop = gain(0.5), lfo = osc('sine', 13), depth = gain(0.5);
+    lfo.connect(depth).connect(chop.gain);
+    noiseSrc().connect(filter('lowpass', 260, 0.9)).connect(chop).connect(hl.gain).connect(master);
     this.noise = noise;
     this.filter = filter;
     this.gain = gain;
@@ -169,6 +175,42 @@ export class Sound {
     og.gain.exponentialRampToValueAtTime(0.0001, now + 0.3);
     o.start(now);
     o.stop(now + 0.35);
+  }
+
+  // A car horn `d` m away: two notes, half a second.
+  horn(d = 10) {
+    if (!this.ctx || this.ctx.state !== 'running') return;
+    const ctx = this.ctx, now = ctx.currentTime, loud = clamp(1 - d / 120, 0, 1) ** 2 * 0.22;
+    if (loud < 0.005) return;
+    const g = this.gain(0), lp = this.filter('lowpass', 1800, 0.7), len = 0.35 + Math.random() * 0.4;
+    lp.connect(g).connect(this.master);
+    for (const f of [392, 494]) {
+      const o = ctx.createOscillator();
+      o.type = 'sawtooth'; o.frequency.value = f * (0.97 + Math.random() * 0.06);
+      o.connect(lp); o.start(now); o.stop(now + len + 0.05);
+    }
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(loud, now + 0.02);
+    g.gain.setValueAtTime(loud, now + len - 0.04);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + len);
+  }
+
+  // A tire going flat: a sharp hiss.
+  hiss() {
+    if (!this.ctx || this.ctx.state !== 'running') return;
+    const ctx = this.ctx, now = ctx.currentTime, src = ctx.createBufferSource(), g = this.gain(0);
+    src.buffer = this.noise;
+    src.connect(this.filter('highpass', 2500, 0.7)).connect(g).connect(this.master);
+    g.gain.setValueAtTime(0.5, now);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.9);
+    src.start(now, Math.random()); src.stop(now + 1);
+  }
+
+  // The police helicopter `d` m away (Infinity: none).
+  heli(d) {
+    if (!this.ctx || this.ctx.state !== 'running') return;
+    const loud = Number.isFinite(d) ? clamp(1 - d / 500, 0, 1) ** 2 : 0;
+    this.h.gain.gain.setTargetAtTime(0.5 * loud, this.ctx.currentTime, 0.2);
   }
 
   // Sirens of the nearest patrol car `d` m away (Infinity: none): a slow wail,

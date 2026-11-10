@@ -7,6 +7,7 @@
 // - Wrong way: against a one-way street, for over a second.
 // - Off the road: on the sidewalk or the lawns, for over a second.
 // - Crashes into other cars (reported by the collisions, main.js).
+// - Scaring people on the sidewalk (they jump out of the way: pedestrians.js).
 //
 // Each offence is worth points toward the wanted level (police.js). The same
 // offence counts again only after a while, so one long speeding run isn't
@@ -27,6 +28,7 @@ export const OFFENCES = {
   offRoad: { points: 1, label: 'Driving on the sidewalk', again: 12 },
   crash: { points: 2, label: 'Hit another car', again: 2 },
   ramPolice: { points: 3, label: 'Rammed a police car', again: 2 },
+  pedestrian: { points: 2, label: 'Endangered a pedestrian', again: 4 },
 };
 
 export class Rules {

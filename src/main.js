@@ -11,7 +11,9 @@ import { Ghost } from './ghost.js';
 import { BOT_LAPS } from './bot-lap.js';
 import { buildTrack, LAYOUTS, LINK_LAYOUTS, ROAD_LIFT } from './track.js';
 import { Signs, createTexture } from './signs.js';
-import { Traffic, carMeshes } from './traffic.js';
+import { Traffic } from './traffic.js';
+import { Pedestrians } from './pedestrians.js';
+import { createCityRenderer } from './cityrender.js';
 import { Rules } from './rules.js';
 import { Police } from './police.js';
 import { buildTrees, buildTreesAt } from './trees.js';
@@ -57,6 +59,8 @@ const toastEl = document.getElementById('toast');
 const bannerEl = document.getElementById('banner');
 const pursuitEl = document.getElementById('pursuit');
 const crackEl = document.getElementById('crack');
+const finesRowEl = document.getElementById('fines-row');
+const finesEl = document.getElementById('fines');
 const G_SCALE = 28; // px per g on the G-meter (grid rings at 0.5 g and 1 g)
 const gTrail = [];
 const gl = canvas.getContext('webgl2', { antialias: true });
@@ -225,6 +229,7 @@ function buildMontrealWorld() {
     // The rules of the road, and the police who come after those who break them.
     rules: new Rules(t, traffic),
     police: new Police(t, traffic),
+    people: new Pedestrians(t),
     streetSigns: { texture: createTexture(gl, stopSignCanvas()) },
     track: t,
     // Lots of buildings and trees: far ones (mostly lost in the haze) aren't drawn.
@@ -265,47 +270,6 @@ function stopSignCanvas() {
   g.font = `bold ${Math.round(n * 0.25)}px "Arial Narrow", Arial, sans-serif`;
   g.fillText('ARRÊT', n / 2, n / 2 + n * 0.01, n * 0.78);
   return cv;
-}
-
-// Traffic cars: one mesh per shape and part, drawn per car in its color.
-const TRAFFIC_CARS = carMeshes().map((m) => Object.fromEntries(Object.entries(m).map(([k, v]) => [k, createMesh(gl, program, v)])));
-const TRAFFIC_DRAW = 320; // m
-
-function drawTraffic(eye) {
-  for (const c of world.traffic.cars) {
-    if (Math.hypot(c.x - eye[0], c.z - eye[2]) > TRAFFIC_DRAW) continue;
-    const m = TRAFFIC_CARS[c.kind.index];
-    const B = basis([c.x, ROAD_LIFT, c.z], [-c.dz, 0, c.dx], [0, 1, 0], [-c.dx, 0, -c.dz]);
-    draw(m.paint, B, c.color, 'paint');
-    draw(m.glass, B, [0.1, 0.12, 0.15], 'glass');
-    draw(m.trim, B, [0.06, 0.06, 0.07], 'rubber');
-    draw(m.head, B, [0.86, 0.88, 0.9], 'glass');
-    draw(m.tail, B, c.braking ? [1, 0.12, 0.08] : [0.5, 0.05, 0.05], c.braking ? 'lamp' : 'paint');
-  }
-}
-
-// Patrol cars: the traffic's sedan in white with a blue stripe and a light
-// bar on the roof, flashing red and blue while they chase.
-const POLICE_WHITE = [0.92, 0.93, 0.95], POLICE_BLUE = [0.04, 0.12, 0.42];
-function drawPolice(eye, t) {
-  const m = TRAFFIC_CARS[0];
-  const flash = Math.floor(t * 5) % 2 === 0;
-  for (const u of world.police.units) {
-    if (Math.hypot(u.x - eye[0], u.z - eye[2]) > TRAFFIC_DRAW) continue;
-    const F = { o: [u.x, ROAD_LIFT, u.z], right: [-u.dz, 0, u.dx], up: [0, 1, 0], back: [-u.dx, 0, -u.dz] };
-    const B = basis(F.o, F.right, F.up, F.back);
-    draw(m.paint, B, POLICE_WHITE, 'paint');
-    draw(m.glass, B, [0.1, 0.12, 0.15], 'glass');
-    draw(m.trim, B, [0.06, 0.06, 0.07], 'rubber');
-    draw(m.head, B, [0.86, 0.88, 0.9], 'glass');
-    draw(m.tail, B, [0.5, 0.05, 0.05], 'paint');
-    const box = (x, y, z, sx, sy, sz, color, mat) => draw(meshes.cube, basis(toWorld(F, x, y, z), F.right, F.up, F.back, sx, sy, sz), color, mat);
-    for (const side of [-1, 1]) box(side * 0.915, 0.58, 0, 0.02, 0.16, 3.9, POLICE_BLUE, 'paint'); // stripes
-    box(0, 0.83, -0.2, 1.5, 0.01, 1.0, POLICE_BLUE, 'paint');                                     // hood
-    box(0, 1.47, 0.2, 1.15, 0.06, 0.3, [0.1, 0.1, 0.12], 'matte');                               // light bar
-    box(-0.3, 1.54, 0.2, 0.48, 0.1, 0.26, flash ? [1, 0.1, 0.08] : [0.35, 0.04, 0.04], flash ? 'lamp' : 'glass');
-    box(0.3, 1.54, 0.2, 0.48, 0.1, 0.26, flash ? [0.08, 0.1, 0.3] : [0.15, 0.35, 1], flash ? 'glass' : 'lamp');
-  }
 }
 
 // Smoke from a damaged engine and sparks from crashes: small boxes that
@@ -430,6 +394,8 @@ for (const name of Object.keys(VARIANTS)) {
   };
 }
 const DEFAULT_CAR = 'gt3';
+// Traffic, police, people and their shadows (the open map).
+const city = createCityRenderer(gl, program, draw, SUN);
 const model = (variant) => MODELS[variant] ?? MODELS[DEFAULT_CAR];
 
 // Grid starts a few meters before the line, facing along the track.
@@ -510,7 +476,9 @@ function switchDrive() {
 function resetRace() {
   car.reset(...startPose());
   streamCells(car.x, car.z, true);
+  world.traffic?.unpark(car.x, car.z, 9);
   world.traffic?.reset(playerState());
+  world.people?.reset(playerState());
   resetWheel();
   cam.x = car.x + Math.sin(car.heading) * 9;
   cam.z = car.z + Math.cos(car.heading) * 9;
@@ -902,6 +870,26 @@ function crashed({ speed, hit, at, own }) {
   if (speed > 4) sparks(at[0], ROAD_LIFT + 0.4, at[1], hit.nx, hit.nz, k);
   // Your doing: driving into another car (a patrol car is worse).
   if (own && world.rules && hit.what !== 'wall') world.rules.report(hit.what === 'police' ? 'ramPolice' : 'crash');
+  if (hit.car) world.traffic.hit(hit.car, speed);
+  if (amount > 0.02) flashDamage();
+}
+
+// A patrol car drove into the player's car (police.js): it's shoved the way
+// the patrol car was going and spun around its middle, and the side that took
+// it is damaged.
+function shoved(e) {
+  const s = Math.sin(car.heading), c = Math.cos(car.heading);
+  const rx = e.x - car.x, rz = e.z - car.z, ahead = rx * -s + rz * -c, right = rx * c + rz * -s;
+  const zone = Math.abs(ahead) / 2.3 > Math.abs(right) / 0.95 ? (ahead > 0 ? 'front' : 'rear') : right > 0 ? 'right' : 'left';
+  const dv = Math.min(12, e.speed * 0.45), wx = e.nx * dv, wz = e.nz * dv;
+  car.vx += -s * wx - c * wz;
+  car.vy += -c * wx + s * wz;
+  car.yawRate -= clamp((rx * wz - rz * wx) * 0.3, -2.5, 2.5);
+  const amount = car.crash(zone, e.speed * 0.8);
+  const k = Math.min(1, e.speed / 20);
+  sound.crash(k);
+  shake = Math.max(shake, 0.05 + 0.25 * k);
+  sparks(e.x, ROAD_LIFT + 0.5, e.z, -e.nx, -e.nz, k);
   if (amount > 0.02) flashDamage();
 }
 
@@ -932,22 +920,53 @@ function banner(title, sub = '', kind = '') {
   bannerEl.querySelector('span').textContent = sub;
 }
 
+// What being caught costs, by wanted level ($), plus some per point.
+const FINES = [0, 150, 600, 1500, 4000, 10000];
+let fines = 0; // paid so far, kept between visits
+try { fines = Number(localStorage.getItem('fines')) || 0; } catch {}
+const money = (n) => `$${n.toLocaleString('en-CA')}`;
+
 function updatePolice(h, now) {
-  const p = world.police;
-  p.update(h, playerState(), car.wrecked);
-  world.traffic.extra = p.units;
+  const p = world.police, ps = playerState();
+  p.update(h, ps, car.wrecked);
+  world.traffic.extra = p.cars;
   for (const e of p.take()) {
     if (e.kind === 'busted') {
-      const fine = 150 + e.points * 120;
-      held = { until: now + 3500 };
-      banner('Busted', `Fine: $${fine.toLocaleString('en-CA')} · back to the start`, 'busted');
+      const fine = FINES[e.level] + e.points * 50;
+      fines += fine;
+      try { localStorage.setItem('fines', fines); } catch {}
+      // One star: a ticket at the roadside, and on you go. More: the car is
+      // taken away and you start over.
+      const ticket = e.level <= 1 && !car.wrecked;
+      held = { until: now + (ticket ? 2800 : 4000), ticket };
+      banner(ticket ? 'Ticket' : 'Busted', ticket ? `Fine: ${money(fine)} · drive on` : `Fine: ${money(fine)} · car impounded, back to the start`, 'busted');
     } else if (e.kind === 'escaped') {
       toast('You lost them');
+    } else if (e.kind === 'level') {
+      toast(`${'★'.repeat(e.level)}  ${e.note}`);
+    } else if (e.kind === 'evading') {
+      toast(`Evading the police  +${e.points}`);
+    } else if (e.kind === 'rammed') {
+      shoved(e);
+    } else if (e.kind === 'spiked') {
+      car.flats = 1;
+      sound.hiss();
+      toast('Spike strip · tires flat');
+    } else if (e.kind === 'roadblock') {
+      toast(e.spikes ? 'Roadblock and spikes ahead' : 'Roadblock ahead');
+    } else if (e.kind === 'heli') {
+      toast(e.on ? 'Helicopter overhead' : 'Helicopter leaving for fuel');
     }
   }
   let nearest = Infinity;
   for (const u of p.units) nearest = Math.min(nearest, Math.hypot(u.x - car.x, u.z - car.z));
   sound.sirens(p.state === 'pursuit' ? nearest : Infinity);
+  sound.heli(p.heli ? Math.hypot(p.heli.dist ?? 900, p.heli.y) : Infinity);
+
+  // The street's own life: people jumping out of the way, drivers on the horn.
+  world.people.update(h, ps);
+  for (const e of world.people.take()) if (e.sidewalk && !held) world.rules.report('pedestrian');
+  for (const e of world.traffic.take()) if (e.kind === 'honk') sound.horn(Math.hypot(e.car.x - car.x, e.car.z - car.z));
 }
 
 // Health, wanted level and speed limit, and the overlays: busted, wrecked,
@@ -962,6 +981,8 @@ function updateLawHud(cockpit) {
   limitEl.hidden = !limit;
   if (limit && limitEl.textContent !== String(limit)) limitEl.textContent = limit;
   limitEl.classList.toggle('over', !!limit && Math.abs(car.speed * 3.6) > limit + 10);
+  finesRowEl.hidden = !p || !fines;
+  if (p && fines) { const f = money(fines); if (finesEl.textContent !== f) finesEl.textContent = f; }
   if (p) {
     const stars = '★'.repeat(p.level) + '☆'.repeat(5 - p.level);
     if (starsEl.textContent !== stars) starsEl.textContent = stars;
@@ -969,7 +990,7 @@ function updateLawHud(cockpit) {
     const st = p.status();
     if (wantedEl.textContent !== st) wantedEl.textContent = st;
     let near = Infinity;
-    for (const u of p.units) near = Math.min(near, Math.hypot(u.x - car.x, u.z - car.z));
+    for (const u of p.cars) near = Math.min(near, Math.hypot(u.x - car.x, u.z - car.z));
     pursuitEl.style.opacity = p.state === 'pursuit' ? Math.max(0.15, Math.min(1, 1 - near / 200)).toFixed(2) : '0';
   } else pursuitEl.style.opacity = '0';
   if (!held) banner(car.wrecked ? 'Wrecked' : '', car.wrecked ? 'Press Reset (R) to tow it and repair' : '', 'wrecked');
@@ -1031,7 +1052,11 @@ function frame(now) {
   const controls = readControls(dt);
   // Busted: the car is held (brakes on) until it's taken back to the start.
   if (held) Object.assign(controls, { throttle: 0, brake: 0, steer: 0, handbrake: 1 });
-  if (held && now > held.until) { held = null; controls.reset = true; }
+  if (held && now > held.until) {
+    // A ticket: the slate is clean, drive on. Arrested: back to the start.
+    if (held.ticket) { world.police.reset(); world.rules.reset(); banner(''); } else controls.reset = true;
+    held = null;
+  }
   if (controls.toggleGhost) toggleGhost();
   if (controls.toggleView) toggleView();
   if (controls.toggleSound) { sound.toggle(); updateSoundBtn(); }
@@ -1147,6 +1172,19 @@ function frame(now) {
   for (const l of world.layers) if (l.top) draw(l.mesh, identity(), l.color, l.mat);
   for (const c of cells) for (const [mesh, color, mat, top] of c.layers) if (top) draw(mesh, identity(), color, mat);
   if (skids.used) draw(skids.mesh, identity(), [0.12, 0.12, 0.13], 'rubber');
+  if (world.traffic) {
+    // Soft shadows under the cars and the people, and the helicopter's light.
+    gl.enable(gl.BLEND);
+    gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE);
+    gl.depthMask(false);
+    const casters = city.casters(eyePos, world.traffic, world.police, world.people.people);
+    const v = model(car.variant).spec;
+    casters.push({ x: shown.x, z: shown.z, dx: -Math.sin(shown.heading), dz: -Math.cos(shown.heading), length: v.length, width: v.width, height: 1.2 });
+    city.shadows(casters, ROAD_LIFT + 0.01, eyePos);
+    city.spot(world.police.heli, shown, ROAD_LIFT + 0.012);
+    gl.depthMask(true);
+    gl.disable(gl.BLEND);
+  }
   gl.disable(gl.POLYGON_OFFSET_FILL);
   for (const c of cells) {
     if (!c.trees || !seen(c, world.treeDistance)) continue;
@@ -1169,8 +1207,10 @@ function frame(now) {
   gl.uniform1i(uTextured, 0);
   if (world.traffic) {
     const ss = world.streetSigns;
-    drawTraffic(eyePos);
-    if (world.police) drawPolice(eyePos, now / 1000);
+    city.traffic(world.traffic, ROAD_LIFT, eyePos, now / 1000);
+    city.police(world.police, ROAD_LIFT, eyePos, now / 1000);
+    city.people(world.people.people, ROAD_LIFT * 0.6, eyePos);
+    city.heli(world.police.heli, eyePos, now / 1000);
     gl.disable(gl.CULL_FACE);
     const lit = cells.filter((c) => c.furniture);
     for (const { furniture: f } of lit) {
@@ -1210,7 +1250,7 @@ function frame(now) {
     // The street the car is on (or beside).
     const name = after.name || ' ';
     if (sectionEl.textContent !== name) sectionEl.textContent = name;
-    minimap.draw(car, world.traffic?.cars, world.police?.units, now / 1000);
+    minimap.draw(car, world.traffic?.cars, world.police?.cars, now / 1000, world.police?.heli);
   } else if (track.sections) {
     // Name of the corner or stretch the car is in (the last one started).
     const s = track.sections;
@@ -1223,6 +1263,8 @@ function frame(now) {
 
   requestAnimationFrame(frame);
 }
+// For poking at the game from the browser's console: open the page with ?debug.
+if (location.search.includes('debug')) window.game = { get world() { return world; }, car };
 // Start once the open map's data is unpacked (it's packed in the page).
 loadOpenMap().then(() => {
   setLayout(layout);

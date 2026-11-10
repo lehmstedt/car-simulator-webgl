@@ -12,18 +12,33 @@
 // - Stop signs (map data, plus the Montreal habit filled in where the data has
 //   none: side streets stop at bigger ones, residential crossings stop all
 //   ways). A car stops fully, then goes when the crossing is clear, in turn.
-// - Cars live within ~500 m of the player: far ones are taken away and new
+// - Cars live within ~450 m of the player: far ones are taken away and new
 //   ones put on streets out of sight, so the traffic around stays the same.
+//   Sedans, SUVs, hatchbacks, taxis, vans, pickups and city buses (on the
+//   bigger streets), with turn signals before a turn.
+// - A car the player hits stops with its hazard lights on for a while; cars
+//   pull over to the right and stop for a patrol car coming up behind them
+//   with its siren on.
+// - Parked cars line the bigger streets and the left side of one-way side
+//   streets (made with a cell's lights and signs): solid, but they never move.
 // - The island has ~185,000 pieces of street: their lanes are made only when
 //   a car comes near (a crossing's lanes when a car reaches it), and the
 //   lights and signs per map cell, when it is drawn.
 
 import { nodeKey } from './openmap.js';
 import { cube, cylinder } from './geometry.js';
+import { loft, profile } from './bodies.js';
 import { ROAD_LIFT } from './track.js';
 
-const TRAFFIC_COUNT = 70;          // cars around the player
-const SPAWN_NEAR = 450, SPAWN_FAR = 560; // m: cars are put this far out at most, taken away past SPAWN_FAR
+const TRAFFIC_COUNT = 150;         // cars around the player
+const SPAWN_NEAR = 400, SPAWN_FAR = 500; // m: cars are put this far out at most, taken away past SPAWN_FAR
+// How readily a street gets a new car, by class: the big streets are the busy ones.
+const BUSY = { primary: 1, secondary: 1, tertiary: 0.8, residential: 0.4, unclassified: 0.35, living_street: 0.2 };
+const BUS_STREETS = new Set(['primary', 'secondary', 'tertiary']);
+const PARK_SLOT = 6.4;             // m of curb per parked car
+const PARK_CELL = 64;              // m: lookup grid for parked cars
+const HALT_TIME = 5;               // s a car stays stopped after being hit (plus a few)
+const SIREN_REACH = 45;            // m: cars make way for a siren this close behind
 const SIGNAL_CYCLE = 60;          // s: a light's full cycle
 const SIGNAL_GREEN = 26, SIGNAL_YELLOW = 3; // s, for each of the two ways; then all red until the other's turn
 const LANE_SPEED = { primary: 13.9, secondary: 13.9, tertiary: 12.5, residential: 9.7, unclassified: 9.7, living_street: 4.2 };
@@ -40,13 +55,13 @@ export function signalState(t, offset, phase) {
 const polyLength = (pts) => pts.reduce((s, p, i) => (i ? s + Math.hypot(p[0] - pts[i - 1][0], p[1] - pts[i - 1][1]) : 0), 0);
 
 // A polyline with its running lengths, for positions along it.
-function polyPath(pts) {
+export function polyPath(pts) {
   const cum = [0];
   for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
   return { pts, cum, len: cum[cum.length - 1] };
 }
 // Point and unit direction at distance s along a path.
-function pointAt(p, s, out) {
+export function pointAt(p, s, out) {
   const { pts, cum } = p;
   let i = 1;
   while (i < pts.length - 1 && cum[i] < s) i++;
@@ -82,6 +97,8 @@ export class Traffic {
     this.cars = [];
     this.nextId = 1;
     this.extra = []; // other cars to brake for: the police's
+    this.parked = new Map(); // parked cars, by PARK_CELL cell
+    this.events = [];        // 'honk': a driver the player annoyed
     this.buildGraph();
   }
 
@@ -233,7 +250,9 @@ export class Traffic {
     const roads = this.roadsAround(player);
     if (!roads.length) return null;
     for (let tries = 0; tries < 40; tries++) {
-      const lanes = this.lanesOf(roads[Math.floor(Math.random() * roads.length)]);
+      const road = roads[Math.floor(Math.random() * roads.length)];
+      if (Math.random() > (BUSY[road.cls] ?? 0.3)) continue;
+      const lanes = this.lanesOf(road);
       const lane = lanes[Math.floor(Math.random() * lanes.length)];
       if (!lane) continue;
       if (lane.len < 12) continue;
@@ -243,11 +262,17 @@ export class Traffic {
       if (lane.cars.some((o) => Math.abs(o.s - s) < 12)) continue;
       const next = this.choose(lane);
       if (!next) continue;
-      const kind = CAR_SHAPES[Math.floor(Math.random() * CAR_SHAPES.length)];
+      const kind = pickShape(BUS_STREETS.has(lane.road.cls) && lane.len > 30);
+      if (lane.cars.some((o) => Math.abs(o.s - s) < 8 + (kind.length + o.kind.length) / 2)) continue;
+      const taxi = kind.name === 'sedan' && Math.random() < 0.12;
       const c = {
         id: this.nextId++, lane, s, conn: null, next, v: lane.speed * 0.6, x: p.x, z: p.z, dx: p.dx, dz: p.dz,
-        kind, color: CAR_PAINTS[Math.floor(Math.random() * CAR_PAINTS.length)], mood: 0.88 + Math.random() * 0.2,
+        kind, color: taxi ? TAXI_PAINT : pickPaint(kind), taxi, mood: (0.88 + Math.random() * 0.2) * (kind.pace ?? 1),
         stoppedAt: null, stuck: 0, braking: false,
+        turn: 0,     // turn signal: -1 left, 1 right
+        halt: 0,     // s left stopped after a crash, hazards on
+        side: 0,     // m moved to the right of its lane, making way for a siren
+        honked: 0,   // clock when it last honked
       };
       lane.cars.push(c);
       this.cars.push(c);
@@ -288,7 +313,9 @@ export class Traffic {
         }
       }
     }
+    const before = best;
     test(player.x, player.z, 4.6, player.speed, null);
+    if (best !== before) best.player = true;
     for (const u of this.extra) test(u.x, u.z, u.length, u.v, null); // patrol cars (police.js)
     // Two cars that see each other (nose to nose in a crossing): the older one goes.
     if (best?.other) {
@@ -384,11 +411,25 @@ export class Traffic {
       }
       const a = this.ahead(c, player, look);
       if (a) target = Math.min(target, Math.max(0, Math.min(Math.sqrt(2 * 3.5 * Math.max(0, a.gap - 2)), a.v + (a.gap - 2 - c.v * 1.2) * 0.6)));
-      const acc = Math.max(-7, Math.min(1.8, (target - c.v) * 2));
+      // The player stopped right in front of it for a while: a honk.
+      if (a && a.player && a.gap < 6 && c.stuck > 2.5 && this.clock - c.honked > 6 && Math.abs(player.speed) < 0.5 && !this.waiting(c)) { c.honked = this.clock; this.events.push({ kind: 'honk', car: c }); }
+      // Hit a moment ago: stopped, hazards on.
+      if (c.halt > 0) { c.halt -= dt; target = 0; }
+      // A siren coming up behind: over to the right, and stop (not in a crossing).
+      const siren = !c.conn && this.sirenBehind(c);
+      if (siren) target = Math.min(target, 1.5);
+      c.side += Math.max(-dt * 1.2, Math.min(dt * 1.6, (siren ? this.room(c) : 0) - c.side));
+      // Signal for the turn ahead.
+      c.turn = 0;
+      if (c.next && (c.conn || c.lane.len - c.s < 45)) {
+        const t = c.lane.endDir[0] * c.next.startDir[1] - c.lane.endDir[1] * c.next.startDir[0];
+        c.turn = t > 0.4 ? 1 : t < -0.4 ? -1 : 0;
+      }
+      const acc = Math.max(-7, Math.min(c.kind.accel ?? 1.8, (target - c.v) * 2));
       c.braking = acc < -0.6 || (c.v < 0.3 && target < 0.3);
       c.v = Math.max(0, c.v + acc * dt);
       if (!c.conn && c.v < 0.05 && target < 0.05 && c.lane.len - c.s < 0.6) c.v = 0;
-      c.stuck = c.v < 0.2 ? c.stuck + dt : 0;
+      c.stuck = c.v < 0.2 && c.halt <= 0 ? c.stuck + dt : 0;
       this.advance(c, c.v * dt, player, gone);
     }
     for (const c of gone) this.remove(c);
@@ -427,7 +468,101 @@ export class Traffic {
       c.cs = 0;
     }
     pointAt(c.conn ?? c.lane, c.conn ? c.cs : c.s, o);
-    c.x = o.x; c.z = o.z; c.dx = o.dx; c.dz = o.dz;
+    c.x = o.x - o.dz * c.side; c.z = o.z + o.dx * c.side; c.dx = o.dx; c.dz = o.dz;
+  }
+
+  // Whether car c has its own reason to stand still: a red light or a stop sign ahead.
+  waiting(c) {
+    if (c.conn) return false;
+    const l = c.lane;
+    if (l.control === 'signal') return signalState(this.clock, l.to.signal.offset, l.phase) !== 'green';
+    return l.control === 'stop' && l.len - c.s < 25;
+  }
+
+  // A patrol car on its way (siren on) close behind car c, going the same way.
+  sirenBehind(c) {
+    for (const u of this.extra) {
+      if (u.static || u.v < 6) continue;
+      const rx = u.x - c.x, rz = u.z - c.z, f = rx * c.dx + rz * c.dz;
+      if (f > 0 || f < -SIREN_REACH || Math.abs(rz * c.dx - rx * c.dz) > 6) continue;
+      if (u.dx * c.dx + u.dz * c.dz > 0.5) return true;
+    }
+    return false;
+  }
+
+  // How far right of its lane car c can go before the curb (m).
+  room(c) {
+    const r = c.lane.road;
+    return Math.max(0, Math.min(1.7, r.w - c.lane.off - c.kind.width / 2 - 0.25));
+  }
+
+  // The player ran into car c at `speed` m/s: it stops, hazards on, for a while.
+  hit(c, speed) {
+    if (c.parked || speed < 2) return;
+    c.halt = HALT_TIME + Math.random() * 4;
+    c.v = 0;
+    if (this.clock - c.honked > 2) { c.honked = this.clock; this.events.push({ kind: 'honk', car: c }); }
+  }
+
+  // What happened since the last call (honks, for the sound).
+  take() {
+    const e = this.events;
+    this.events = [];
+    return e;
+  }
+
+  // --- parked cars -----------------------------------------------------------
+  // Along road r's curbs, where no lane runs: both sides of the bigger streets,
+  // the left side of one-way side streets. The same cars every time (by the
+  // road's number), made when the road's cell is drawn.
+  park(r) {
+    if (r.parked || !r.a) return;
+    r.parked = [];
+    const big = BUS_STREETS.has(r.cls), sideStreet = r.oneWay && (r.cls === 'residential' || r.cls === 'unclassified');
+    if (!big && !sideStreet) return;
+    const path = r.path ?? (r.path = polyPath(r.pts));
+    const s0 = r.a.r + 9, s1 = path.len - r.b.r - 9;
+    if (s1 - s0 < PARK_SLOT) return;
+    let seed = (r.index * 2654435761) >>> 0;
+    const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+    const fill = big ? 0.32 + 0.3 * rnd() : 0.45 + 0.35 * rnd(); // how full this street's curb is
+    const o = {};
+    for (const side of big ? [1, -1] : [-1]) {
+      for (let s = s0 + PARK_SLOT / 2; s < s1; s += PARK_SLOT) {
+        if (rnd() > fill) continue;
+        const kind = PARKED_SHAPES[Math.floor(rnd() * PARKED_SHAPES.length)];
+        pointAt(path, s + (rnd() - 0.5) * 0.8, o);
+        // Right of the way the points run is (-dz, dx); cars face the way their side drives.
+        const off = side * (r.w - kind.width / 2 - 0.22), face = r.oneWay ? 1 : side;
+        const c = {
+          parked: true, x: o.x - o.dz * off, z: o.z + o.dx * off, dx: o.dx * face, dz: o.dz * face, v: 0,
+          kind, color: CAR_PAINTS[Math.floor(rnd() * CAR_PAINTS.length)], braking: false, turn: 0, halt: 0,
+        };
+        r.parked.push(c);
+        const k = Math.floor(c.x / PARK_CELL) * 7919 + Math.floor(c.z / PARK_CELL);
+        if (!this.parked.has(k)) this.parked.set(k, []);
+        this.parked.get(k).push(c);
+      }
+    }
+  }
+
+  // Takes away the parked cars within r m of (x, z): where the player's car is put down.
+  unpark(x, z, r) {
+    for (const c of this.parkedNear(x, z, r)) {
+      for (const list of [this.parked.get(Math.floor(c.x / PARK_CELL) * 7919 + Math.floor(c.z / PARK_CELL))]) list.splice(list.indexOf(c), 1);
+    }
+  }
+
+  // Parked cars within r m of (x, z).
+  parkedNear(x, z, r, out = []) {
+    const i0 = Math.floor((x - r) / PARK_CELL), i1 = Math.floor((x + r) / PARK_CELL);
+    const j0 = Math.floor((z - r) / PARK_CELL), j1 = Math.floor((z + r) / PARK_CELL);
+    for (let i = i0; i <= i1; i++) {
+      for (let j = j0; j <= j1; j++) {
+        for (const c of this.parked.get(i * 7919 + j) ?? []) if (Math.hypot(c.x - x, c.z - z) < r) out.push(c);
+      }
+    }
+    return out;
   }
 
   // Whether (x, z) is inside a traffic car, and if so the way out (as the
@@ -446,6 +581,13 @@ export class Traffic {
     // The cell and its neighbors: a car can reach over a cell's edge.
     const ci = Math.floor(x / CAR_CELL), cj = Math.floor(z / CAR_CELL);
     for (let i = ci - 1; i <= ci + 1; i++) for (let j = cj - 1; j <= cj + 1; j++) for (const c of this.grid?.get(i * 7919 + j) ?? []) hit(c);
+    const pi = Math.floor(x / PARK_CELL), pj = Math.floor(z / PARK_CELL), fx = x / PARK_CELL - pi, fz = z / PARK_CELL - pj;
+    // A parked car reaches at most ~3 m over its cell's edge.
+    for (const i of fx < 0.06 ? [pi - 1, pi] : fx > 0.94 ? [pi, pi + 1] : [pi]) {
+      for (const j of fz < 0.06 ? [pj - 1, pj] : fz > 0.94 ? [pj, pj + 1] : [pj]) {
+        for (const c of this.parked.get(i * 7919 + j) ?? []) if (Math.abs(c.x - x) < 4 && Math.abs(c.z - z) < 4) hit(c);
+      }
+    }
     return best;
   }
 
@@ -483,6 +625,20 @@ export class Traffic {
       put(p[0] + nx, p[1] + nz); put(p[0] - nx, p[1] - nz); put(q[0] - nx, q[1] - nz);
       put(p[0] + nx, p[1] + nz); put(q[0] - nx, q[1] - nz); put(q[0] + nx, q[1] + nz);
     };
+    for (const r of roads) {
+      this.park(r);
+      // Street lamps down the bigger streets, on alternate sides, arm over the roadway.
+      if (!r.a || !BUS_STREETS.has(r.cls)) continue;
+      const path = r.path ?? (r.path = polyPath(r.pts)), o = {};
+      for (let s = r.a.r + 14, k = r.index; s < path.len - r.b.r - 10; s += 38, k++) {
+        pointAt(path, s, o);
+        const side = k % 2 ? 1 : -1, rgt = [-o.dz * side, o.dx * side], face = [o.dx, o.dz];
+        const off = r.w + 0.7, base = [o.x + rgt[0] * off, o.z + rgt[1] * off];
+        box(poles, [base[0], 3.6, base[1]], rgt, face, 0.14, 7.2, 0.14);
+        box(poles, [base[0] - rgt[0] * 1.0, 7.15, base[1] - rgt[1] * 1.0], rgt, face, 2.1, 0.09, 0.09);
+        box(poles, [base[0] - rgt[0] * 1.9, 7.08, base[1] - rgt[1] * 1.9], rgt, face, 0.55, 0.12, 0.26);
+      }
+    }
     for (const lane of roads.flatMap((r) => this.lanesOf(r))) {
       if (lane.control !== 'signal' && lane.control !== 'stop') continue;
       const r = lane.road, [dx, dz] = lane.endDir, rgt = [-dz, dx], face = [-dx, -dz];
@@ -520,44 +676,119 @@ export class Traffic {
 }
 
 // --- the cars' look ----------------------------------------------------------
-// Three shapes, in car frame (x right, y up, z back), on the ground. Parts by
-// how they're drawn: paint, glass, dark trim and tires, head and tail lights.
+// Shapes in car frame (x right, y up, z back), on the ground; lengths along
+// the car are `s`, meters back from the front bumper. `top` is the painted
+// body's top edge along s, `glass` the greenhouse on it (from, to, roof height,
+// windscreen and rear window run). Parts by how they're drawn: paint, glass,
+// dark trim and tires, head and tail lights, turn signals per side, and an
+// accent (the bus's stripe).
 const CAR_SHAPES = [
-  { name: 'sedan', length: 4.7, width: 1.82, body: [0.28, 0.82], cabin: [0.82, 1.42, -0.55, 1.45], wheel: 0.33 },
-  { name: 'suv', length: 4.8, width: 1.92, body: [0.36, 1.02], cabin: [1.02, 1.72, -0.95, 1.95], wheel: 0.37 },
-  { name: 'hatch', length: 4.1, width: 1.76, body: [0.3, 0.84], cabin: [0.84, 1.45, -0.6, 1.85], wheel: 0.31 },
+  { name: 'sedan', weight: 6, length: 4.7, width: 1.82, clear: 0.22, wheel: 0.33,
+    top: [[0, 0.6], [0.25, 0.76], [1.3, 0.9], [3.7, 0.92], [4.5, 0.9], [4.7, 0.72]], glass: [1.3, 3.95, 1.43, 0.8, 0.85] },
+  { name: 'suv', weight: 5, length: 4.8, width: 1.92, clear: 0.3, wheel: 0.37,
+    top: [[0, 0.78], [0.25, 0.98], [1.25, 1.08], [4.6, 1.1], [4.8, 0.92]], glass: [1.25, 4.72, 1.72, 0.6, 0.3] },
+  { name: 'hatch', weight: 5, length: 4.1, width: 1.76, clear: 0.24, wheel: 0.31,
+    top: [[0, 0.62], [0.25, 0.8], [1.1, 0.92], [3.95, 0.95], [4.1, 0.78]], glass: [1.1, 4.03, 1.46, 0.7, 0.45] },
+  { name: 'pickup', weight: 2, length: 5.5, width: 2.0, clear: 0.34, wheel: 0.4,
+    top: [[0, 0.85], [0.25, 1.05], [1.4, 1.15], [5.3, 1.15], [5.5, 1.0]], glass: [1.4, 3.35, 1.82, 0.55, 0.15] },
+  { name: 'van', weight: 2, length: 5.4, width: 2.0, clear: 0.32, wheel: 0.36, pace: 0.94, boxy: true,
+    paints: [[0.9, 0.9, 0.9], [0.86, 0.86, 0.84], [0.78, 0.8, 0.82], [0.9, 0.78, 0.2], [0.2, 0.32, 0.5]],
+    top: [[0, 0.85], [0.2, 1.05], [0.9, 1.2], [1.85, 1.25], [2.05, 2.3], [5.3, 2.3], [5.4, 2.2]], glass: [0.85, 2.02, 1.95, 0.6, 0.04] },
+  // A city bus: only on the bigger streets, slow away from its stops.
+  { name: 'bus', weight: 1.2, bus: true, length: 12, width: 2.55, clear: 0.34, wheel: 0.48, pace: 0.85, accel: 1.1, boxy: true,
+    axles: [2.7, 8.6], paints: [[0.93, 0.94, 0.95]], accent: [0.0, 0.42, 0.75],
+    top: [[0, 2.85], [0.3, 3.05], [11.8, 3.05], [12, 2.9]] },
 ];
+const PARKED_SHAPES = CAR_SHAPES.filter((k) => !k.bus && k.name !== 'van');
 const CAR_PAINTS = [
   [0.9, 0.9, 0.9], [0.08, 0.08, 0.09], [0.55, 0.56, 0.58], [0.33, 0.34, 0.36], [0.12, 0.2, 0.42],
   [0.55, 0.08, 0.08], [0.85, 0.85, 0.82], [0.2, 0.3, 0.25], [0.7, 0.62, 0.48], [0.15, 0.32, 0.6],
+  [0.62, 0.64, 0.66], [0.1, 0.11, 0.13], [0.36, 0.12, 0.1], [0.8, 0.45, 0.1],
 ];
+const TAXI_PAINT = [0.95, 0.74, 0.08];
+
+// A shape for a new car, by weight (buses only where they fit).
+function pickShape(busOk) {
+  const opts = busOk ? CAR_SHAPES : CAR_SHAPES.filter((k) => !k.bus);
+  let r = Math.random() * opts.reduce((s, k) => s + k.weight, 0);
+  for (const k of opts) if ((r -= k.weight) < 0) return k;
+  return opts[0];
+}
+const pickPaint = (k) => { const p = k.paints ?? CAR_PAINTS; return p[Math.floor(Math.random() * p.length)]; };
 
 export function carMeshes() {
   const C = cube(), W = cylinder(12);
   return CAR_SHAPES.map((k) => {
-    const m = { paint: [], glass: [], trim: [], head: [], tail: [] };
+    const m = { paint: {}, glass: {}, trim: {}, head: {}, tail: {}, blinkL: {}, blinkR: {}, accent: {} };
+    for (const key in m) { m[key].positions = []; m[key].normals = []; }
     const box = (part, src, cx, cy, cz, sx, sy, sz) => {
-      const P = part.positions ?? (part.positions = []), N = part.normals ?? (part.normals = []);
       for (let i = 0; i < src.positions.length; i += 3) {
-        P.push(cx + src.positions[i] * sx, cy + src.positions[i + 1] * sy, cz + src.positions[i + 2] * sz);
+        part.positions.push(cx + src.positions[i] * sx, cy + src.positions[i + 1] * sy, cz + src.positions[i + 2] * sz);
         // Scaled normals stay right for boxes and the wheel's axis-aligned parts.
-        N.push(src.normals[i], src.normals[i + 1], src.normals[i + 2]);
+        part.normals.push(src.normals[i], src.normals[i + 1], src.normals[i + 2]);
       }
     };
-    for (const key in m) m[key] = {};
-    const L = k.length, Wd = k.width, [b0, b1] = k.body, [c0, c1, cf, cb] = k.cabin;
-    box(m.paint, C, 0, (b0 + b1) / 2, 0, Wd, b1 - b0, L);                                   // body
-    box(m.glass, C, 0, (c0 + c1) / 2 - 0.02, (cf + cb) / 2 - 0.15, Wd - 0.2, c1 - c0, cb - cf); // cabin
-    box(m.paint, C, 0, c1, (cf + cb) / 2 - 0.15, Wd - 0.26, 0.05, cb - cf - 0.2);             // roof
-    box(m.trim, C, 0, b0 + 0.08, -L / 2 + 0.02, Wd + 0.02, 0.16, 0.1);                       // bumpers
-    box(m.trim, C, 0, b0 + 0.08, L / 2 - 0.02, Wd + 0.02, 0.16, 0.1);
-    const ax = L / 2 - 0.95;
-    for (const sx of [-1, 1]) for (const sz of [-1, 1]) box(m.trim, W, sx * (Wd / 2 - 0.12), k.wheel, sz * ax, 0.24, 2 * k.wheel, 2 * k.wheel);
+    // A lofted surface (bodies.js), added as plain triangles.
+    const skin = (part, stations, seg, n) => {
+      const l = loft(stations, seg, n);
+      for (const i of l.indices) {
+        part.positions.push(l.positions[i * 3], l.positions[i * 3 + 1], l.positions[i * 3 + 2]);
+        part.normals.push(l.normals[i * 3], l.normals[i * 3 + 1], l.normals[i * 3 + 2]);
+      }
+    };
+    const L = k.length, hw = k.width / 2, toZ = (s) => s - L / 2;
+    const axles = k.axles ?? [0.92, L - 0.98];
+    const top = profile(k.top);
+    // The body's lower edge rises over each wheel (the arches); its corners are rounded in plan.
+    const R = k.wheel + 0.07;
+    const arch = (s) => {
+      let y = k.clear;
+      for (const c of axles) { const d = s - c; if (Math.abs(d) < R) y = Math.max(y, k.wheel + Math.sqrt(R * R - d * d)); }
+      return y;
+    };
+    const width = (s) => hw - 0.12 * Math.max(0, 1 - Math.min(s, L - s) / 0.4) ** 2;
+    const stations = [];
+    for (let i = 0, n = Math.round(L / 0.16); i <= n; i++) {
+      const s = (L * i) / n;
+      stations.push({ z: toZ(s), y0: arch(s), y1: top(s), w: width(s), pinch: k.boxy ? 0.02 : 0.05 });
+    }
+    skin(m.paint, stations, 12, k.boxy ? 7 : 4.5);
+    // Dark tub between the wheels, so the arches aren't see-through.
+    box(m.trim, C, 0, (k.clear + 0.02 + Math.min(...k.top.map((t) => t[1])) - 0.05) / 2, 0, k.width - 0.56, Math.min(...k.top.map((t) => t[1])) - 0.07 - k.clear, L - 0.3);
+    if (k.glass) {
+      const [g0, g1, roofY, rf, rr] = k.glass, pinch = k.boxy ? 0.1 : 0.2, gw = hw - 0.09;
+      const roof = profile([[g0, top(g0)], [g0 + rf, roofY], [g1 - rr, roofY], [g1, top(g1) + 0.02]]);
+      const gs = [];
+      for (let i = 0, n = Math.round((g1 - g0) / 0.18); i <= n; i++) { const s = g0 + ((g1 - g0) * i) / n; gs.push({ z: toZ(s), y0: top(s) - 0.07, y1: roof(s), w: gw, pinch }); }
+      skin(m.glass, gs, 12, 3);
+      const rs = [];
+      for (let i = 0, a = g0 + rf * 0.92, b = g1 - rr * 0.9, n = Math.max(2, Math.round((b - a) / 0.3)); i <= n; i++) { const s = a + ((b - a) * i) / n; rs.push({ z: toZ(s), y0: roofY - 0.08, y1: roofY + 0.012, w: gw * (1 - pinch) * 0.97 }); }
+      skin(m.paint, rs, 10, 3);
+      for (const sx of [-1, 1]) box(m.paint, C, sx * (hw + 0.07), top(g0 + 0.35) + 0.1, toZ(g0 + 0.4), 0.16, 0.1, 0.08); // mirrors
+    } else {
+      // The bus: a band of windows down each side, a tall windscreen, a rear window.
+      for (const sx of [-1, 1]) box(m.glass, C, sx * (hw - 0.01), 2.0, 0.2, 0.03, 1.0, L - 1.6);
+      box(m.glass, C, 0, 1.95, toZ(0) + 0.02, k.width - 0.3, 1.5, 0.06);
+      box(m.glass, C, 0, 2.2, toZ(L) - 0.02, k.width - 0.5, 0.8, 0.06);
+      for (const sx of [-1, 1]) box(m.accent, C, sx * (hw - 0.005), 0.95, 0, 0.03, 0.5, L - 0.5);
+      box(m.accent, C, 0, 0.95, toZ(0) + 0.03, k.width - 0.2, 0.5, 0.06);
+      for (const sx of [-1, 1]) box(m.paint, C, sx * (hw + 0.12), 2.3, toZ(0.25), 0.2, 0.3, 0.08); // mirrors
+    }
+    const yF = top(0) - 0.12, yR = top(L) - 0.1;
+    box(m.trim, C, 0, k.clear + 0.1, toZ(0) - 0.01, k.width - 0.2, 0.16, 0.1);   // bumpers
+    box(m.trim, C, 0, k.clear + 0.1, toZ(L) + 0.01, k.width - 0.2, 0.16, 0.1);
+    box(m.trim, C, 0, yF - 0.02, toZ(0) + 0.005, k.width * 0.4, 0.1, 0.06);       // grille
+    for (const c of axles) for (const sx of [-1, 1]) box(m.trim, W, sx * (hw - 0.13), k.wheel, toZ(c), 0.24, 2 * k.wheel, 2 * k.wheel);
     for (const sx of [-1, 1]) {
-      box(m.head, C, sx * (Wd / 2 - 0.3), b1 - 0.16, -L / 2 - 0.005, 0.38, 0.12, 0.02);
-      box(m.tail, C, sx * (Wd / 2 - 0.25), b1 - 0.14, L / 2 + 0.005, 0.32, 0.13, 0.02);
+      box(m.head, C, sx * (hw - 0.48), yF, toZ(0) + 0.01, 0.36, 0.11, 0.06);
+      box(m.tail, C, sx * (hw - 0.46), yR, toZ(L) - 0.01, 0.34, 0.12, 0.06);
+      const b = sx < 0 ? m.blinkL : m.blinkR;
+      box(b, C, sx * (hw - 0.2), yF, toZ(0) + 0.02, 0.14, 0.1, 0.08);
+      box(b, C, sx * (hw - 0.2), yR, toZ(L) - 0.02, 0.14, 0.1, 0.08);
     }
     return m;
   });
 }
 CAR_SHAPES.forEach((k, i) => { k.index = i; });
+// The shapes behind carMeshes(), in the same order (the police drive the first two).
+carMeshes.shapes = CAR_SHAPES;

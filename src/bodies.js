@@ -6,7 +6,7 @@
 // Lofted body: rounded cross-sections (a superellipse from `y0` to `y1`, half
 // width `w`) joined along z. `dip` lowers the middle of the top (a hood between
 // raised fenders); `pinch` narrows the top relative to the bottom (tumblehome).
-function loft(stations, seg = 40, n = 4) {
+export function loft(stations, seg = 40, n = 4) {
   const positions = [], indices = [];
   const ring = seg;
   for (const st of stations) {
@@ -81,7 +81,7 @@ function withNormals(positions, indices) {
 }
 
 // Piecewise-linear profile: pts = [[s, value], ...] sorted by s.
-const profile = (pts) => (s) => {
+export const profile = (pts) => (s) => {
   if (s <= pts[0][0]) return pts[0][1];
   for (let i = 1; i < pts.length; i++) {
     if (s <= pts[i][0]) {

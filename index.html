@@ -44,7 +44,7 @@
   #gear { font-size: 18px; font-weight: 700; color: var(--accent); min-width: 1ch; }
   .times { font-size: 13px; font-variant-numeric: tabular-nums; }
   .times .unit { min-width: 4.6em; display: inline-block; }
-  #section-row[hidden], .lap-only[hidden] { display: none; }
+  #section-row[hidden], #fines-row[hidden], .lap-only[hidden] { display: none; }
   /* Open map: the streets around the car, heading up. */
   #minimap { position: static; width: 130px; height: 130px; border-radius: 8px; display: block; margin-top: 2px; }
   #minimap[hidden] { display: none; }
@@ -250,6 +250,7 @@
   <div class="row"><span id="speed">  0</span><span class="unit">km/h</span><span id="gear">N</span><span id="limit" class="limit" hidden title="Speed limit (km/h)">50</span></div>
   <div class="times health" title="What's left of the car: crashes damage it"><span class="unit">Car</span><span id="health">100%</span><span class="bar"><i id="health-bar"></i></span></div>
   <div id="wanted-row" class="times" hidden aria-live="polite"><span id="stars" title="Wanted level">☆☆☆☆☆</span><span id="wanted"></span></div>
+  <div class="times" id="fines-row" hidden title="Fines paid so far"><span class="unit">Fines</span><span id="fines">$0</span></div>
   <div class="times" id="section-row" hidden><span id="section"></span></div>
   <div class="times lap-only"><span class="unit" id="lap-label">Lap</span><span id="lap">–:––.––</span></div>
   <div class="times lap-only"><span class="unit">Best</span><span id="best">–:––.––</span></div>

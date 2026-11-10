@@ -90,6 +90,19 @@ streets come from the segments' access restrictions; traffic signals and stop si
 `highway=traffic_signals` and `highway=stop`, with `stop=all`), matched to the crossing they stand at.
 The traffic itself is `src/traffic.js`.
 
+### Traffic and people
+
+About 150 cars drive the streets around you (`src/traffic.js`): sedans, SUVs, hatchbacks, taxis, vans,
+pickups, and city buses on the bigger streets. They keep their lane, signal their turns, stop at lights
+and stop signs, pull over to the right for a siren coming up behind them, and stop with their hazard
+lights on for a while when you hit them; sit in their way and they honk. Parked cars line the bigger
+streets and the left side of one-way side streets: solid, but they never move.
+
+People walk the sidewalks (`src/pedestrians.js`), turn the corners, stop a moment, and jump out of the
+way of a car coming at them. Your car never touches them, but scaring them on the sidewalk is an offence.
+
+Cars and people are drawn by `src/cityrender.js`, with a soft shadow under each.
+
 ### Police
 
 Break the rules in Montreal and the police come after you (`src/rules.js`, `src/police.js`):
@@ -97,14 +110,30 @@ Break the rules in Montreal and the police come after you (`src/rules.js`, `src/
 - **Offences**: speeding (over the street's limit by more than 10 km/h for 2 s; 50 km/h on main
   streets, 40 on side streets, shown by the sign next to the speed), running a red light, rolling
   through a stop sign (you must slow under 5 km/h), driving the wrong way up a one-way street,
-  driving on the sidewalk or the lawns, and crashing into other cars (worse into a patrol car).
-- Each offence adds points; points make the **wanted level** (1–5 stars), which sets how many
-  patrol cars chase you (up to 4) and how fast they drive (100–140 km/h).
+  driving on the sidewalk or the lawns, scaring people there, and crashing into other cars (worse
+  into a patrol car).
+- Each offence adds points; points make the **wanted level** (1–5 stars). Running from patrol cars
+  that have you in sight adds a point every 14 s, so a chase that goes on gets worse by itself.
+- What each level brings:
+
+  | Stars | What comes after you | If caught |
+  | ----- | -------------------- | --------- |
+  | ★     | One patrol car that follows and pulls you over | A ticket ($150 and up); drive on |
+  | ★★    | Two; they nudge you off your line | Arrested, car impounded, back to the start ($600 and up) |
+  | ★★★   | Three, some sent ahead along the streets you're likely to take; they ram; a roadblock on your street | $1,500 and up |
+  | ★★★★  | Five, heavy SUVs among them; two roadblocks; a helicopter that sees over the buildings | $4,000 and up |
+  | ★★★★★ | Six; spike strips before the roadblocks: flat tires, much less grip and a lot of drag | $10,000 and up |
+
+  Fines add up in the HUD and are kept between visits.
 - Patrol cars (white, blue stripe, flashing light bar, siren) come from streets out of sight and find
-  their way to you through the street graph; once they see you, they drive straight at you. The traffic
-  brakes for them, and they show on the minimap as red/blue dots.
-- **Busted**: a patrol car right beside you while you're stopped (or wrecked) for 3 s: a fine, and back to the start.
-- **Escape**: once they've found you, stay out of their sight (buildings hide you) for 15 s, quicker when far away.
+  their way through the street graph. Each has a job: chase from behind, pull alongside, or get ahead of
+  you. A ram shoves and spins your car and damages the side that took it. They show on the minimap as
+  red/blue dots, the helicopter as a white ring.
+- **They know what they see.** A patrol car sees you when close with no building between; the helicopter
+  sees from above while it's on station (40 s, then 22 s away for fuel). Unseen, they drive to where you
+  were last seen (or last broke a rule) and search the streets around, further out the way you were heading.
+- **Busted**: a patrol car right beside you while you're stopped (or wrecked) for 3 s (1.5 s at 5 stars).
+- **Escape**: stay out of their sight for 10 s at one star, up to 28 s at five; quicker when far away.
 
 ## Damage
 
@@ -245,6 +274,15 @@ To build a single self-contained page (used for the shareable artifact):
 npm run bundle       # writes dist/car-simulator.html
 ```
 
+The bundler takes the modules in the order of their imports, and fails if two of them declare the same
+top-level name (they share one scope in the bundle).
+
+```sh
+npm test             # smoke test of the city's simulation, without a browser
+```
+
+Add `?debug` to the URL to get `window.game` (the world and the car) in the browser's console.
+
 ## Controls
 
 On phones, slide the steering slider (bottom-left) left or right to turn — let go and it recenters, and use the brake/gas pedals bottom-right.
@@ -269,12 +307,15 @@ With the keyboard, holding A/D turns the wheel gradually; let go and it returns 
 - `src/main.js` — setup, render loop, chase and cockpit cameras, lap timing, HUD
 - `src/track.js` — road spline, road/kerb/guardrail meshes, surface test
 - `src/nordschleife.js` — Nürburgring paths (Nordschleife, GP circuit, links), road heights and ground grid (generated)
-- `src/audio.js` — synthesized engine (GT3 flat-six with auto-shifting PDK, Yaris three-cylinder e-CVT and motor whine), tire sounds (squeal, off-road crunch, kerb rumble, road roar, wind), crashes and police sirens
+- `src/audio.js` — synthesized engine (GT3 flat-six with auto-shifting PDK, Yaris three-cylinder e-CVT and motor whine), tire sounds (squeal, off-road crunch, kerb rumble, road roar, wind), crashes, horns, police sirens and the helicopter
 - `src/trees.js` — low-poly trees, merged into a few meshes
 - `src/sky.js` — sky dome with sun and clouds; its horizon color is the distance haze
 - `src/car.js` — car physics (dynamic bicycle model, tire grip, crash damage) and the cars' specs
 - `src/rules.js` — Montreal's rules of the road and the offences against them
-- `src/police.js` — wanted level, patrol cars chasing through the streets, busted and escaped
+- `src/police.js` — wanted level and what each star brings: patrol cars, roadblocks, spike strips, the helicopter
+- `src/traffic.js` — street graph, traffic lights, traffic and parked cars, the cars' shapes
+- `src/pedestrians.js` — people on the sidewalks
+- `src/cityrender.js` — draws traffic, police, people and their shadows
 - `src/skids.js` — skid marks
 - `src/ghost.js` — best-lap recording and ghost replay
 - `src/bot-lap.js` — Claude's runs (generated by `scripts/autodrive.mjs`)
@@ -287,3 +328,4 @@ With the keyboard, holding A/D turns the wheel gradually; let go and it returns 
 - `scripts/autodrive.mjs` — self-driving bot that sets Claude's ghost runs
 - `scripts/nordschleife.py` — builds `src/nordschleife.js` (Nordschleife, GP circuit, links) from OpenStreetMap and Copernicus DEM data
 - `scripts/bundle.mjs` — inlines everything into one HTML file
+- `scripts/smoke.mjs` — the simulation smoke test (`npm test`)
