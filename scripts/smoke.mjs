@@ -3,12 +3,22 @@
 // who drives the streets at speed while the wanted level climbs. Fails on any
 // exception, on NaN positions, and if the police never do their job.
 //
-//   npm test
+//   npm test              (node scripts/smoke.mjs [seed])
 import { loadOpenMap, buildOpenMap } from '../src/openmap.js';
 import { Traffic } from '../src/traffic.js';
 import { Pedestrians } from '../src/pedestrians.js';
 import { Police } from '../src/police.js';
 import { MONTREAL } from '../src/montreal.js';
+
+// The same run every time: the simulation's dice are replaced by a seeded generator.
+let seed = Number(process.argv[2] ?? 7) >>> 0;
+Math.random = () => {
+  seed = (seed + 0x6d2b79f5) >>> 0;
+  let t = seed;
+  t = Math.imul(t ^ (t >>> 15), t | 1);
+  t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+};
 
 const assert = (ok, msg) => { if (!ok) { console.error(`FAIL: ${msg}`); process.exitCode = 1; } };
 

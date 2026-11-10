@@ -19,6 +19,7 @@ import { Police } from './police.js';
 import { buildTrees, buildTreesAt } from './trees.js';
 import { buildOpenMap, loadOpenMap, BRICKS } from './openmap.js';
 import { Minimap } from './minimap.js';
+import { StartPicker } from './picker.js';
 import { Sky, HORIZON, ZENITH, SUN_DIR } from './sky.js';
 import { SCENE_VS, SCENE_FS, MAT } from './shading.js';
 
@@ -61,6 +62,11 @@ const pursuitEl = document.getElementById('pursuit');
 const crackEl = document.getElementById('crack');
 const finesRowEl = document.getElementById('fines-row');
 const finesEl = document.getElementById('fines');
+const crossRowEl = document.getElementById('cross-row');
+const crossEl = document.getElementById('cross');
+const damageBtn = document.getElementById('damage');
+const policeBtn = document.getElementById('police');
+const startBtn = document.getElementById('start');
 const G_SCALE = 28; // px per g on the G-meter (grid rings at 0.5 g and 1 g)
 const gTrail = [];
 const gl = canvas.getContext('webgl2', { antialias: true });
@@ -399,10 +405,31 @@ const city = createCityRenderer(gl, program, draw, SUN);
 const model = (variant) => MODELS[variant] ?? MODELS[DEFAULT_CAR];
 
 // Grid starts a few meters before the line, facing along the track.
+// On the open map, a start chosen on the map (picker.js) replaces the map's own.
+let customStart = null; // { x, z, heading }
+try {
+  const v = JSON.parse(localStorage.getItem('start') ?? 'null');
+  if (v && [v.x, v.z, v.heading].every(Number.isFinite)) customStart = v;
+} catch {}
 function startPose() {
+  if (track.open && customStart) return [customStart.x, customStart.z, customStart.heading];
   const { x, z, tangent: [tx, tz] } = track.grid;
   return [x, z, Math.atan2(-tx, -tz)];
 }
+
+// Game options (settings panel), kept between visits: crash damage, and the
+// police with the rules they enforce.
+const options = { damage: true, police: true };
+try { Object.assign(options, { damage: localStorage.getItem('damage') !== 'off', police: localStorage.getItem('police') !== 'off' }); } catch {}
+function updateOptionBtns() {
+  for (const [btn, on] of [[damageBtn, options.damage], [policeBtn, options.police]]) {
+    btn?.setAttribute('aria-pressed', String(on));
+    const b = btn?.querySelector('b'); if (b) b.textContent = on ? 'On' : 'Off';
+  }
+}
+updateOptionBtns();
+// A crash's damage to the player's car, if damage is on (car.js crash()).
+const takeDamage = (zone, speed) => (options.damage ? car.crash(zone, speed) : 0);
 
 let savedDrive = DEFAULT_CAR;
 try { savedDrive = localStorage.getItem('drive') in VARIANTS ? localStorage.getItem('drive') : DEFAULT_CAR; } catch {}
@@ -462,6 +489,8 @@ function setLayout(kind) {
   if (sectionRowEl) sectionRowEl.hidden = !track.sections && !track.open;
   // The open map has no laps: no timers, a minimap instead.
   for (const el of document.querySelectorAll('.lap-only')) el.hidden = !!track.open;
+  for (const el of document.querySelectorAll('.city-only')) el.hidden = !track.open;
+  if (picker.isOpen) picker.close();
   minimap.set(track.open ? track : null);
 }
 
@@ -862,7 +891,7 @@ function crashed({ speed, hit, at, own }) {
   const s = Math.sin(car.heading), c = Math.cos(car.heading);
   const ahead = -hit.nx * -s + -hit.nz * -c, right = -hit.nx * c + -hit.nz * -s;
   const zone = Math.abs(ahead) > 0.6 ? (ahead > 0 ? 'front' : 'rear') : right > 0 ? 'right' : 'left';
-  const amount = car.crash(zone, speed);
+  const amount = takeDamage(zone, speed);
   if (speed < 2.5) return;
   const k = Math.min(1, speed / 20);
   sound.crash(k);
@@ -885,7 +914,7 @@ function shoved(e) {
   car.vx += -s * wx - c * wz;
   car.vy += -c * wx + s * wz;
   car.yawRate -= clamp((rx * wz - rz * wx) * 0.3, -2.5, 2.5);
-  const amount = car.crash(zone, e.speed * 0.8);
+  const amount = takeDamage(zone, e.speed * 0.8);
   const k = Math.min(1, e.speed / 20);
   sound.crash(k);
   shake = Math.max(shake, 0.05 + 0.25 * k);
@@ -949,6 +978,7 @@ function updatePolice(h, now) {
     } else if (e.kind === 'rammed') {
       shoved(e);
     } else if (e.kind === 'spiked') {
+      if (!options.damage) continue;
       car.flats = 1;
       sound.hiss();
       toast('Spike strip · tires flat');
@@ -967,6 +997,52 @@ function updatePolice(h, now) {
   world.people.update(h, ps);
   for (const e of world.people.take()) if (e.sidewalk && !held) world.rules.report('pedestrian');
   for (const e of world.traffic.take()) if (e.kind === 'honk') sound.horn(Math.hypot(e.car.x - car.x, e.car.z - car.z));
+}
+
+damageBtn?.addEventListener('click', () => {
+  options.damage = !options.damage;
+  try { localStorage.setItem('damage', options.damage ? 'on' : 'off'); } catch {}
+  // Off: the car is whole again, and stays so.
+  if (!options.damage) { Object.assign(car.damage, { front: 0, rear: 0, left: 0, right: 0 }); car.flats = 0; }
+  updateOptionBtns();
+  toast(options.damage ? 'Damage on' : 'Damage off · car repaired');
+});
+policeBtn?.addEventListener('click', () => {
+  options.police = !options.police;
+  try { localStorage.setItem('police', options.police ? 'on' : 'off'); } catch {}
+  // Off: whoever was chasing goes home, and nothing is an offence any more.
+  if (!options.police && world.police && !held) { world.police.reset(); world.rules.reset(); }
+  updateOptionBtns();
+  toast(options.police ? 'Police on' : 'Police off · drive as you like');
+});
+
+// The start picker: a map of the island to choose where the car is put down.
+const picker = new StartPicker(document.getElementById('picker'), (start) => {
+  customStart = start;
+  try { if (start) localStorage.setItem('start', JSON.stringify(start)); else localStorage.removeItem('start'); } catch {}
+  resetRace();
+  syncPose();
+});
+function openPicker() {
+  if (!track.open) { toast('The start can be chosen on the Montreal map'); return; }
+  picker.open(track, car);
+}
+startBtn?.addEventListener('click', openPicker);
+addEventListener('keydown', (e) => { if (e.code === 'KeyP' && !e.repeat && !picker.isOpen) openPicker(); });
+
+// The next street that crosses the one the car is on, for the HUD (looked up a few times a second).
+let crossWait = 0;
+function updateCrossStreet(dt) {
+  if ((crossWait -= dt) > 0) return;
+  crossWait = 0.25;
+  const fwd = car.speed < -0.5 ? -1 : 1;
+  const c = after.road && after.edge < after.road.walk + 6
+    ? world.traffic.crossingAhead(after.road, car.x, car.z, -Math.sin(car.heading) * fwd, -Math.cos(car.heading) * fwd, after.tangent) : null;
+  crossRowEl.hidden = !c;
+  if (!c) return;
+  const d = c.distance < 95 ? Math.round(c.distance / 10) * 10 : Math.round(c.distance / 50) * 50;
+  const text = `${c.name} · ${d < 20 ? 'here' : d >= 1000 ? `${(d / 1000).toFixed(1)} km` : `${d} m`}`;
+  if (crossEl.textContent !== text) crossEl.textContent = text;
 }
 
 // Health, wanted level and speed limit, and the overlays: busted, wrecked,
@@ -1035,6 +1111,7 @@ function physicsTick(h, controls) {
   if (world.rules && !held) {
     world.rules.update(h, car, after);
     for (const o of world.rules.take()) {
+      if (!options.police) continue;
       world.police.add(o.points);
       toast(`${o.label}  +${o.points}`);
     }
@@ -1065,7 +1142,8 @@ function frame(now) {
   else if (controls.reset) resetRace();
   if (prevPose === null || controls.switchLayout || controls.switchDrive || controls.reset) syncPose();
 
-  physicsLag += dt;
+  // The game stands still while the start picker is open.
+  if (!picker.isOpen) physicsLag += dt;
   let ticks = 0;
   for (; physicsLag >= PHYSICS_STEP && ticks < MAX_TICKS; ticks++) {
     physicsTick(PHYSICS_STEP, controls);
@@ -1250,6 +1328,7 @@ function frame(now) {
     // The street the car is on (or beside).
     const name = after.name || ' ';
     if (sectionEl.textContent !== name) sectionEl.textContent = name;
+    updateCrossStreet(dt);
     minimap.draw(car, world.traffic?.cars, world.police?.cars, now / 1000, world.police?.heli);
   } else if (track.sections) {
     // Name of the corner or stretch the car is in (the last one started).

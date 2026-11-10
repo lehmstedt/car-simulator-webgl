@@ -12,6 +12,15 @@
 // - Stop signs (map data, plus the Montreal habit filled in where the data has
 //   none: side streets stop at bigger ones, residential crossings stop all
 //   ways). A car stops fully, then goes when the crossing is clear, in turn.
+// - What stands at each crossing is checked when its lanes are made (plan()),
+//   so it always makes sense: no crossing is left without any rule; two streets
+//   that cross never both have the right of way; a big street never stops for
+//   a small one that doesn't; lights of the same phase never face streets that
+//   cross each other. Lights and signs stand on the sidewalk, never on another
+//   street's asphalt; the short links inside a wide junction (between the two
+//   roadways of a boulevard) share the junction's lights instead of their own.
+// - A car is carried by two points on its path, front and rear axle, so it
+//   swings through a turn the way a car does instead of snapping to the path.
 // - Cars live within ~450 m of the player: far ones are taken away and new
 //   ones put on streets out of sight, so the traffic around stays the same.
 //   Sedans, SUVs, hatchbacks, taxis, vans, pickups and city buses (on the
@@ -39,6 +48,9 @@ const PARK_SLOT = 6.4;             // m of curb per parked car
 const PARK_CELL = 64;              // m: lookup grid for parked cars
 const HALT_TIME = 5;               // s a car stays stopped after being hit (plus a few)
 const SIREN_REACH = 45;            // m: cars make way for a siren this close behind
+// Which street matters more where two meet.
+const RANK = { primary: 5, secondary: 4, tertiary: 3, residential: 2, unclassified: 2, living_street: 1 };
+const INNER_LINK = 30;             // m: a street piece this short between two lit crossings is inside one junction
 const SIGNAL_CYCLE = 60;          // s: a light's full cycle
 const SIGNAL_GREEN = 26, SIGNAL_YELLOW = 3; // s, for each of the two ways; then all red until the other's turn
 const LANE_SPEED = { primary: 13.9, secondary: 13.9, tertiary: 12.5, residential: 9.7, unclassified: 9.7, living_street: 4.2 };
@@ -89,6 +101,8 @@ function polyOffset(pts, off) {
     return [p[0] - dz * off, p[1] + dx * off];
   });
 }
+
+const POSE_F = {}, POSE_R = {};
 
 export class Traffic {
   constructor(map) {
@@ -150,6 +164,108 @@ export class Traffic {
     return n;
   }
 
+  // What stands at crossing n, for each way into it: a Map from the way's
+  // number (2 × road index, + 1 driving the way the road's points run) to
+  // { control: 'signal' | 'stop' | 'yield', phase }. Lights and stop signs come
+  // from the map data, then are made consistent:
+  // - lights: ways of the same phase must be one street (not cross each other);
+  // - no rule at all in the data: the through street (two pieces in line, the
+  //   biggest street there) goes, the others stop; with no through street,
+  //   everybody stops;
+  // - two ways that cross can't both go: the smaller street stops, or both;
+  // - a bigger street never stops for a smaller one that doesn't.
+  plan(n) {
+    if (n.plan) return n.plan;
+    const P = n.plan = new Map();
+    if (!n.crossing && !n.signal) return P;
+    // Every piece of street at n, pointing away from it; the ways in are the
+    // pieces that may be driven toward n.
+    const arms = [];
+    for (const r of n.roads) {
+      for (const end of r.a === r.b ? [] : [r.a === n ? 1 : -1]) {
+        const i0 = end > 0 ? 0 : r.pts.length - 1, step = end > 0 ? 1 : -1;
+        let i1 = i0 + step;
+        while (r.pts[i1 + step] && Math.hypot(r.pts[i1][0] - r.pts[i0][0], r.pts[i1][1] - r.pts[i0][1]) < 6) i1 += step;
+        const l = Math.hypot(r.pts[i1][0] - r.pts[i0][0], r.pts[i1][1] - r.pts[i0][1]) || 1;
+        const ox = (r.pts[i1][0] - r.pts[i0][0]) / l, oz = (r.pts[i1][1] - r.pts[i0][1]) / l;
+        // Driving toward n on this piece is against its points when it starts at n.
+        const key = 2 * r.index + (end > 0 ? 0 : 1), enters = !(r.oneWay && end > 0);
+        arms.push({ road: r, ox, oz, key, enters, rank: RANK[r.cls] ?? 1, stop: this.map.stops.has(key), phase: 0 });
+      }
+    }
+    const ways = arms.filter((a) => a.enters);
+    const cross = (a, b) => Math.abs(a.ox * b.ox + a.oz * b.oz) < 0.6;
+    if (n.signal) {
+      const axis = n.signal.axis;
+      for (const a of ways) a.phase = Math.abs(Math.cos(Math.atan2(-a.oz, -a.ox) - axis)) > Math.SQRT1_2 ? 0 : 1;
+      if (ways.some((a) => ways.some((b) => a.phase === b.phase && cross(a, b)))) {
+        // The data's axis doesn't sort them: the biggest street keeps its phase, what crosses it gets the other.
+        const ref = ways.reduce((m, a) => (a.rank > m.rank || (a.rank === m.rank && a.road.w > m.road.w) ? a : m));
+        for (const a of ways) a.phase = cross(a, ref) ? 1 - ref.phase : ref.phase;
+      }
+      for (const a of ways) P.set(a.key, { control: 'signal', phase: a.phase });
+      return P;
+    }
+    if (ways.length && !ways.some((a) => a.stop)) {
+      // The through street: two pieces in line, of the biggest street here.
+      let best = null;
+      for (const a of arms) {
+        for (const b of arms) {
+          if (a === b || a.ox * b.ox + a.oz * b.oz > -0.75) continue;
+          const rank = Math.min(a.rank, b.rank) + (a.road.name && a.road.name === b.road.name ? 0.5 : 0);
+          if (!best || rank > best.rank) best = { a, b, rank };
+        }
+      }
+      const top = Math.max(...arms.map((a) => a.rank));
+      for (const a of ways) a.stop = !(best && Math.floor(best.rank) >= top && (a === best.a || a === best.b));
+    }
+    for (const a of ways) {
+      for (const b of ways) {
+        if (a.stop || b.stop || !cross(a, b)) continue;
+        if (a.rank <= b.rank) a.stop = true;
+        if (b.rank <= a.rank) b.stop = true;
+      }
+    }
+    const free = ways.filter((a) => !a.stop);
+    if (free.length && ways.some((a) => a.stop && free.some((b) => b.rank < a.rank))) for (const a of ways) a.stop = true;
+    for (const a of ways) P.set(a.key, { control: a.stop ? 'stop' : 'yield', phase: 0 });
+    return P;
+  }
+
+  // What stands at the end of road r driven in direction dir (1: the way its
+  // points run): { control, phase }, control null where nothing does.
+  controlAt(r, dir) {
+    const n = dir > 0 ? r.b : r.a;
+    return (n && this.plan(n).get(2 * r.index + (dir > 0 ? 1 : 0))) || { control: null, phase: 0 };
+  }
+
+  // The next street that crosses the one the car is on: { name, distance }
+  // (m, to the crossing), or null. (x, z): the car, on road r, heading (fx, fz).
+  crossingAhead(r, x, z, fx, fz, tangent) {
+    if (!r?.a) return null;
+    let dir = fx * tangent[0] + fz * tangent[1] >= 0 ? 1 : -1, node = dir > 0 ? r.b : r.a;
+    let d = Math.hypot(node.x - x, node.z - z), road = r;
+    for (let hops = 0; hops < 14 && d < 1500; hops++) {
+      const names = [...new Set(node.roads.filter((o) => o.name && o.name !== r.name).map((o) => o.name))];
+      if (names.length && node.crossing) return { name: names.slice(0, 2).join(' / '), distance: d };
+      // On along the same street: its next piece, the one most in line.
+      const i = dir > 0 ? road.pts.length - 1 : 0, j = dir > 0 ? i - 1 : 1;
+      const hx = road.pts[i][0] - road.pts[j][0], hz = road.pts[i][1] - road.pts[j][1];
+      let next = null, best = 0;
+      for (const o of node.roads) {
+        if (o === road || o.a === o.b) continue;
+        const out = o.a === node ? 1 : -1, p = o.pts[out > 0 ? 0 : o.pts.length - 1], q = o.pts[out > 0 ? 1 : o.pts.length - 2];
+        const sc = (hx * (q[0] - p[0]) + hz * (q[1] - p[1])) / ((Math.hypot(hx, hz) || 1) * (Math.hypot(q[0] - p[0], q[1] - p[1]) || 1)) + (o.name === r.name ? 0.5 : 0);
+        if (sc > best) { best = sc; next = o; dir = out; }
+      }
+      if (!next || best < 0.6) return null;
+      road = next;
+      d += road.len ?? (road.len = polyLength(road.pts));
+      node = dir > 0 ? road.b : road.a;
+    }
+    return null;
+  }
+
   // Road r's lanes (made the first time): one each way, one on a one-way street.
   lanesOf(r) {
     if (r.lanes || !r.a) return r.lanes ?? [];
@@ -172,13 +288,11 @@ export class Traffic {
       const st = pointAt(lane, 0, {});
       lane.startDir = [st.dx, st.dz];
       // What stands at its end: lights, a stop sign or nothing.
-      const e = 2 * r.index + (dir > 0 ? 1 : 0);
-      if (to.signal) {
-        lane.control = 'signal';
-        const a = to.signal.axis;
-        lane.phase = Math.abs(Math.cos(Math.atan2(end.dz, end.dx) - a)) > Math.SQRT1_2 ? 0 : 1;
-      } else if (to.crossing && this.map.stops.has(e)) lane.control = 'stop';
-      else lane.control = to.crossing ? 'yield' : null;
+      const c = this.controlAt(r, dir);
+      lane.control = c.control;
+      lane.phase = c.phase;
+      // Inside a wide junction: between two crossings whose lights change together.
+      lane.inner = c.control === 'signal' && !!from.signal && from.signal.offset === to.signal.offset && len < INNER_LINK;
       r.lanes.push(lane);
       from.out.push(lane);
       to.into.push(lane);
@@ -191,20 +305,18 @@ export class Traffic {
     const k = a.id * 4194304 + b.id;
     let c = this.connectors.get(k);
     if (c) return c;
-    const p0 = a.pts[a.pts.length - 1], p2 = b.pts[0];
+    const p0 = a.pts[a.pts.length - 1], p3 = b.pts[0];
     const [ux, uz] = a.endDir, [vx, vz] = b.startDir;
-    // Control point: where the lanes' lines meet, else halfway.
-    let p1 = [(p0[0] + p2[0]) / 2, (p0[1] + p2[1]) / 2];
-    const den = ux * vz - uz * vx;
-    if (Math.abs(den) > 0.15) {
-      const t = ((p2[0] - p0[0]) * vz - (p2[1] - p0[1]) * vx) / den;
-      const d = Math.hypot(p2[0] - p0[0], p2[1] - p0[1]);
-      if (t > 0 && t < d * 1.5) p1 = [p0[0] + ux * t, p0[1] + uz * t];
-    }
+    // A cubic that leaves along lane a and arrives along lane b, so the car's
+    // heading never jumps: its handles are longer the further apart the lanes
+    // are, and for a turn back (a dead end) long enough to make a loop of it.
+    const d = Math.hypot(p3[0] - p0[0], p3[1] - p0[1]), back = ux * vx + uz * vz < -0.3;
+    const h = back ? Math.max(4, d * 0.9) : d * 0.38;
+    const p1 = [p0[0] + ux * h, p0[1] + uz * h], p2 = [p3[0] - vx * h, p3[1] - vz * h];
     const pts = [];
-    for (let i = 0; i <= 10; i++) {
-      const t = i / 10, s = 1 - t;
-      pts.push([s * s * p0[0] + 2 * s * t * p1[0] + t * t * p2[0], s * s * p0[1] + 2 * s * t * p1[1] + t * t * p2[1]]);
+    for (let i = 0; i <= 18; i++) {
+      const t = i / 18, m = 1 - t, b0 = m * m * m, b1 = 3 * m * m * t, b2 = 3 * m * t * t, b3 = t * t * t;
+      pts.push([b0 * p0[0] + b1 * p1[0] + b2 * p2[0] + b3 * p3[0], b0 * p0[1] + b1 * p1[1] + b2 * p2[1] + b3 * p3[1]]);
     }
     c = polyPath(pts);
     const turn = Math.acos(Math.max(-1, Math.min(1, ux * vx + uz * vz)));
@@ -268,7 +380,7 @@ export class Traffic {
       const c = {
         id: this.nextId++, lane, s, conn: null, next, v: lane.speed * 0.6, x: p.x, z: p.z, dx: p.dx, dz: p.dz,
         kind, color: taxi ? TAXI_PAINT : pickPaint(kind), taxi, mood: (0.88 + Math.random() * 0.2) * (kind.pace ?? 1),
-        stoppedAt: null, stuck: 0, braking: false,
+        stoppedAt: null, stuck: 0, braking: false, behind: null,
         turn: 0,     // turn signal: -1 left, 1 right
         halt: 0,     // s left stopped after a crash, hazards on
         side: 0,     // m moved to the right of its lane, making way for a siren
@@ -391,7 +503,7 @@ export class Traffic {
       const d = Math.hypot(c.x - player.x, c.z - player.z);
       if (d > SPAWN_FAR || (c.stuck > 40 && d > 70)) { gone.push(c); continue; }
       // Speed wanted: the street's, slowing for the turn ahead or to stop at the line.
-      let target = c.lane.speed * c.mood;
+      let target = c.lane.speed * c.mood, need = 0;
       const look = Math.max(12, c.v * 3 + 8);
       if (c.conn) {
         target = Math.min(target, c.conn.vmax);
@@ -402,12 +514,21 @@ export class Traffic {
           const vEnd = stop ? 0 : c.next ? this.connector(c.lane, c.next).vmax : 0;
           target = Math.min(target, Math.sqrt(vEnd * vEnd + 2 * COMFORT_BRAKE * Math.max(0, dEnd - (stop ? 0.3 : 0))));
           if (stop && dEnd < 0.6) target = 0;
+          // The braking it takes to stop at the line from here.
+          if (stop) need = (c.v * c.v) / (2 * Math.max(0.15, dEnd - 0.35));
           // At a stop sign: stopped at the line, now waiting for its turn.
           if (c.lane.control === 'stop' && c.stoppedAt === null && dEnd < 2 && c.v < 0.4) {
             c.stoppedAt = this.clock;
             c.lane.to.queue.push(c);
           }
         }
+      }
+      // A stop at the end of the next piece of the same street (streets are cut
+      // in pieces between crossings too): seen from here, not when it's reached.
+      const nx = c.next;
+      if (nx && nx.len < 60 && !(c.conn ? c.conn.node : c.lane.to).crossing) {
+        const halt = nx.control === 'stop' || (nx.control === 'signal' && signalState(this.clock, nx.to.signal.offset, nx.phase) !== 'green');
+        if (halt) target = Math.min(target, Math.sqrt(2 * COMFORT_BRAKE * ((c.conn ? c.conn.len - c.cs : c.lane.len - c.s + 1) + nx.len)));
       }
       const a = this.ahead(c, player, look);
       if (a) target = Math.min(target, Math.max(0, Math.min(Math.sqrt(2 * 3.5 * Math.max(0, a.gap - 2)), a.v + (a.gap - 2 - c.v * 1.2) * 0.6)));
@@ -425,7 +546,9 @@ export class Traffic {
         const t = c.lane.endDir[0] * c.next.startDir[1] - c.lane.endDir[1] * c.next.startDir[0];
         c.turn = t > 0.4 ? 1 : t < -0.4 ? -1 : 0;
       }
-      const acc = Math.max(-7, Math.min(c.kind.accel ?? 1.8, (target - c.v) * 2));
+      let acc = Math.max(-7, Math.min(c.kind.accel ?? 1.8, (target - c.v) * 2));
+      // Steady on the brakes all the way to the line, rather than late and hard.
+      if (need > 1.5) acc = Math.min(acc, -Math.min(7, need));
       c.braking = acc < -0.6 || (c.v < 0.3 && target < 0.3);
       c.v = Math.max(0, c.v + acc * dt);
       if (!c.conn && c.v < 0.05 && target < 0.05 && c.lane.len - c.s < 0.6) c.v = 0;
@@ -439,13 +562,14 @@ export class Traffic {
 
   // Moves car c ds along its path, through crossings.
   advance(c, ds, player, gone) {
-    const o = {};
+    const moved = ds;
     for (let guard = 0; guard < 4; guard++) {
       if (c.conn) {
         c.cs += ds;
         if (c.cs < c.conn.len) break;
         ds = c.cs - c.conn.len;
         c.conn.node.inside.delete(c);
+        c.behind = c.conn;
         c.conn = null;
         c.lane = c.next;
         c.lane.cars.push(c);
@@ -458,17 +582,47 @@ export class Traffic {
       if (c.s < c.lane.len) break;
       // A dead end (the map's edge): the car goes away, unless the player sees it.
       if (!c.next && Math.hypot(c.x - player.x, c.z - player.z) > 50) { gone.push(c); return; }
-      if (this.mustStop(c, player, 0)) { c.s = c.lane.len; c.v = 0; break; }
+      // At the line and told to stop: it stops there, unless it's still going too
+      // fast to (a light that just changed, a gap that just closed): then it goes through.
+      if (!c.next || (c.v < 3 && this.mustStop(c, player, 0))) { c.s = c.lane.len; c.v = 0; break; }
       ds = c.s - c.lane.len;
       const q = c.lane.to.queue.indexOf(c);
       if (q >= 0) c.lane.to.queue.splice(q, 1);
       c.lane.cars.splice(c.lane.cars.indexOf(c), 1);
+      c.behind = c.lane;
       c.conn = this.connector(c.lane, c.next);
       c.conn.node.inside.add(c);
       c.cs = 0;
     }
-    pointAt(c.conn ?? c.lane, c.conn ? c.cs : c.s, o);
-    c.x = o.x - o.dz * c.side; c.z = o.z + o.dx * c.side; c.dx = o.dx; c.dz = o.dz;
+    this.pose(c, moved);
+  }
+
+  // Where car c is and points: its front axle is on its path at c.s, its rear
+  // axle a wheelbase back along the path it came by (the piece before, around
+  // a corner), and the car is the line between them. So it turns in smoothly,
+  // its tail cutting the corner a little, as a car's does.
+  pose(c, moved = Infinity) {
+    const path = c.conn ?? c.lane, s = c.conn ? c.cs : c.s, wb = c.kind.length * 0.58;
+    const f = pointAt(path, s, POSE_F);
+    let r;
+    if (s >= wb || !c.behind) r = pointAt(path, Math.max(0, s - wb), POSE_R);
+    else r = pointAt(c.behind, Math.max(0, c.behind.len + s - wb), POSE_R);
+    let dx = f.x - r.x, dz = f.z - r.z;
+    const l = Math.hypot(dx, dz);
+    if (l > 0.5) { dx /= l; dz /= l; } else { dx = f.dx; dz = f.dz; }
+    // It can't turn faster than its wheels allow for the distance it moved
+    // (a 4 m turning radius at the tightest), and not at all standing still.
+    if (moved < 50) {
+      const turn = Math.atan2(c.dx * dz - c.dz * dx, c.dx * dx + c.dz * dz), most = moved / 4;
+      if (Math.abs(turn) > most) {
+        const a = Math.sign(turn) * most, cs = Math.cos(a), sn = Math.sin(a);
+        [dx, dz] = [c.dx * cs - c.dz * sn, c.dx * sn + c.dz * cs];
+      }
+    }
+    // The car's middle, a little behind the front axle; moved right when making way.
+    const back = c.kind.length * 0.3;
+    c.x = f.x - dx * back - dz * c.side; c.z = f.z - dz * back + dx * c.side;
+    c.dx = dx; c.dz = dz;
   }
 
   // Whether car c has its own reason to stand still: a red light or a stop sign ahead.
@@ -639,8 +793,17 @@ export class Traffic {
         box(poles, [base[0] - rgt[0] * 1.9, 7.08, base[1] - rgt[1] * 1.9], rgt, face, 0.55, 0.12, 0.26);
       }
     }
+    // Whether a pole may stand at (x, z): not on any street's asphalt, not in a building.
+    const stands = (x, z) => {
+      const at = this.map.locate(x, z);
+      return !(at.road && at.edge < 0.25) && !this.map.blocked(x, z);
+    };
+    // The first of the spots tried that a pole may stand on.
+    const spot = (...tries) => tries.find(([x, z]) => stands(x, z));
     for (const lane of roads.flatMap((r) => this.lanesOf(r))) {
       if (lane.control !== 'signal' && lane.control !== 'stop') continue;
+      // Inside a wide junction: no line, no lights of its own.
+      if (lane.inner) continue;
       const r = lane.road, [dx, dz] = lane.endDir, rgt = [-dz, dx], face = [-dx, -dz];
       const end = lane.pts[lane.pts.length - 1];
       const mid = [end[0] - rgt[0] * lane.off, end[1] - rgt[1] * lane.off]; // the street's middle at the line
@@ -651,15 +814,22 @@ export class Traffic {
       const side = r.w + Math.min(r.walk || 0.6, 1.4) * 0.6;
       if (lane.control === 'stop') {
         // Stop sign at the curb by the line, facing the driver.
-        const base = [mid[0] + rgt[0] * side, 0, mid[1] + rgt[1] * side];
+        // (Further from the roadway, or back from the corner, where another street's asphalt is in the way.)
+        const at = (out, back) => [mid[0] + rgt[0] * (side + out) - dx * back, mid[1] + rgt[1] * (side + out) - dz * back];
+        const b = spot(at(0, 0), at(0.8, 0), at(0, 2.5), at(0.8, 2.5), at(1.6, 5), at(0, 8));
+        if (!b) continue;
+        const base = [b[0], 0, b[1]];
         box(poles, [base[0], 1.15, base[2]], rgt, face, 0.07, 2.3, 0.07);
         const c = [base[0] + face[0] * 0.06, 2.35, base[2] + face[1] * 0.06];
         disc(signs, c, rgt, face, 0.38, (u, v) => [0.5 + u * 0.5, 0.5 + v * 0.5]);
         disc(backs, [c[0] - face[0] * 0.01, c[1], c[2] - face[1] * 0.01], [-rgt[0], -rgt[1]], [-face[0], -face[1]], 0.38);
       } else {
         // Traffic light across the crossing on the right, facing the driver.
+        // (Else on the near corner, by the stop line.)
         const n = lane.to, far = n.r - 1;
-        const base = [mid[0] + dx * (far * 2 + 1) + rgt[0] * side, mid[1] + dz * (far * 2 + 1) + rgt[1] * side];
+        const at = (ahead, out) => [mid[0] + dx * ahead + rgt[0] * (side + out), mid[1] + dz * ahead + rgt[1] * (side + out)];
+        const base = spot(at(far * 2 + 1, 0), at(far * 2 + 1, 1.2), at(far * 2 + 3, 0.6), at(far * 2 + 3, 2), at(0, 0), at(0, 1), at(-2, 0.6));
+        if (!base) continue;
         box(poles, [base[0], 1.9, base[1]], rgt, face, 0.16, 3.8, 0.16);
         const head = [base[0] + face[0] * 0.25, 3.3, base[1] + face[1] * 0.25];
         box(poles, head, rgt, face, 0.42, 1.15, 0.28);

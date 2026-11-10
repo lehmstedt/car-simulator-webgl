@@ -98,10 +98,37 @@ and stop signs, pull over to the right for a siren coming up behind them, and st
 lights on for a while when you hit them; sit in their way and they honk. Parked cars line the bigger
 streets and the left side of one-way side streets: solid, but they never move.
 
+What stands at each crossing always makes sense: lights and stop signs come from the map data, then
+every crossing is checked when the car comes near (`plan()` in `src/traffic.js`). A crossing the data
+leaves without any rule gets one (the through street goes, the others stop; with no through street,
+everybody stops); two streets that cross never both have the right of way; a big street never stops for
+a small one that doesn't; lights of the same phase never face streets that cross each other. Poles stand
+on the sidewalk, never on another street's asphalt or in a building, and the short links inside a wide
+junction (between the two roadways of a boulevard) share its lights instead of getting their own.
+The player is held to the same rules as the traffic.
+
+Cars brake steadily to the line, seeing a stop a few street pieces ahead. Each is carried by two points
+on its path, front and rear axle, and follows a curve through the crossing that leaves along one lane and
+arrives along the next, so it swings through turns the way a car does.
+
+The HUD shows the street you're on and, under it, the next street that crosses it and how far it is.
+
 People walk the sidewalks (`src/pedestrians.js`), turn the corners, stop a moment, and jump out of the
 way of a car coming at them. Your car never touches them, but scaring them on the sidewalk is an offence.
 
 Cars and people are drawn by `src/cityrender.js`, with a soft shadow under each.
+
+### Starting anywhere
+
+**Start** in the settings (or P) opens a map of the whole island (`src/picker.js`): drag to move, scroll
+or pinch to zoom, tap a street, then *Start here*. The car is put down in the right lane, facing the way
+the street is driven; Reset brings it back there, and the choice is remembered. *Default start* goes back
+to Sainte-Catherine.
+
+### Options
+
+In the settings: **Damage** off repairs the car and makes crashes (and spike strips) harmless; **Police**
+off sends the patrol cars home and nothing is an offence any more. Both are remembered.
 
 ### Police
 
@@ -300,6 +327,7 @@ With the keyboard, holding A/D turns the wheel gradually; let go and it returns 
 | C              | Chase / cockpit view |
 | M              | Switch track (Montreal, Nordschleife, GP)  |
 | N              | Sound on / off  |
+| P              | Choose where to start (Montreal) |
 | R              | Reset           |
 
 ## Layout
@@ -315,6 +343,7 @@ With the keyboard, holding A/D turns the wheel gradually; let go and it returns 
 - `src/police.js` — wanted level and what each star brings: patrol cars, roadblocks, spike strips, the helicopter
 - `src/traffic.js` — street graph, traffic lights, traffic and parked cars, the cars' shapes
 - `src/pedestrians.js` — people on the sidewalks
+- `src/picker.js` — the map to choose where to start
 - `src/cityrender.js` — draws traffic, police, people and their shadows
 - `src/skids.js` — skid marks
 - `src/ghost.js` — best-lap recording and ghost replay

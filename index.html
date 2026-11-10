@@ -44,7 +44,9 @@
   #gear { font-size: 18px; font-weight: 700; color: var(--accent); min-width: 1ch; }
   .times { font-size: 13px; font-variant-numeric: tabular-nums; }
   .times .unit { min-width: 4.6em; display: inline-block; }
-  #section-row[hidden], #fines-row[hidden], .lap-only[hidden] { display: none; }
+  #section-row[hidden], #fines-row[hidden], #cross-row[hidden], .lap-only[hidden], .city-only[hidden] { display: none; }
+  #cross { color: var(--hud-fg); white-space: nowrap; }
+  #cross-row .unit { min-width: 3em; }
   /* Open map: the streets around the car, heading up. */
   #minimap { position: static; width: 130px; height: 130px; border-radius: 8px; display: block; margin-top: 2px; }
   #minimap[hidden] { display: none; }
@@ -74,7 +76,26 @@
   #settings[hidden] { display: none; }
   #settings button { display: flex; justify-content: space-between; gap: 16px; text-align: left; }
   #settings button b { color: var(--accent); font-weight: 700; }
-  #ghost[aria-pressed="false"] b, #sound[aria-pressed="false"] b { color: var(--hud-dim); }
+  #ghost[aria-pressed="false"] b, #sound[aria-pressed="false"] b, #damage[aria-pressed="false"] b, #police[aria-pressed="false"] b { color: var(--hud-dim); }
+  /* Start picker: the island's map over everything, a bar of buttons along the bottom. */
+  #picker { position: fixed; inset: 0; z-index: 40; background: #26323d; display: flex; flex-direction: column; }
+  #picker[hidden] { display: none; }
+  #picker canvas { position: static; flex: 1; min-height: 0; width: 100%; height: auto; touch-action: none; cursor: crosshair; }
+  .picker-bar {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+    padding: 10px max(16px, env(safe-area-inset-right, 0px)) calc(10px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px));
+    background: rgba(14, 20, 28, 0.92);
+  }
+  .picker-bar .title { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--hud-dim); }
+  #picker-name { flex: 1; min-width: 12em; font-size: 15px; font-weight: 700; color: var(--accent); }
+  .picker-bar button {
+    font: 600 13px var(--font-hud); letter-spacing: .08em; text-transform: uppercase;
+    color: var(--hud-fg); background: var(--hud-bg); border: 1px solid var(--pad-edge);
+    border-radius: 10px; padding: 0 14px; min-width: 44px; height: 44px; cursor: pointer;
+  }
+  .picker-bar button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #picker-go { background: var(--gas); color: #0e141c; border-color: var(--gas); }
+  #picker-go[hidden] { display: none; }
   #balance {
     font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
     min-height: 1.2em;
@@ -252,6 +273,7 @@
   <div id="wanted-row" class="times" hidden aria-live="polite"><span id="stars" title="Wanted level">☆☆☆☆☆</span><span id="wanted"></span></div>
   <div class="times" id="fines-row" hidden title="Fines paid so far"><span class="unit">Fines</span><span id="fines">$0</span></div>
   <div class="times" id="section-row" hidden><span id="section"></span></div>
+  <div class="times city-only" id="cross-row" hidden title="The next street that crosses this one"><span class="unit">Next</span><span id="cross"></span></div>
   <div class="times lap-only"><span class="unit" id="lap-label">Lap</span><span id="lap">–:––.––</span></div>
   <div class="times lap-only"><span class="unit">Best</span><span id="best">–:––.––</span></div>
   <div class="times lap-only" title="Claude's run, the amber ghost"><span class="unit">Claude</span><span id="bot">–:––.––</span></div>
@@ -260,7 +282,7 @@
   <div id="balance" aria-live="polite"></div>
   <canvas id="minimap" hidden aria-label="Map of the streets around the car"></canvas>
 </div>
-<div class="hint">W/S or ↑/↓ drive · A/D or ←/→ steer · Space handbrake · T car (Yaris/GT3) · G ghost · C camera · M track · R reset</div>
+<div class="hint">W/S or ↑/↓ drive · A/D or ←/→ steer · Space handbrake · T car (Yaris/GT3) · G ghost · C camera · M track · P start · R reset</div>
 <div class="top-right">
   <div class="top-bar">
   <button id="reset" type="button" aria-label="Reset car (R)">Reset</button>
@@ -274,6 +296,9 @@
     <button id="drive" type="button" aria-label="Switch car (T)">Car <b>GT3</b></button>
     <button id="ghost" type="button" aria-pressed="true" aria-label="Show ghosts: your best lap and Claude's (G)">Ghost <b>On</b></button>
     <button id="sound" type="button" aria-pressed="true" aria-label="Engine and tire sounds (N)">Sound <b>On</b></button>
+    <button id="damage" type="button" aria-pressed="true" aria-label="Crash damage">Damage <b>On</b></button>
+    <button id="police" type="button" class="city-only" aria-pressed="true" aria-label="Police and the rules of the road (Montreal)">Police <b>On</b></button>
+    <button id="start" type="button" class="city-only" aria-label="Choose where to start on the map of Montreal (P)">Start <b>Pick on map</b></button>
   </div>
   <div class="gmeter" id="gmeter">
     <svg viewBox="-44 -44 88 88" role="img" aria-label="G-force meter: dot is the force felt, dashed ring is the grip limit">
@@ -304,6 +329,18 @@
       <div><span class="unit">R</span> <b id="tire-r">45°</b></div>
       <div id="tire-state">Cold</div>
     </div>
+  </div>
+</div>
+<div id="picker" hidden role="dialog" aria-modal="true" aria-label="Choose where to start">
+  <canvas aria-label="Map of the island of Montreal: tap a street to choose it"></canvas>
+  <div class="picker-bar">
+    <span class="title">Start at</span>
+    <span id="picker-name" aria-live="polite"></span>
+    <button id="picker-go" type="button" hidden>Start here</button>
+    <button id="picker-in" type="button" aria-label="Zoom in">+</button>
+    <button id="picker-out" type="button" aria-label="Zoom out">−</button>
+    <button id="picker-default" type="button">Default start</button>
+    <button id="picker-close" type="button">Close</button>
   </div>
 </div>
 <div class="controls">

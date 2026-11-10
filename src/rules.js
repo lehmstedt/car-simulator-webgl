@@ -104,7 +104,7 @@ export class Rules {
       } else {
         if (d < node.r + 20) a.minSpeed = Math.min(a.minSpeed, speed);
         // Crossed the stop line, going in.
-        if (node.crossing && a.d > node.r && d <= node.r) this.crossed(a, tx * dir, tz * dir);
+        if (node.crossing && a.d > node.r && d <= node.r) this.crossed(a);
         a.d = d;
       }
     } else if (!onRoadway) {
@@ -112,13 +112,12 @@ export class Rules {
     }
   }
 
-  crossed(a, dx, dz) {
-    const n = a.node;
-    if (n.signal) {
-      // The light for this way, as the traffic sees it (traffic.js lanes).
-      const phase = Math.abs(Math.cos(Math.atan2(dz, dx) - n.signal.axis)) > Math.SQRT1_2 ? 0 : 1;
-      if (signalState(this.traffic.clock, n.signal.offset, phase) === 'red') this.report('red');
-    } else if (this.map.stops.has(2 * a.road.index + (a.dir > 0 ? 1 : 0)) && a.minSpeed > 1.4) {
+  crossed(a) {
+    // What stands there for this way, as the traffic sees it (traffic.js plan()).
+    const n = a.node, c = this.traffic.controlAt(a.road, a.dir);
+    if (c.control === 'signal') {
+      if (signalState(this.traffic.clock, n.signal.offset, c.phase) === 'red') this.report('red');
+    } else if (c.control === 'stop' && a.minSpeed > 1.4) {
       this.report('stop');
     }
   }
