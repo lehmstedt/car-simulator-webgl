@@ -310,6 +310,24 @@ npm test             # smoke test of the city's simulation, without a browser
 
 Add `?debug` to the URL to get `window.game` (the world and the car) in the browser's console.
 
+## Install on a phone
+
+The site on GitHub Pages (https://lehmstedt.github.io/car-simulator-webgl/) is an installable web app:
+in Chrome on Android, open it and tap **Settings → Install App** (or Chrome's menu → *Add to Home screen* /
+*Install app*). It then opens full screen, in either orientation, and starts offline once it has been
+played once. On iPhone, use Safari's *Share → Add to Home Screen*.
+
+- `manifest.webmanifest` — name, icons, full-screen display, any orientation
+- `sw.js` — service worker: serves the game from its cache and refreshes it in the background,
+  so a new version arrives on the launch after it's published
+- `icons/` — `icon.svg`, and the PNGs made from it by `node scripts/icons.mjs`
+
+The manifest, service worker and Install button sit between `<!-- pwa -->` comments in `index.html`;
+`npm run bundle` leaves them out of the single-file artifact, where they can't work.
+
+Upright, the G-meter and tire panels move down above the pedals; on a phone on its side the map
+sits beside the HUD's text. Both layouts follow the phone as it turns.
+
 ## Controls
 
 On phones, slide the steering slider (bottom-left) left or right to turn — let go and it recenters, and use the brake/gas pedals bottom-right.

@@ -34,7 +34,9 @@ try { new Function(`{\n${js}\n}`); } catch (e) { throw new Error(`the bundled sc
 let html = readFileSync(new URL('../index.html', import.meta.url), 'utf8')
   .replace(/<!doctype html>\s*/i, '')
   .replace(/<\/?(html|head|body)[^>]*>\s*/gi, '')
-  .replace(/<meta (charset|name="viewport")[^>]*>\s*/gi, '');
+  .replace(/<meta (charset|name="viewport")[^>]*>\s*/gi, '')
+  // The installable app's manifest, icons and service worker only work on the hosted site.
+  .replace(/<!-- pwa\b[\s\S]*?<!-- \/pwa -->\s*/g, '');
 const tag = '<script type="module" src="src/main.js"></script>';
 if (!html.includes(tag)) throw new Error('module script tag not found in index.html');
 html = html.replace(tag, () => `<script>\n{\n${js}\n}\n</script>`);

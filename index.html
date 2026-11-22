@@ -5,6 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Car Simulator</title>
 <meta name="claude:viewport-fit-sides" content="cover">
+<!-- pwa: installable app (manifest, icons, service worker); left out of the artifact bundle -->
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="theme-color" content="#0e141c">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<!-- /pwa -->
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;700&display=swap">
 <style>
   /* Full-bleed 3D view; HUD top-left, steering slider bottom-left, pedals bottom-right. One look in both themes. */
@@ -74,6 +83,7 @@
     display: grid; gap: 6px; min-width: 190px;
   }
   #settings[hidden] { display: none; }
+  #settings button[hidden] { display: none; }
   #settings button { display: flex; justify-content: space-between; gap: 16px; text-align: left; }
   #settings button b { color: var(--accent); font-weight: 700; }
   #ghost[aria-pressed="false"] b, #sound[aria-pressed="false"] b, #damage[aria-pressed="false"] b, #police[aria-pressed="false"] b { color: var(--hud-dim); }
@@ -196,6 +206,43 @@
     .pad.pedal.gas { height: 100px; }
     .pad.pedal.brake { height: 76px; }
   }
+  /* Phones held upright: the HUD stays top-left, the G-meter and tire panels move down
+     onto the dashboard, side by side just above the controls, so the road stays clear. */
+  @media (orientation: portrait) and (max-width: 700px) {
+    #hud { padding: 6px 12px; gap: 3px; max-width: calc(100vw - 32px - 150px); box-sizing: border-box; }
+    #hud > * { min-width: 0; }
+    #section, #cross { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    #cross-row { display: flex; align-items: baseline; }
+    #speed { font-size: 30px; }
+    #minimap { width: 104px; height: 104px; }
+    .gmeter, .tires {
+      position: fixed; padding: 6px 8px 6px 10px; gap: 8px;
+      bottom: calc(16px + 116px + 14px + env(safe-area-inset-bottom, 0px));
+    }
+    .gmeter { left: max(16px, env(safe-area-inset-left, 0px)); }
+    .tires { right: max(16px, env(safe-area-inset-right, 0px)); }
+    .gmeter svg { width: 60px; height: 60px; }
+    .tires svg { width: 34px; height: 54px; }
+    .tire-text { min-width: 5.6em; }
+    .controls { gap: 12px; }
+    .group.steer-group { max-width: none; }
+    #banner b { font-size: 32px; }
+  }
+  @media (orientation: portrait) and (max-width: 340px) {
+    .gm-text { display: none; }
+  }
+  /* Phones on their side: the map sits beside the HUD's text instead of under it,
+     so the panel ends well above the steering slider. */
+  @media (orientation: landscape) and (max-height: 500px) {
+    #hud { grid-template-columns: auto auto; column-gap: 12px; align-items: start; }
+    #hud > * { grid-column: 1; }
+    #hud > #minimap { grid-column: 2; grid-row: 1 / span 6; margin-top: 0; }
+  }
+  /* Very short landscape screens: drop the HUD's least needed rows so it clears the steering slider. */
+  @media (orientation: landscape) and (max-height: 380px) {
+    #hud .times[title^="Weight"], #balance { display: none; }
+    #minimap { width: 88px; height: 88px; }
+  }
   /* Speed limit (Montreal): a white sign with a red ring; it turns red when you're well over. */
   .limit {
     align-self: center; margin-left: 2px;
@@ -299,6 +346,7 @@
     <button id="damage" type="button" aria-pressed="true" aria-label="Crash damage">Damage <b>On</b></button>
     <button id="police" type="button" class="city-only" aria-pressed="true" aria-label="Police and the rules of the road (Montreal)">Police <b>On</b></button>
     <button id="start" type="button" class="city-only" aria-label="Choose where to start on the map of Montreal (P)">Start <b>Pick on map</b></button>
+    <button id="install" type="button" hidden aria-label="Install the game as an app on this device">Install <b>App</b></button>
   </div>
   <div class="gmeter" id="gmeter">
     <svg viewBox="-44 -44 88 88" role="img" aria-label="G-force meter: dot is the force felt, dashed ring is the grip limit">
@@ -355,5 +403,30 @@
   </div>
 </div>
 <script type="module" src="src/main.js"></script>
+<!-- pwa -->
+<script>
+  // Offline play once installed, and an Install button when the browser offers one (Chrome).
+  if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+    addEventListener('load', () => {
+      navigator.serviceWorker.register('sw.js').then(() => navigator.serviceWorker.ready).then((reg) => {
+        // Hand over what this visit already downloaded, so the next start works offline.
+        const loaded = [location.href, ...performance.getEntriesByType('resource').map((r) => r.name)];
+        reg.active?.postMessage({ cache: loaded });
+      }).catch(() => {});
+    });
+  }
+  let installPrompt = null;
+  const installBtn = document.getElementById('install');
+  addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installPrompt = e; installBtn.hidden = false; });
+  addEventListener('appinstalled', () => { installPrompt = null; installBtn.hidden = true; });
+  installBtn.addEventListener('click', async () => {
+    if (!installPrompt) return;
+    installPrompt.prompt();
+    await installPrompt.userChoice;
+    installPrompt = null;
+    installBtn.hidden = true;
+  });
+</script>
+<!-- /pwa -->
 </body>
 </html>

@@ -1218,7 +1218,9 @@ function frame(now) {
     viewMat = multiply(viewMat, basis([-j[0], -j[1], -j[2]], [1, 0, 0], [0, 1, 0], [0, 0, 1]));
   }
   shake *= Math.exp(-dt * 7);
-  const proj = perspective(cockpit ? fovy * 1.1 : fovy, aspect, cockpit ? 0.05 : 0.1, world.far);
+  // The cockpit sees a little wider, but never so tall upright that the windshield shrinks to a strip.
+  const camFov = cockpit ? Math.min(fovy * 1.1, aspect < 1 ? (80 * Math.PI) / 180 : Infinity) : fovy;
+  const proj = perspective(camFov, aspect, cockpit ? 0.05 : 0.1, world.far);
   const viewProj = multiply(proj, viewMat);
   streamCells(eyePos[0], eyePos[2]);
   sky.draw(viewProj, eyePos, now / 1000);

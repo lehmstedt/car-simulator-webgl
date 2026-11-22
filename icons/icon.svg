@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Road vanishing into the horizon under an amber speedometer arc. Full-bleed, so it also works masked. -->
+  <rect width="512" height="512" fill="#0e141c"/>
+  <rect y="300" width="512" height="212" fill="#26323d"/>
+  <path d="M206 300 L306 300 L470 512 L42 512 Z" fill="#3a4654"/>
+  <path d="M252 312 L260 312 L266 360 L246 360 Z M244 384 L268 384 L276 452 L236 452 Z" fill="#f2f5f8"/>
+  <path d="M136 290 A120 120 0 0 1 376 290" fill="none" stroke="#ffc43d" stroke-width="22" stroke-linecap="round"/>
+  <path d="M256 290 L330 214" stroke="#ff6b5a" stroke-width="16" stroke-linecap="round"/>
+  <circle cx="256" cy="290" r="20" fill="#f2f5f8"/>
+</svg>
