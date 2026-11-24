@@ -9,6 +9,10 @@
 // - Crashes into other cars (reported by the collisions, main.js).
 // - Scaring people on the sidewalk (they jump out of the way: pedestrians.js).
 //
+// An offence only counts when someone sees it: witness(kind), set by the game
+// (a patrol car in sight, police.js). Unseen, it's as if it never happened, and
+// a long one (speeding) counts the moment a patrol car comes into view.
+//
 // Each offence is worth points toward the wanted level (police.js). The same
 // offence counts again only after a while, so one long speeding run isn't
 // a dozen of them.
@@ -35,6 +39,7 @@ export class Rules {
   constructor(map, traffic) {
     this.map = map;
     this.traffic = traffic;
+    this.witness = () => true; // whether the police see offence `kind` happen
     this.reset();
   }
 
@@ -47,10 +52,11 @@ export class Rules {
     this.events = [];           // offences since the last take()
   }
 
-  // An offence happened (unless the same one did a moment ago).
+  // An offence happened (unless the same one did a moment ago, or nobody saw it).
   report(kind) {
     const o = OFFENCES[kind];
     if (this.clock - (this.last[kind] ?? -1e9) < o.again) return;
+    if (!this.witness(kind)) return;
     this.last[kind] = this.clock;
     this.events.push({ kind, ...o });
   }

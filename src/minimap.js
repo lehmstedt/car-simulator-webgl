@@ -136,7 +136,7 @@ export class Minimap {
     }
     const flash = Math.floor(t * 4) % 2 === 0;
     for (const u of police) {
-      g.fillStyle = flash ? '#ff3b30' : '#3b7bff';
+      g.fillStyle = u.patrol ? '#3b7bff' : flash ? '#ff3b30' : '#3b7bff'; // cruising: steady blue
       g.beginPath();
       g.arc((u.x - car.x) / SCALE, (u.z - car.z) / SCALE, 6, 0, 2 * Math.PI);
       g.fill();

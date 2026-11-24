@@ -11,6 +11,10 @@
 //     ★★★★   five, heavier and faster; two roadblocks; a helicopter that
 //            sees over the buildings while it's on station.
 //     ★★★★★  six; spike strips in front of the roadblocks (flat tires).
+// - Patrol cars cruise the streets around the player, lights off, before
+//   anyone is wanted. An offence only counts when one of them (or the
+//   helicopter) sees it happen: witnessed(). The one that saw it gives chase
+//   right away.
 // - What they know is what they see. A patrol car sees the player when close
 //   enough with no building between; the helicopter sees from above. Seen,
 //   the player's position goes out by radio to all of them. Unseen, they drive
@@ -56,6 +60,9 @@ const BLOCK_AHEAD = [150, 250];            // m down the player's way a roadbloc
 const HELI_ON = 40, HELI_OFF = 22;         // s on station, s away for fuel
 const HELI_SIGHT = 230;                    // m (flat) the helicopter sees from
 const HELI_SPEED = 55, HELI_HEIGHT = 55;
+const PATROLS = 3;                         // patrol cars cruising around while nobody is wanted
+const PATROL_SPEED = 12;                   // m/s they cruise at
+const PATROL_SIGHT = 130;                  // m a patrol car notices from
 
 const norm = (x, z) => { const l = Math.hypot(x, z) || 1; return [x / l, z / l]; };
 
@@ -91,6 +98,9 @@ export class Police {
   }
 
   get wanted() { return this.level > 0; }
+  // Whether any of them has the player in sight right now: a patrol car or a
+  // roadblock with a clear view, or the helicopter overhead.
+  witnessed() { return !!this.heli?.sees || this.cars.some((u) => u.sees); }
   get rules() { return LEVELS[this.level] ?? LEVELS[1]; }
   // Everything of theirs that's solid: for the traffic to brake for, and the map.
   get cars() { return this.barricade.length ? [...this.units, ...this.barricade] : this.units; }
@@ -101,7 +111,12 @@ export class Police {
     const before = this.level;
     this.points += points;
     this.level = STARS.filter((p) => this.points >= p).length;
-    if (this.state === 'clear' && this.level > 0) { this.state = 'alerted'; this.alert = 2; }
+    if (this.state === 'clear' && this.level > 0) {
+      // Seen by a patrol car: it's after the player at once. Otherwise (told
+      // some other way) the first one is sent in a moment.
+      if (this.witnessed()) { this.state = 'pursuit'; this.found = true; } else { this.state = 'alerted'; this.alert = 2; }
+      for (const u of this.units) { u.patrol = false; u.path = null; u.goal = null; }
+    }
     if (this.level > before) this.events.push({ kind: 'level', level: this.level, note: LEVEL_NOTES[this.level] });
     this.report = true;
     // Seen breaking one more rule while hiding: the search starts over.
@@ -123,6 +138,7 @@ export class Police {
     if (dt <= 0) return;
     this.clock += dt;
     if (this.state === 'alerted' && (this.alert -= dt) <= 0) this.state = 'pursuit';
+    if (this.state === 'clear') { this.patrol(dt, player); return; }
     if (this.state !== 'pursuit') return;
     const L = this.rules;
 
@@ -200,7 +216,44 @@ export class Police {
   }
 
   // --- patrol cars ---------------------------------------------------------
-  spawn(player) {
+  // Nobody wanted: a few patrol cars cruise the streets around the player, each
+  // from crossing to crossing, watching.
+  patrol(dt, player) {
+    this.units = this.units.filter((u) => Math.hypot(u.x - player.x, u.z - player.z) < 420);
+    this.spawnWait -= dt;
+    if (this.units.length < PATROLS && this.spawnWait <= 0) {
+      this.spawn(player, true);
+      this.spawnWait = 3;
+    }
+    const L = LEVELS[1];
+    for (const u of this.units) {
+      if ((u.look -= dt) <= 0) { u.sees = this.sight(u, player, PATROL_SIGHT); u.look = 0.25; }
+      // The next crossing to go to: around the player, rarely back the way it came.
+      if (!u.goal || !u.path || Math.hypot(u.goal.x - u.x, u.goal.z - u.z) < 15 || (u.goalAge += dt) > 60) {
+        let best = null, score = -Infinity;
+        for (const r of this.map.roadsNear(player.x, player.z, 260)) {
+          if (!r.a || !r.cars) continue;
+          const n = Math.random() < 0.5 ? r.a : r.b, ox = n.x - u.x, oz = n.z - u.z, d = Math.hypot(ox, oz);
+          if (d < 40 || d > 300) continue;
+          const sc = Math.random() + ((ox * u.dx + oz * u.dz) / d) * 0.6;
+          if (sc > score) { score = sc; best = n; }
+        }
+        u.goal = best ? { x: best.x, z: best.z } : { x: player.x, z: player.z };
+        u.goalAge = 0;
+        u.path = this.route(u, u.goal);
+        u.at = 0;
+      }
+      let tx, tz, vt;
+      if (!u.path) { tx = u.goal.x; tz = u.goal.z; vt = PATROL_SPEED * 0.6; } else [tx, tz, vt] = this.follow(u, PATROL_SPEED);
+      // Not into the player's car: slow behind it.
+      const d = Math.hypot(player.x - u.x, player.z - u.z);
+      if (d < 14 && (player.x - u.x) * u.dx + (player.z - u.z) * u.dz > 0) vt = Math.min(vt, Math.max(0, (d - 7) * 0.8));
+      this.move(u, dt, tx, tz, vt, player, L);
+    }
+    this.separate();
+  }
+
+  spawn(player, patrol = false) {
     const roads = this.map.roadsNear(player.x, player.z, SPAWN_MAX).filter((r) => r.a);
     if (!roads.length) return;
     const fx = -Math.sin(player.heading), fz = -Math.cos(player.heading);
@@ -213,7 +266,7 @@ export class Police {
       if (d < SPAWN_MIN || d > SPAWN_MAX) continue;
       // Chasers come from behind, where they aren't seen popping up; interceptors from ahead.
       const side = ((x - player.x) * fx + (z - player.z) * fz) / d;
-      if (tries < 40 && (front ? side < 0.2 : side > 0.3)) continue;
+      if (!patrol && tries < 40 && (front ? side < 0.2 : side > 0.3)) continue;
       if (this.map.blocked(x, z) || this.cars.some((o) => Math.hypot(o.x - x, o.z - z) < 20)) continue;
       if (tries < 50 && this.sight({ x, z }, player, 200)) continue;
       const q = r.pts[Math.min(r.pts.length - 1, k + 1)], p = r.pts[Math.max(0, k - 1)];
@@ -224,7 +277,7 @@ export class Police {
       this.units.push({
         id: this.nextId++, x, z, dx, dz, v: 8, role, heavy, path: null, at: 0, replan: 0, look: 0,
         sees: false, stuck: 0, reverse: 0, ghost: 0, ramWait: 0, goal: null, side: this.units.length % 4 < 2 ? 1 : -1,
-        length: heavy ? SUV_LENGTH : POLICE_LENGTH, width: heavy ? SUV_WIDTH : POLICE_WIDTH,
+        length: heavy ? SUV_LENGTH : POLICE_LENGTH, width: heavy ? SUV_WIDTH : POLICE_WIDTH, patrol, goalAge: 0,
       });
       return;
     }
@@ -364,6 +417,12 @@ export class Police {
         [tx, tz, vt] = this.follow(u, cruise);
       }
     }
+    this.move(u, dt, tx, tz, vt, player, L);
+  }
+
+  // Unit u turns toward (tx, tz) and drives, its speed going toward vt; then
+  // it's pushed out of walls and cars, and rams the player if it can (L.ram).
+  move(u, dt, tx, tz, vt, player, L) {
     // Turn toward the target, as fast as the speed allows.
     const [ax, az] = norm(tx - u.x, tz - u.z);
     const cross = u.dx * az - u.dz * ax, dot = u.dx * ax + u.dz * az;
