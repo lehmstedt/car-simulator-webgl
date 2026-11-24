@@ -1,4 +1,4 @@
-import { createProgram, createMesh, deleteMesh } from './gl.js';
+import { createProgram, createMesh, deleteMesh, canReverseDepth, createReversedDepth } from './gl.js';
 import { cube, torus, cylinder } from './geometry.js';
 import { gt3Body, yarisBody } from './bodies.js';
 import { perspective, lookAt, multiply, identity, basis, rotate } from './math.js';
@@ -75,11 +75,15 @@ const clockEl = document.getElementById('clock');
 const weatherEl = document.getElementById('weather');
 const G_SCALE = 28; // px per g on the G-meter (grid rings at 0.5 g and 1 g)
 const gTrail = [];
-const gl = canvas.getContext('webgl2', { antialias: true });
+// With reversed-Z the scene is drawn (multisampled) off screen and only copied
+// to the canvas, which then needs no antialiasing of its own.
+const reverseZ = canReverseDepth();
+const gl = canvas.getContext('webgl2', { antialias: !reverseZ });
 if (!gl) {
   document.getElementById('hud').textContent = 'WebGL2 is not available in this browser.';
   throw new Error('WebGL2 not supported');
 }
+const depthTarget = reverseZ ? createReversedDepth(gl) : null;
 
 const program = createProgram(gl, SCENE_VS, SCENE_FS);
 const uModel = gl.getUniformLocation(program, 'uModel');
@@ -1257,6 +1261,7 @@ function frame(now) {
   cam.y = Math.max(cam.y, terrainHeight(cam.x, cam.z) + 1.2); // never inside a hill
 
   resize();
+  depthTarget?.begin(canvas.width, canvas.height);
   gl.clearColor(...climate.horizon, 1);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
@@ -1286,7 +1291,7 @@ function frame(now) {
   shake *= Math.exp(-dt * 7);
   // The cockpit sees a little wider, but never so tall upright that the windshield shrinks to a strip.
   const camFov = cockpit ? Math.min(fovy * 1.1, aspect < 1 ? (80 * Math.PI) / 180 : Infinity) : fovy;
-  const proj = perspective(camFov, aspect, cockpit ? 0.05 : 0.1, world.far);
+  const proj = perspective(camFov, aspect, cockpit ? 0.05 : 0.1, world.far, !!depthTarget);
   const viewProj = multiply(proj, viewMat);
   streamCells(eyePos[0], eyePos[2]);
   sky.draw(viewProj, eyePos, now / 1000, climate);
@@ -1327,6 +1332,8 @@ function frame(now) {
 
   // Road layers sit a few cm above the ground; polygon offset keeps them from
   // z-fighting with it (and the start line and skids with the road) far away.
+  // Toward the eye is up in reversed-Z depth, down otherwise.
+  const pull = depthTarget ? 1 : -1;
   gl.disable(gl.CULL_FACE);
   const seen = (c, far = world.drawDistance ?? DRAW_DISTANCE) => Math.hypot(c.x - eyePos[0], c.z - eyePos[2]) - c.radius < far;
   for (const g of world.ground) {
@@ -1338,10 +1345,10 @@ function frame(now) {
   // The open map's cells in view, with their meshes made.
   const cells = world.loaded ? [...world.loaded].filter((c) => seen(c)) : [];
   gl.enable(gl.POLYGON_OFFSET_FILL);
-  gl.polygonOffset(-1, -2);
+  gl.polygonOffset(pull, 2 * pull);
   for (const l of world.layers) if (!l.top) draw(l.mesh, identity(), l.color, l.mat);
   for (const c of cells) for (const [mesh, color, mat, top] of c.layers) if (!top) draw(mesh, identity(), color, mat);
-  gl.polygonOffset(-2, -4);
+  gl.polygonOffset(2 * pull, 4 * pull);
   for (const l of world.layers) if (l.top) draw(l.mesh, identity(), l.color, l.mat);
   for (const c of cells) for (const [mesh, color, mat, top] of c.layers) if (top) draw(mesh, identity(), color, mat);
   if (skids.used) draw(skids.mesh, identity(), [0.12, 0.12, 0.13], 'rubber');
@@ -1440,6 +1447,7 @@ function frame(now) {
   const grade = Math.round(car.grade * 100);
   gradeEl.textContent = `${grade > 0 ? '+' : grade < 0 ? '−' : ''}${Math.abs(grade)}%`;
 
+  depthTarget?.end();
   requestAnimationFrame(frame);
 }
 // For poking at the game from the browser's console: open the page with ?debug.

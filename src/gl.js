@@ -53,3 +53,64 @@ export function deleteMesh(gl, mesh) {
   gl.deleteVertexArray(mesh.vao);
   for (const b of mesh.buffers) gl.deleteBuffer(b);
 }
+
+// Whether this browser can draw with reversed-Z depth (see ReversedDepth).
+// Asked of a throwaway context, since the canvas's own must be made knowing it.
+export function canReverseDepth() {
+  const probe = document.createElement('canvas').getContext('webgl2');
+  const ok = !!probe?.getExtension('EXT_clip_control');
+  probe?.getExtension('WEBGL_lose_context')?.loseContext();
+  return ok;
+}
+
+// Reversed-Z depth: the scene is drawn into a multisampled target with a
+// float depth buffer holding near / distance (1 at the near plane, 0 far
+// away), then resolved onto the canvas. Floats are finest near 0, which
+// cancels the squeeze of the perspective divide, so depth stays precise to a
+// few mm out to the horizon. A plain 24-bit buffer with a 5 cm near plane
+// can't tell apart surfaces a few cm apart past ~50 m: the ground, sidewalks,
+// asphalt and paint flickered through each other.
+// Depth tests GREATER, clears to 0, and polygon offsets pull toward the eye
+// with positive values. Returns null if the target can't be made.
+export function createReversedDepth(gl) {
+  const ext = gl.getExtension('EXT_clip_control');
+  if (!ext) return null;
+  const samples = Math.min(4, gl.getParameter(gl.MAX_SAMPLES));
+  const fb = gl.createFramebuffer(), color = gl.createRenderbuffer(), depth = gl.createRenderbuffer();
+  let w = 0, h = 0;
+  const size = (width, height) => {
+    w = width; h = height;
+    gl.bindRenderbuffer(gl.RENDERBUFFER, color);
+    gl.renderbufferStorageMultisample(gl.RENDERBUFFER, samples, gl.RGBA8, w, h);
+    gl.bindRenderbuffer(gl.RENDERBUFFER, depth);
+    gl.renderbufferStorageMultisample(gl.RENDERBUFFER, samples, gl.DEPTH_COMPONENT32F, w, h);
+    gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+  };
+  size(1, 1);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, color);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth);
+  const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  if (!ok) {
+    gl.deleteFramebuffer(fb); gl.deleteRenderbuffer(color); gl.deleteRenderbuffer(depth);
+    return null;
+  }
+  ext.clipControlEXT(ext.LOWER_LEFT_EXT, ext.ZERO_TO_ONE_EXT);
+  gl.depthFunc(gl.GREATER);
+  gl.clearDepth(0);
+  return {
+    // Sizes the target to the canvas and draws into it from now on.
+    begin(width, height) {
+      if (width !== w || height !== h) size(width, height);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    },
+    // Resolves the frame onto the canvas.
+    end() {
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, fb);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+      gl.blitFramebuffer(0, 0, w, h, 0, 0, w, h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    },
+  };
+}

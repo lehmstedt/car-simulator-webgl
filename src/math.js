@@ -16,14 +16,17 @@ export function multiply(a, b) {
   return out;
 }
 
-export function perspective(fovy, aspect, near, far) {
+// reversed: depth 1 at the near plane down to 0 at the far one, for a 0..1
+// clip range (see createReversedDepth in gl.js); else OpenGL's -1..1, near to far.
+export function perspective(fovy, aspect, near, far, reversed = false) {
   const f = 1 / Math.tan(fovy / 2);
   const nf = 1 / (near - far);
+  const [a, b] = reversed ? [near / (far - near), (far * near) / (far - near)] : [(far + near) * nf, 2 * far * near * nf];
   return new Float32Array([
     f / aspect, 0, 0, 0,
     0, f, 0, 0,
-    0, 0, (far + near) * nf, -1,
-    0, 0, 2 * far * near * nf, 0,
+    0, 0, a, -1,
+    0, 0, b, 0,
   ]);
 }
 
