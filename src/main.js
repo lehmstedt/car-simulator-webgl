@@ -332,7 +332,11 @@ function drawPuffs() {
 }
 
 // What the traffic needs to know of the player's car.
-const playerState = () => ({ x: car.x, z: car.z, heading: car.heading, speed: car.speed, vx: -Math.sin(car.heading) * car.speed, vz: -Math.cos(car.heading) * car.speed });
+// (vx, vz): its velocity on the ground, slides included; yaw: its rate of turn (+ left).
+const playerState = () => {
+  const s = Math.sin(car.heading), c = Math.cos(car.heading);
+  return { x: car.x, z: car.z, heading: car.heading, speed: car.speed, vx: -s * car.vx - c * car.vy, vz: -c * car.vx + s * car.vy, yaw: car.yawRate };
+};
 
 // Makes a cell's meshes (open map): streets, lights and signs, buildings, trees.
 function loadCell(c) {
@@ -868,13 +872,18 @@ function collide() {
     car.z += hit.nz * (hit.depth + 0.02);
     // The obstacle's own velocity along the push (other cars move).
     const o = hit.car ?? hit.police;
-    const on = o ? (o.dx * hit.nx + o.dz * hit.nz) * o.v : 0;
+    const on = !o ? 0 : o.wx !== undefined ? o.wx * hit.nx + o.wz * hit.nz : (o.dx * hit.nx + o.dz * hit.nz) * o.v;
     const wx = -s * car.vx - c * car.vy, wz = -c * car.vx + s * car.vy;
     const wn = wx * hit.nx + wz * hit.nz, rel = wn - on;
     if (rel < 0) {
-      // Remove the push into it (plus a 20% bounce), scrub 30% of the slide along it.
+      // Remove the push into it (plus a 20% bounce), scrub 30% of the slide along
+      // it. A traffic car takes its share of the blow by weight: it's shoved
+      // away and spun, and the player's car keeps the rest of its way.
       const tx = (wx - wn * hit.nx) * 0.7, tz = (wz - wn * hit.nz) * 0.7;
-      const n = on - rel * 0.2;
+      const moving = hit.car && !hit.car.parked, mc = moving ? hit.car.kind.mass : Infinity;
+      const ours = moving ? v.mass / (v.mass + mc) : 0;
+      if (moving) { const dv = 1.2 * rel * ours; world.traffic.knock(hit.car, hit.nx * dv, hit.nz * dv, at[0], at[1]); }
+      const n = wn - rel * 1.2 * (1 - ours);
       const ux = tx + n * hit.nx, uz = tz + n * hit.nz;
       car.vx = -s * ux - c * uz;
       car.vy = -c * ux + s * uz;
@@ -1151,7 +1160,7 @@ function frame(now) {
   }
   if (ticks === MAX_TICKS) physicsLag = Math.min(physicsLag, PHYSICS_STEP);
   if (!where) { where = after = track.locate(car.x, car.z); surface = where.surface ?? world.offTrack(car.x, car.z, where); }
-  // Traffic is scripted, not simulated: it moves once a frame by the physics time that passed.
+  // Traffic runs its own lighter physics (traffic.js), once a frame for the physics time that passed.
   world.traffic?.update(ticks * PHYSICS_STEP, playerState());
   if (world.police) updatePolice(ticks * PHYSICS_STEP, now);
   updatePuffs(dt);

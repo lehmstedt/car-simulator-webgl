@@ -42,7 +42,10 @@ export function createCityRenderer(gl, program, draw, sun) {
   // One car of the traffic's shapes. `blink`: whether turn signals are in their lit half.
   function car(c, y, eye, blink, paint = c.color) {
     const m = cars[c.kind.index];
-    const B = basis([c.x, y, c.z], [-c.dz, 0, c.dx], [0, 1, 0], [-c.dx, 0, -c.dz]);
+    // The body on its springs (traffic.js step()): pitched nose down by `pitch`,
+    // leaning left by `roll` (small angles).
+    const p = c.pitch ?? 0, q = c.roll ?? 0;
+    const B = basis([c.x, y, c.z], [-c.dz, q, c.dx], [c.dx * p + c.dz * q, 1, c.dz * p - c.dx * q], [-c.dx, p, -c.dz]);
     draw(m.paint, B, paint, 'paint');
     if (m.glass) draw(m.glass, B, CAR_GLASS, 'glass');
     if (m.accent) draw(m.accent, B, c.kind.accent, 'paint');
