@@ -81,7 +81,7 @@ export class Precipitation {
     gl.uniform1f(u.rain, rain);
     gl.uniform1f(u.scale, scale);
     // Flakes catch the light around them: bright by day, dim but visible at night.
-    const k = 0.18 + 0.82 * Math.min(1, sky.amb[1] / 0.38);
+    const k = 0.4 + 0.6 * Math.min(1, sky.amb[1] / 0.38);
     gl.uniform3fv(u.color, rain ? [0.7 * k + 0.1, 0.75 * k + 0.1, 0.82 * k + 0.12] : [0.95 * k + 0.05, 0.96 * k + 0.05, k + 0.06]);
     gl.enable(gl.BLEND);
     gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE);
