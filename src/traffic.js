@@ -53,7 +53,7 @@ import { cube, cylinder } from './geometry.js';
 import { loft, profile } from './bodies.js';
 import { ROAD_LIFT } from './track.js';
 
-const TRAFFIC_COUNT = 150;         // cars around the player
+const TRAFFIC_COUNT = 70;          // cars around the player
 const SPAWN_NEAR = 400, SPAWN_FAR = 500; // m: cars are put this far out at most, taken away past SPAWN_FAR
 // How readily a street gets a new car, by class: the big streets are the busy ones.
 const BUSY = { primary: 1, secondary: 1, tertiary: 0.8, residential: 0.4, unclassified: 0.35, living_street: 0.2 };
@@ -577,6 +577,7 @@ export class Traffic {
       for (let i = 0; i < steps; i++) this.step(c, h);
       this.follow(c, player, gone);
     }
+    this.collideCars();
     for (const c of gone) this.remove(c);
     // Keep the numbers up: new cars out of sight.
     if (this.cars.length < TRAFFIC_COUNT) this.spawn(player, 160, SPAWN_NEAR);
@@ -909,6 +910,55 @@ export class Traffic {
     c.panic = true;
   }
 
+  // Traffic cars that ran into each other (or into a parked car): pushed
+  // apart, and the blow shared by mass (restitution 0.2), each shoved and spun
+  // about its middle by where it was hit. A real crash stops both, hazards on.
+  collideCars() {
+    const corners = (c) => {
+      const hl = c.kind.length / 2, hw = c.kind.width / 2, rx = -c.dz, rz = c.dx;
+      return [[1, 1], [1, -1], [-1, -1], [-1, 1]].map(([f, l]) => [c.x + c.dx * hl * f + rx * hw * l, c.z + c.dz * hl * f + rz * hw * l]);
+    };
+    const pair = (a, b) => {
+      const dx = b.x - a.x, dz = b.z - a.z, reach = (a.kind.length + b.kind.length) / 2;
+      if (dx * dx + dz * dz > reach * reach) return;
+      const ca = corners(a), cb = corners(b);
+      // Separating axes: each car's along and across.
+      let best = null;
+      for (const [ax, az, own] of [[a.dx, a.dz, 'a'], [-a.dz, a.dx, 'a'], [b.dx, b.dz, 'b'], [-b.dz, b.dx, 'b']]) {
+        const pa = ca.map(([x, z]) => x * ax + z * az), pb = cb.map(([x, z]) => x * ax + z * az);
+        const o1 = Math.max(...pa) - Math.min(...pb), o2 = Math.max(...pb) - Math.min(...pa);
+        if (o1 <= 0 || o2 <= 0) return;
+        // n points from a to b.
+        const depth = Math.min(o1, o2), sg = o1 < o2 ? 1 : -1;
+        if (!best || depth < best.depth) best = { depth, nx: ax * sg, nz: az * sg, own };
+      }
+      const { depth, nx, nz, own } = best;
+      // Where they touch: the corner of the other car deepest into the one whose side it is.
+      const pts = own === 'a' ? cb : ca, dir = own === 'a' ? 1 : -1;
+      let at = pts[0];
+      for (const q of pts) if ((q[0] * nx + q[1] * nz) * dir < (at[0] * nx + at[1] * nz) * dir) at = q;
+      const ma = a.parked ? Infinity : a.kind.mass, mb = b.parked ? Infinity : b.kind.mass;
+      const ia = a.parked ? 0 : 1 / ma, ib = b.parked ? 0 : 1 / mb;
+      // Apart, the lighter moved the more.
+      a.x -= nx * depth * ia / (ia + ib); a.z -= nz * depth * ia / (ia + ib);
+      b.x += nx * depth * ib / (ia + ib); b.z += nz * depth * ib / (ia + ib);
+      const rel = (b.wx ?? 0) * nx + (b.wz ?? 0) * nz - ((a.wx ?? 0) * nx + (a.wz ?? 0) * nz);
+      if (rel >= 0) return;
+      const j = (-1.2 * rel) / (ia + ib);
+      this.knock(a, -nx * j * ia, -nz * j * ia, at[0], at[1]);
+      this.knock(b, nx * j * ib, nz * j * ib, at[0], at[1]);
+      if (-rel > 2) for (const c of [a, b]) this.hit(c, -rel);
+    };
+    for (const a of this.cars) {
+      const ci = Math.floor(a.x / CAR_CELL), cj = Math.floor(a.z / CAR_CELL);
+      for (let i = ci - 1; i <= ci + 1; i++) for (let j = cj - 1; j <= cj + 1; j++) {
+        for (const b of this.grid.get(i * 7919 + j) ?? []) if (b.id > a.id) pair(a, b);
+      }
+      // Parked cars: only for a car off its lane (knocked or swerving), which is when it can reach one.
+      if (a.lost || Math.abs(a.dodge) > 0.5 || Math.abs(a.vy) > 1) for (const p of this.parkedNear(a.x, a.z, 8)) pair(a, p);
+    }
+  }
+
   // The player ran into car c at `speed` m/s: it brakes to a stop, hazards on, for a while.
   hit(c, speed) {
     if (c.parked || speed < 2) return;
@@ -1010,6 +1060,7 @@ export class Traffic {
     const poles = { positions: [], normals: [] }, lamps = { positions: [], normals: [], uvs: [] };
     const signs = { positions: [], normals: [], uvs: [] }, backs = { positions: [], normals: [] };
     const lines = { positions: [], normals: [] };
+    const posts = []; // solid: [x, z, radius] of every pole, for collisions
     const C = cube();
     // A box at c with axes right (x), up (y) and face (z, toward the driver).
     const box = (m, c, rgt, face, sx, sy, sz) => {
@@ -1047,6 +1098,7 @@ export class Traffic {
         const side = k % 2 ? 1 : -1, rgt = [-o.dz * side, o.dx * side], face = [o.dx, o.dz];
         const off = r.w + 0.7, base = [o.x + rgt[0] * off, o.z + rgt[1] * off];
         box(poles, [base[0], 3.6, base[1]], rgt, face, 0.14, 7.2, 0.14);
+        posts.push([base[0], base[1], 0.1]);
         box(poles, [base[0] - rgt[0] * 1.0, 7.15, base[1] - rgt[1] * 1.0], rgt, face, 2.1, 0.09, 0.09);
         box(poles, [base[0] - rgt[0] * 1.9, 7.08, base[1] - rgt[1] * 1.9], rgt, face, 0.55, 0.12, 0.26);
       }
@@ -1078,6 +1130,7 @@ export class Traffic {
         if (!b) continue;
         const base = [b[0], 0, b[1]];
         box(poles, [base[0], 1.15, base[2]], rgt, face, 0.07, 2.3, 0.07);
+        posts.push([base[0], base[2], 0.06]);
         const c = [base[0] + face[0] * 0.06, 2.35, base[2] + face[1] * 0.06];
         disc(signs, c, rgt, face, 0.38, (u, v) => [0.5 + u * 0.5, 0.5 + v * 0.5]);
         disc(backs, [c[0] - face[0] * 0.01, c[1], c[2] - face[1] * 0.01], [-rgt[0], -rgt[1]], [-face[0], -face[1]], 0.38);
@@ -1089,6 +1142,7 @@ export class Traffic {
         const base = spot(at(far * 2 + 1, 0), at(far * 2 + 1, 1.2), at(far * 2 + 3, 0.6), at(far * 2 + 3, 2), at(0, 0), at(0, 1), at(-2, 0.6));
         if (!base) continue;
         box(poles, [base[0], 1.9, base[1]], rgt, face, 0.16, 3.8, 0.16);
+        posts.push([base[0], base[1], 0.1]);
         const head = [base[0] + face[0] * 0.25, 3.3, base[1] + face[1] * 0.25];
         box(poles, head, rgt, face, 0.42, 1.15, 0.28);
         for (let k = 0; k < 3; k++) {
@@ -1099,7 +1153,7 @@ export class Traffic {
         }
       }
     }
-    return { poles, lamps, signs, backs, lines };
+    return { poles, lamps, signs, backs, lines, posts };
   }
 }
 

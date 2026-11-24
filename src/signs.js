@@ -88,6 +88,15 @@ export class Signs {
     this.faces = createMesh(gl, program, { positions, normals, uvs });
   }
 
+  // What's solid of each board, for collisions: the line between its posts, as
+  // [ax, az, bx, bz, radius] (the board spans them, low enough for a car's roof).
+  solids() {
+    return this.signs.map((s) => {
+      const { right } = boardFrame(s);
+      return [s.x - right[0] * 0.55, s.z - right[2] * 0.55, s.x + right[0] * 0.55, s.z + right[2] * 0.55, 0.12];
+    });
+  }
+
   // Model matrices of the untextured parts (posts and board backing) as
   // [center, right, up, back, sx, sy, sz] for basis().
   parts() {

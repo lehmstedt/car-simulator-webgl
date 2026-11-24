@@ -202,6 +202,7 @@ function buildRingWorld(kind) {
     offTrack: (x, z, where) => where.sand ? 'sand' : 'grass',
     layers: roads.flatMap((r) => r.layers).map((l) => ({ ...l, mesh: upload(l.mesh) })),
     signs,
+    posts: signs.solids(),
     signParts: signs.parts().map(({ part, m }) => ({
       color: part === 'post' ? [0.55, 0.57, 0.6] : [0.3, 0.32, 0.35], mat: part === 'post' ? 'metal' : 'matte', model: basis(...m),
     })),
@@ -401,6 +402,7 @@ function loadCell(c) {
     [m.white, [0.92, 0.92, 0.9], 'line', true],
     [f.lines, [0.92, 0.92, 0.9], 'line', true],
   ].filter(([mesh]) => mesh.positions.length).map(([mesh, ...rest]) => [upload(mesh), ...rest]);
+  c.posts = f.posts.map(([x, z, r]) => [x, z, x, z, r]);
   c.furniture = f.poles.positions.length ? { poles: upload(f.poles), lamps: upload(f.lamps), backs: upload(f.backs), faces: upload(f.signs) } : null;
   world.loaded.add(c);
   c.buildings = [
@@ -419,7 +421,7 @@ function loadCell(c) {
 function unloadCell(c) {
   for (const m of c.gpu) deleteMesh(gl, m);
   c.gpu = [];
-  c.buildings = c.trees = c.layers = c.furniture = null;
+  c.buildings = c.trees = c.layers = c.furniture = c.posts = null;
   world?.loaded?.delete(c);
 }
 // Loads cells coming within reach of (x, z), nearest first (one per frame
@@ -905,6 +907,53 @@ function updateTires() {
 // it). How fast it went in, against what the obstacle was doing, is the
 // crash: it damages the side of the car that took it (car.js crash()).
 let shake = 0; // camera shake after a crash (m), decays
+
+// Poles and sign boards near the car, as [ax, az, bx, bz, radius] (a post is a
+// zero-length line): the Nürburgring's corner boards, the open map's lamp
+// posts, traffic lights and stop signs (of the cells loaded around the car).
+function postsNear(x, z, reach) {
+  const out = [];
+  const add = (list) => {
+    for (const p of list) if (Math.min(Math.hypot(p[0] - x, p[1] - z), Math.hypot(p[2] - x, p[3] - z)) < reach) out.push(p);
+  };
+  if (world.posts) add(world.posts);
+  for (const c of world.loaded ?? []) if (c.posts && Math.hypot(c.x - x, c.z - z) < c.radius + reach) add(c.posts);
+  return out;
+}
+
+// The deepest a post goes into the car's outline (a box `f` ahead of its
+// middle, `r` behind, `hw` each side): the push out of it (nx, nz), depth and
+// where they touch, as blocked() gives; null if none does.
+function postHit(posts, f, r, hw) {
+  const s = Math.sin(car.heading), c = Math.cos(car.heading);
+  // forward = (-sin, -cos), right = (cos, -sin)
+  const fx = -s, fz = -c, rx = c, rz = -s;
+  let best = null;
+  for (const [ax, az, bx, bz, rad] of posts) {
+    const n = Math.max(1, Math.ceil(Math.hypot(bx - ax, bz - az) / 0.2));
+    for (let i = 0; i <= n; i++) {
+      const px = ax + ((bx - ax) * i) / n, pz = az + ((bz - az) * i) / n;
+      const ox = px - car.x, oz = pz - car.z, a = ox * fx + oz * fz, b = ox * rx + oz * rz;
+      const ca = clamp(a, -r, f), cb = clamp(b, -hw, hw);
+      let h;
+      if (ca !== a || cb !== b) {
+        // Outside: the outline's nearest point is pushed away from the post.
+        const d = Math.hypot(a - ca, b - cb);
+        if (d >= rad) continue;
+        const ua = (ca - a) / d, ub = (cb - b) / d;
+        h = { depth: rad - d, nx: fx * ua + rx * ub, nz: fz * ua + rz * ub, at: [car.x + fx * ca + rx * cb, car.z + fz * ca + rz * cb] };
+      } else {
+        // Inside: out the nearest side, past the post.
+        const sides = [[f - a, 1, 0], [a + r, -1, 0], [hw - b, 0, 1], [b + hw, 0, -1]].sort((p, q) => p[0] - q[0]);
+        const [d, ea, eb] = sides[0];
+        h = { depth: d + rad, nx: -(fx * ea + rx * eb), nz: -(fz * ea + rz * eb), at: [px, pz] };
+      }
+      if (!best || h.depth > best.depth) best = h;
+    }
+  }
+  return best;
+}
+
 function collide() {
   if (!track.blocked) return;
   const v = model(car.variant).spec;
@@ -913,6 +962,7 @@ function collide() {
   for (const a of [f, f / 2, 0, -r / 2, -r]) for (const b of [-hw, hw]) outline.push([a, b]);
   outline.push([f, 0], [-r, 0]);
   let impact = null;
+  const posts = postsNear(car.x, car.z, 8);
   for (let pass = 0; pass < 3; pass++) {
     const s = Math.sin(car.heading), c = Math.cos(car.heading);
     let hit = null, at = null;
@@ -925,6 +975,8 @@ function collide() {
       else if ((h = world.police?.blocked(px, pz))) h.what = 'police';
       if (h && (!hit || h.depth > hit.depth)) { hit = h; at = [px, pz]; }
     }
+    const ph = posts.length ? postHit(posts, f, r, hw) : null;
+    if (ph && (!hit || ph.depth > hit.depth)) { hit = ph; hit.what = 'wall'; at = ph.at; }
     if (!hit) break;
     car.x += hit.nx * (hit.depth + 0.02);
     car.z += hit.nz * (hit.depth + 0.02);
