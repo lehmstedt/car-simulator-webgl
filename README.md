@@ -94,9 +94,19 @@ The traffic itself is `src/traffic.js`.
 
 About 150 cars drive the streets around you (`src/traffic.js`): sedans, SUVs, hatchbacks, taxis, vans,
 pickups, and city buses on the bigger streets. They keep their lane, signal their turns, stop at lights
-and stop signs, pull over to the right for a siren coming up behind them, and stop with their hazard
-lights on for a while when you hit them; sit in their way and they honk. Parked cars line the bigger
-streets and the left side of one-way side streets: solid, but they never move.
+and stop signs, pull over to the right for a siren coming up behind them; sit in their way and they honk.
+Parked cars line the bigger streets and the left side of one-way side streets: solid, but they never move.
+
+Each car is driven, not placed on its path: its driver steers toward a point ahead on the lane (turning
+the wheel at a human rate) and works throttle and brake, which come in gradually. Under it is a light
+physics model, much simpler than yours: a bicycle model that goes where its wheels point while the tires
+hold, with one grip limit shared by braking and cornering, and a body on springs that dives under braking,
+squats pulling away and leans in the turns. The drivers watch you: they foresee where your car will be
+over the next 3 s and where they'll be on their way. Cut across in front of one, come at it on the wrong
+side or about to hit its side, and after its reaction time (0.35 to 0.85 s) it brakes as hard as it must,
+swerves (behind you if you're crossing) when braking won't do, gets out of the way of a hit to its rear
+half, and honks. Hit one and it takes its share of the blow by weight (a bus barely moves): it's shoved
+and spun, slides to a stop with its hazard lights on, then drives back to its lane.
 
 What stands at each crossing always makes sense: lights and stop signs come from the map data, then
 every crossing is checked when the car comes near (`plan()` in `src/traffic.js`). A crossing the data
@@ -139,6 +149,10 @@ Break the rules in Montreal and the police come after you (`src/rules.js`, `src/
   through a stop sign (you must slow under 5 km/h), driving the wrong way up a one-way street,
   driving on the sidewalk or the lawns, scaring people there, and crashing into other cars (worse
   into a patrol car).
+- **Only if the police see it**: a few patrol cars cruise the streets around you, light bars off
+  (steady blue dots on the minimap). An offence counts only when one of them (or the helicopter)
+  has you in sight; nobody watching, nothing happens. Speeding still counts the moment one comes
+  into view. The car that saw it gives chase at once.
 - Each offence adds points; points make the **wanted level** (1–5 stars). Running from patrol cars
   that have you in sight adds a point every 14 s, so a chase that goes on gets worse by itself.
 - What each level brings:

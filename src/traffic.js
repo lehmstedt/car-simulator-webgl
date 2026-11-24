@@ -19,8 +19,22 @@
 //   cross each other. Lights and signs stand on the sidewalk, never on another
 //   street's asphalt; the short links inside a wide junction (between the two
 //   roadways of a boulevard) share the junction's lights instead of their own.
-// - A car is carried by two points on its path, front and rear axle, so it
-//   swings through a turn the way a car does instead of snapping to the path.
+// - Each car is driven, not placed: a driver steers it toward a point ahead on
+//   its path (pure pursuit, the steering wheel turned at a human rate) and
+//   works throttle and brake, which come in gradually. The car under it is a
+//   light physics model, much simpler than the player's (car.js): a bicycle
+//   that rolls where its wheels point while the tires hold, a single grip
+//   limit shared between braking and cornering (so a car knocked sideways
+//   slides and spins until the tires bite again), and a body on springs that
+//   dives under braking, squats away from a stop and leans in the turns.
+// - The drivers watch the player: where the player's car will be over the
+//   next 3 s (its speed and turn held) against where they will be on their
+//   path. Cut in front of one, come at it on the wrong side, or about to run
+//   into it from the side, and it lifts after its reaction time (0.35 to
+//   0.85 s), then brakes as hard as it must, swerves away if braking won't do,
+//   speeds up out of the way of a car about to hit its rear half, and leans
+//   on the horn. Hit, it's shoved (momentum shared by mass: a bus barely
+//   moves), slides to a stop with its hazards on, then drives back to its lane.
 // - Cars live within ~450 m of the player: far ones are taken away and new
 //   ones put on streets out of sight, so the traffic around stays the same.
 //   Sedans, SUVs, hatchbacks, taxis, vans, pickups and city buses (on the
@@ -56,6 +70,17 @@ const SIGNAL_GREEN = 26, SIGNAL_YELLOW = 3; // s, for each of the two ways; then
 const LANE_SPEED = { primary: 13.9, secondary: 13.9, tertiary: 12.5, residential: 9.7, unclassified: 9.7, living_street: 4.2 };
 const COMFORT_BRAKE = 2.6;         // m/s²: comfortable braking, planned for
 const CAR_CELL = 16;           // m: lookup grid for cars
+// The traffic's physics and drivers.
+const SIM_STEP = 1 / 60;           // s: longest physics step
+const TRAFFIC_GRIP = 8.5, BUS_GRIP = 6.5; // m/s²: what the tires hold, braking and turning together
+const STEER_RATE = 1.4;            // rad/s at the front wheels: how fast a driver turns the wheel
+const MAX_LOCK = 0.65;             // rad
+const JERK = 9, PANIC_JERK = 40;   // m/s³: how fast throttle and brake come in (calm, panicking)
+const HARD_BRAKE = 8;              // m/s²: an emergency stop
+const WATCH = 70;                  // m: drivers this close watch the player
+const FORESEE = 3, FORESEE_STEP = 0.25; // s: how far ahead they see the player's car going, in steps
+const PLAYER_HALF = [2.3, 0.95];   // m: the player's car, half length and width
+const LOST = 7;                    // m off its path: knocked away, it finds its way back slowly
 
 // A light's state for one way (phase 0 or 1) of a crossing: shared with the
 // shader (shading.js, M_SIGNAL), which lights the lamps from the same clock.
@@ -102,7 +127,7 @@ function polyOffset(pts, off) {
   });
 }
 
-const POSE_F = {}, POSE_R = {};
+const POSE_F = {}, POSE_R = {}, AIM_PT = {}, THREAT_PT = {}, FOLLOW_PT = {};
 
 export class Traffic {
   constructor(map) {
@@ -378,14 +403,22 @@ export class Traffic {
       if (lane.cars.some((o) => Math.abs(o.s - s) < 8 + (kind.length + o.kind.length) / 2)) continue;
       const taxi = kind.name === 'sedan' && Math.random() < 0.12;
       const c = {
-        id: this.nextId++, lane, s, conn: null, next, v: lane.speed * 0.6, x: p.x, z: p.z, dx: p.dx, dz: p.dz,
+        id: this.nextId++, lane, s, conn: null, next, v: lane.speed * 0.6, x: p.x, z: p.z, dx: p.dx, dz: p.dz, cs: 0,
         kind, color: taxi ? TAXI_PAINT : pickPaint(kind), taxi, mood: (0.88 + Math.random() * 0.2) * (kind.pace ?? 1),
         stoppedAt: null, stuck: 0, braking: false, behind: null,
         turn: 0,     // turn signal: -1 left, 1 right
         halt: 0,     // s left stopped after a crash, hazards on
         side: 0,     // m moved to the right of its lane, making way for a siren
         honked: 0,   // clock when it last honked
+        // Physics (see step()): speed along the car and across it (m/s, + right),
+        // yaw rate (rad/s, + right), front wheels' angle, the accel it's making.
+        vy: 0, yaw: 0, steer: 0, steerWant: 0, acc: 0, want: 0, panic: false, hold: false,
+        wx: 0, wz: 0, // its velocity on the ground (for the player's collisions)
+        pitch: 0, pitchV: 0, roll: 0, rollV: 0, ay: 0, // the body on its springs (rad, + nose down, + leaning left)
+        // The driver: how long it takes to react to the player, how alarmed it is, swerving (m right of its lane).
+        react: 0.35 + Math.random() * 0.5, alert: 0, dodge: 0, dodgeWant: 0, lost: false,
       };
+      this.place(c);
       lane.cars.push(c);
       this.cars.push(c);
       return c;
@@ -414,12 +447,18 @@ export class Traffic {
       const gap = f - half - olen / 2;
       if (!best || gap < best.gap) best = { gap, v: ov, other };
     };
-    const ci = Math.floor(c.x / CAR_CELL), cj = Math.floor(c.z / CAR_CELL), reach = Math.ceil(look / CAR_CELL);
+    const ci = Math.floor(c.x / CAR_CELL), cj = Math.floor(c.z / CAR_CELL), reach = Math.ceil(look / CAR_CELL), way = this.way(c);
     for (let i = ci - reach; i <= ci + reach; i++) {
       for (let j = cj - reach; j <= cj + reach; j++) {
         for (const o of this.grid.get(i * 7919 + j) ?? []) {
           if (o === c) continue;
-          // Only cars on its way: in its lane or the next, or in the crossing ahead.
+          // Ahead on its way (lane, crossing, next lane, next crossing): the gap along it.
+          const along = this.along(c, o, way);
+          if (along !== null) {
+            if (along > -o.kind.length && along <= look && (!best || along < best.gap)) best = { gap: along, v: o.v, other: o };
+            continue;
+          }
+          // Others on its way: in the crossing ahead, or the next lane.
           const onWay = o.conn ? o.conn.node === (c.conn ? c.conn.node : c.lane.to) : o.lane === c.next || (!c.conn && o.lane === c.lane);
           if (onWay) test(o.x, o.z, o.kind.length, o.v, o);
         }
@@ -435,6 +474,35 @@ export class Traffic {
       if (f > 0 && Math.abs(rz * o.dx - rx * o.dz) < 1.9 && o.dx * fx + o.dz * fz < 0.3 && c.id < o.id) best = null;
     }
     return best;
+  }
+
+  // The pieces of car c's way from where it is: [{ p: path, off: where it
+  // starts, m from c's front axle }], through the next two crossings.
+  way(c) {
+    const w = [];
+    let off = -(c.conn ? c.cs : c.s);
+    const add = (p) => { w.push({ p, off }); off += p.len; };
+    add(c.conn ?? c.lane);
+    if (c.next) {
+      if (!c.conn) add(this.connector(c.lane, c.next));
+      add(c.next);
+      if (c.after) add(this.connector(c.next, c.after));
+    }
+    return w;
+  }
+
+  // How far car o is ahead of car c along c's way (`way`, from way()), bumper
+  // to bumper (m); null if o isn't on it. A car just into a crossing from a
+  // lane on the way counts too, whichever way it turns there.
+  along(c, o, way) {
+    const path = o.conn ?? o.lane, s = o.conn ? o.cs : o.s;
+    let d = null;
+    for (const w of way) {
+      if (w.p === path) { d = w.off + s; break; }
+      if (o.conn && w.p === o.lane && o.cs < 6) { d = w.off + w.p.len + o.cs; break; }
+    }
+    if (d === null || d < -0.5) return null;
+    return d - 0.8 * o.kind.length - 0.2 * c.kind.length; // front axle to front bumper is 0.2 of a car
   }
 
   // May car c, waiting at the end of its lane, go into the crossing now?
@@ -498,71 +566,257 @@ export class Traffic {
       if (!this.grid.has(k)) this.grid.set(k, []);
       this.grid.get(k).push(c);
     }
+    // Where the player's car is going, as the drivers see it.
+    const seen = this.foresee(player);
+    const steps = Math.ceil(dt / SIM_STEP - 1e-6), h = dt / steps;
     const gone = [];
     for (const c of this.cars) {
       const d = Math.hypot(c.x - player.x, c.z - player.z);
-      if (d > SPAWN_FAR || (c.stuck > 40 && d > 70)) { gone.push(c); continue; }
-      // Speed wanted: the street's, slowing for the turn ahead or to stop at the line.
-      let target = c.lane.speed * c.mood, need = 0;
-      const look = Math.max(12, c.v * 3 + 8);
-      if (c.conn) {
-        target = Math.min(target, c.conn.vmax);
-      } else {
-        const dEnd = c.lane.len - c.s;
-        if (dEnd < 70) {
-          const stop = this.mustStop(c, player, dEnd);
-          const vEnd = stop ? 0 : c.next ? this.connector(c.lane, c.next).vmax : 0;
-          target = Math.min(target, Math.sqrt(vEnd * vEnd + 2 * COMFORT_BRAKE * Math.max(0, dEnd - (stop ? 0.3 : 0))));
-          if (stop && dEnd < 0.6) target = 0;
-          // The braking it takes to stop at the line from here.
-          if (stop) need = (c.v * c.v) / (2 * Math.max(0.15, dEnd - 0.35));
-          // At a stop sign: stopped at the line, now waiting for its turn.
-          if (c.lane.control === 'stop' && c.stoppedAt === null && dEnd < 2 && c.v < 0.4) {
-            c.stoppedAt = this.clock;
-            c.lane.to.queue.push(c);
-          }
-        }
-      }
-      // A stop at the end of the next piece of the same street (streets are cut
-      // in pieces between crossings too): seen from here, not when it's reached.
-      const nx = c.next;
-      if (nx && nx.len < 60 && !(c.conn ? c.conn.node : c.lane.to).crossing) {
-        const halt = nx.control === 'stop' || (nx.control === 'signal' && signalState(this.clock, nx.to.signal.offset, nx.phase) !== 'green');
-        if (halt) target = Math.min(target, Math.sqrt(2 * COMFORT_BRAKE * ((c.conn ? c.conn.len - c.cs : c.lane.len - c.s + 1) + nx.len)));
-      }
-      const a = this.ahead(c, player, look);
-      if (a) target = Math.min(target, Math.max(0, Math.min(Math.sqrt(2 * 3.5 * Math.max(0, a.gap - 2)), a.v + (a.gap - 2 - c.v * 1.2) * 0.6)));
-      // The player stopped right in front of it for a while: a honk.
-      if (a && a.player && a.gap < 6 && c.stuck > 2.5 && this.clock - c.honked > 6 && Math.abs(player.speed) < 0.5 && !this.waiting(c)) { c.honked = this.clock; this.events.push({ kind: 'honk', car: c }); }
-      // Hit a moment ago: stopped, hazards on.
-      if (c.halt > 0) { c.halt -= dt; target = 0; }
-      // A siren coming up behind: over to the right, and stop (not in a crossing).
-      const siren = !c.conn && this.sirenBehind(c);
-      if (siren) target = Math.min(target, 1.5);
-      c.side += Math.max(-dt * 1.2, Math.min(dt * 1.6, (siren ? this.room(c) : 0) - c.side));
-      // Signal for the turn ahead.
-      c.turn = 0;
-      if (c.next && (c.conn || c.lane.len - c.s < 45)) {
-        const t = c.lane.endDir[0] * c.next.startDir[1] - c.lane.endDir[1] * c.next.startDir[0];
-        c.turn = t > 0.4 ? 1 : t < -0.4 ? -1 : 0;
-      }
-      let acc = Math.max(-7, Math.min(c.kind.accel ?? 1.8, (target - c.v) * 2));
-      // Steady on the brakes all the way to the line, rather than late and hard.
-      if (need > 1.5) acc = Math.min(acc, -Math.min(7, need));
-      c.braking = acc < -0.6 || (c.v < 0.3 && target < 0.3);
-      c.v = Math.max(0, c.v + acc * dt);
-      if (!c.conn && c.v < 0.05 && target < 0.05 && c.lane.len - c.s < 0.6) c.v = 0;
-      c.stuck = c.v < 0.2 && c.halt <= 0 ? c.stuck + dt : 0;
-      this.advance(c, c.v * dt, player, gone);
+      if (d > SPAWN_FAR || (c.stuck > 40 && d > 70) || (c.lost && c.stuck > 12 && d > 50)) { gone.push(c); continue; }
+      this.drive(c, player, seen, d, dt);
+      for (let i = 0; i < steps; i++) this.step(c, h);
+      this.follow(c, player, gone);
     }
     for (const c of gone) this.remove(c);
     // Keep the numbers up: new cars out of sight.
     if (this.cars.length < TRAFFIC_COUNT) this.spawn(player, 160, SPAWN_NEAR);
   }
 
-  // Moves car c ds along its path, through crossings.
+  // The driver of car c: the speed it wants, the throttle or brake for it, and
+  // where it steers. `seen`: the player's car over the next seconds (foresee()),
+  // `dist`: how far away it is now.
+  drive(c, player, seen, dist, dt) {
+    // Speed wanted: the street's, slowing for the turn ahead or to stop at the line.
+    let target = c.lane.speed * c.mood, need = 0;
+    const look = Math.max(12, c.v * 3 + 8);
+    if (c.conn) {
+      target = Math.min(target, c.conn.vmax);
+    } else {
+      const dEnd = c.lane.len - c.s;
+      if (dEnd < 70) {
+        const stop = this.mustStop(c, player, dEnd);
+        const vEnd = stop ? 0 : c.next ? this.connector(c.lane, c.next).vmax : 0;
+        // (Stops are aimed a little short of the line: the brakes take a moment to come in.)
+        target = Math.min(target, Math.sqrt(vEnd * vEnd + 2 * COMFORT_BRAKE * Math.max(0, dEnd - (stop ? 0.9 : 0))));
+        if (stop && dEnd < 1.1) target = 0;
+        // The braking it takes to stop at the line from here.
+        if (stop) need = (c.v * c.v) / (2 * Math.max(0.15, dEnd - 0.9 - c.v * 0.12));
+        // At a stop sign: stopped at the line, now waiting for its turn.
+        if (c.lane.control === 'stop' && c.stoppedAt === null && dEnd < 2 && c.v < 0.4) {
+          c.stoppedAt = this.clock;
+          c.lane.to.queue.push(c);
+        }
+      }
+    }
+    // A stop at the end of the next piece of the same street (streets are cut
+    // in pieces between crossings too): seen from here, not when it's reached.
+    const nx = c.next;
+    if (nx && nx.len < 60 && !(c.conn ? c.conn.node : c.lane.to).crossing) {
+      const halt = nx.control === 'stop' || (nx.control === 'signal' && signalState(this.clock, nx.to.signal.offset, nx.phase) !== 'green');
+      if (halt) target = Math.min(target, Math.sqrt(2 * COMFORT_BRAKE * ((c.conn ? c.conn.len - c.cs : c.lane.len - c.s + 1) + nx.len)));
+    }
+    // The turn after the next lane, when that lane is short: it's planned for
+    // now, so a car never arrives at a tight corner too fast to make it.
+    if (nx && c.after === undefined) c.after = this.choose(nx);
+    if (nx && c.after && nx.len < 60) {
+      const d2 = (c.conn ? c.conn.len - c.cs : c.lane.len - c.s + this.connector(c.lane, nx).len) + nx.len;
+      const v2 = this.connector(nx, c.after).vmax;
+      target = Math.min(target, Math.sqrt(v2 * v2 + 2 * COMFORT_BRAKE * Math.max(0, d2)));
+    }
+    const a = this.ahead(c, player, look);
+    if (a) target = Math.min(target, Math.max(0, Math.min(Math.sqrt(2 * 3.5 * Math.max(0, a.gap - 2)), a.v + (a.gap - 2 - c.v * 1.2) * 0.6)));
+    // The player stopped right in front of it for a while: a honk.
+    if (a && a.player && a.gap < 6 && c.stuck > 2.5 && this.clock - c.honked > 6 && Math.abs(player.speed) < 0.5 && !this.waiting(c)) this.honk(c);
+
+    // The player's car coming at it: once the driver has reacted, as much brake
+    // as it takes (a swerve when that's not enough), or away out of its way.
+    let panic = false, push = false;
+    const t = dist < WATCH && c.halt <= 0 ? this.threat(c, seen) : null;
+    c.alert = t ? c.alert + dt : Math.max(0, c.alert - dt * 0.5);
+    c.dodgeWant = 0;
+    if (t && c.alert < c.react) {
+      target = Math.min(target, c.v); // seen it: off the throttle, foot over the brake
+    } else if (t && t.front) {
+      const room = t.dist - 1.2, want = (c.v * c.v) / (2 * Math.max(0.3, room));
+      target = Math.min(target, Math.sqrt(2 * 4 * Math.max(0, room)));
+      if (want > 2.2) need = Math.max(need, want);
+      panic = want > 4.5;
+      // Braking won't do it: swerve, behind the player's car if it's crossing,
+      // else away from it (to the right when it comes head on).
+      if (want > 6.5 && t.t < 2) {
+        let side = Math.abs(t.across) > 2 ? -Math.sign(t.across) : Math.abs(t.l) < 0.6 ? 1 : -Math.sign(t.l);
+        let room = side > 0 ? this.room(c) : this.leftRoom(c);
+        if (room < 0.6 && Math.abs(t.l) < 0.6) { side = -side; room = side > 0 ? this.room(c) : this.leftRoom(c); }
+        if (room >= 0.6) c.dodgeWant = side * Math.min(room, 2.4);
+      }
+    } else if (t && t.beside && c.v > 1 && !this.waiting(c)) {
+      push = true; // about to be hit in its rear half: on the gas, out of the way
+    }
+    if ((panic || push) && this.clock - c.honked > 4) this.honk(c);
+
+    // Hit a moment ago: stopped, hazards on.
+    if (c.halt > 0) { c.halt -= dt; target = 0; }
+    // A siren coming up behind: over to the right, and stop (not in a crossing).
+    const siren = !c.conn && this.sirenBehind(c);
+    if (siren) target = Math.min(target, 1.5);
+    c.side += Math.max(-dt * 1.2, Math.min(dt * 1.6, (siren ? this.room(c) : 0) - c.side));
+    const dr = c.dodgeWant ? 3.5 * dt : 1.2 * dt;
+    c.dodge += Math.max(-dr, Math.min(dr, c.dodgeWant - c.dodge));
+    // Knocked off its path: back to it slowly.
+    if (c.lost) target = Math.min(target, 4);
+    // Signal for the turn ahead.
+    c.turn = 0;
+    if (c.next && (c.conn || c.lane.len - c.s < 45)) {
+      const tn = c.lane.endDir[0] * c.next.startDir[1] - c.lane.endDir[1] * c.next.startDir[0];
+      c.turn = tn > 0.4 ? 1 : tn < -0.4 ? -1 : 0;
+    }
+    let acc = Math.max(-7, Math.min(c.kind.accel ?? 1.8, (target - c.v) * 2));
+    // Steady on the brakes all the way to the line, rather than late and hard;
+    // and the last bit firmly, not creeping up to it.
+    if (need > 1.5) acc = Math.min(acc, -Math.min(HARD_BRAKE, need));
+    if (target < 0.05 && c.v < 2) acc = Math.min(acc, -Math.max(1.5, c.v * 2));
+    if (push) acc = Math.max(acc, (c.kind.accel ?? 1.8) * 1.3);
+    // Held at the line it just reached (follow()), or wrecked: on the brakes.
+    const hold = c.hold;
+    if (hold) acc = Math.min(acc, -HARD_BRAKE);
+    if (c.halt > 0) acc = -HARD_BRAKE;
+    c.hold = false;
+    c.want = acc;
+    c.panic = panic || c.halt > 0 || hold;
+    c.braking = acc < -0.6 || (c.v < 0.3 && target < 0.3);
+    c.stuck = c.v < 0.2 && c.halt <= 0 ? c.stuck + dt : 0;
+    c.steerWant = this.aim(c);
+  }
+
+  honk(c) {
+    c.honked = this.clock;
+    this.events.push({ kind: 'honk', car: c });
+  }
+
+  // The player's car over the next FORESEE s, its speed and rate of turn held:
+  // [{ t, x, z, fx, fz }] (fx, fz: the way it points), and its speed.
+  foresee(player) {
+    const out = [];
+    let x = player.x, z = player.z, hd = player.heading, vx = player.vx, vz = player.vz;
+    const yaw = Math.max(-1.2, Math.min(1.2, player.yaw ?? 0)), a = yaw * FORESEE_STEP, ca = Math.cos(a), sa = Math.sin(a);
+    for (let t = 0; t <= FORESEE + 1e-6; t += FORESEE_STEP) {
+      out.push({ t, x, z, fx: -Math.sin(hd), fz: -Math.cos(hd) });
+      // (Heading up turns it left: forward (-sin h, -cos h) turns with it.)
+      const rx = vx * ca + vz * sa, rz = vz * ca - vx * sa;
+      x += (vx + rx) * 0.5 * FORESEE_STEP; z += (vz + rz) * 0.5 * FORESEE_STEP;
+      vx = rx; vz = rz; hd += a;
+    }
+    out.speed = Math.hypot(player.vx, player.vz);
+    return out;
+  }
+
+  // Whether car c, going on along its path at its speed, meets the player's car
+  // as foreseen: the first moment their outlines (with a margin) overlap, as
+  // { t, dist: how far c can go before that (m), l: where the player's car is
+  // then, m right of c, across: how fast it's crossing c's path then (+ to the right), front: ahead of c's middle (braking helps), beside: at
+  // its rear half (getting on helps) }; null if they don't.
+  threat(c, seen) {
+    const k = c.kind, L2 = k.length / 2, W2 = k.width / 2, back = k.length * 0.3;
+    const p0 = seen[0];
+    if (Math.hypot(p0.x - c.x, p0.z - c.z) - L2 - PLAYER_HALF[0] > (Math.max(0, c.v) + seen.speed) * FORESEE + 1) return null;
+    for (const p of seen) {
+      let cx, cz, dx, dz;
+      if (p.t === 0) { cx = c.x; cz = c.z; dx = c.dx; dz = c.dz; }
+      else { const q = this.routePoint(c, Math.max(0, c.v) * p.t, THREAT_PT); dx = q.dx; dz = q.dz; cx = q.x - dx * back; cz = q.z - dz * back; }
+      const rx = p.x - cx, rz = p.z - cz, f = rx * dx + rz * dz, l = -rx * dz + rz * dx;
+      const co = Math.min(1, Math.abs(p.fx * dx + p.fz * dz)), si = Math.sqrt(1 - co * co);
+      const ef = co * PLAYER_HALF[0] + si * PLAYER_HALF[1], el = si * PLAYER_HALF[0] + co * PLAYER_HALF[1];
+      if (Math.abs(f) < L2 + ef + 0.6 && Math.abs(l) < W2 + el + 0.35) {
+        // Which way the player's car is crossing c's path (m/s, + to c's right).
+        const q = seen[Math.min(seen.length - 1, seen.indexOf(p) + 1)], o = seen[Math.max(0, seen.indexOf(p) - 1)];
+        const across = q === o ? 0 : (-(q.x - o.x) * dz + (q.z - o.z) * dx) / (q.t - o.t);
+        return { t: p.t, dist: Math.max(0, c.v) * p.t, l, across, front: f > 0, beside: f <= 0 && Math.abs(l) > W2 };
+      }
+    }
+    return null;
+  }
+
+  // The point d m ahead of car c's front axle along its way (lane, crossing, next lane).
+  routePoint(c, d, out) {
+    let path = c.conn ?? c.lane, s = (c.conn ? c.cs : c.s) + d;
+    if (s > path.len && c.next) {
+      s -= path.len;
+      if (c.conn) path = c.next;
+      else {
+        const cn = this.connector(c.lane, c.next);
+        if (s > cn.len) { s -= cn.len; path = c.next; } else path = cn;
+      }
+    }
+    return pointAt(path, Math.min(s, path.len), out);
+  }
+
+  // The steering the driver wants: pure pursuit of a point ahead on its way
+  // (moved right when making way or swerving), from the rear axle.
+  aim(c) {
+    const k = c.kind, wb = k.wb;
+    const T = this.routePoint(c, Math.min(14, Math.max(2.5, c.v * 0.6 + 2)), AIM_PT);
+    const off = c.side + c.dodge, tx = T.x - T.dz * off, tz = T.z + T.dx * off;
+    const ex = tx - (c.x - c.dx * k.length * 0.28), ez = tz - (c.z - c.dz * k.length * 0.28), l = Math.hypot(ex, ez) || 1;
+    const lat = (-ex * c.dz + ez * c.dx) / l;
+    const sinA = ex * c.dx + ez * c.dz > 0 ? lat : lat < 0 ? -1 : 1;
+    return Math.max(-MAX_LOCK, Math.min(MAX_LOCK, Math.atan((2 * wb * sinA) / l)));
+  }
+
+  // One step of car c's physics: steering and pedals come in at their rates; the
+  // tires give what the car asks of them up to the grip it has, shared between
+  // braking (or driving) and turning; past that it slides. The body follows on
+  // its springs.
+  step(c, h) {
+    const k = c.kind, wb = k.wb, grip = k.bus ? BUS_GRIP : TRAFFIC_GRIP;
+    c.steer += Math.max(-STEER_RATE * h, Math.min(STEER_RATE * h, c.steerWant - c.steer));
+    const jerk = c.panic ? PANIC_JERK : JERK;
+    c.acc += Math.max(-jerk * h, Math.min(jerk * h, c.want - c.acc));
+    let ax = Math.max(-grip, Math.min(grip, c.acc));
+    if (c.v < 0) ax = Math.min(grip * 0.8, -c.v / h);  // knocked backward: braked to a stop
+    else if (ax < 0) ax = Math.max(ax, -c.v / h);       // brakes stop it, never back it up
+    // Sideways: the tires turn it the way its wheels point and kill any slide,
+    // with what grip the brakes or throttle leave them.
+    const cap = Math.sqrt(Math.max(0, grip * grip - ax * ax));
+    const wantAy = c.v * c.yaw - c.vy / 0.08, ay = Math.max(-cap, Math.min(cap, wantAy));
+    const held = Math.abs(wantAy) <= cap ? 1 : cap / Math.abs(wantAy);
+    const yawTo = (c.v * Math.tan(c.steer)) / wb;
+    c.vy += (ay - c.v * c.yaw) * h;
+    c.v += (ax + c.vy * c.yaw) * h;
+    c.yaw += Math.max(-12, Math.min(12, (yawTo - c.yaw) / 0.12)) * held * h;
+    if (Math.abs(c.v) < 0.02 && Math.abs(c.vy) < 0.05 && c.want <= 0.05) {
+      c.v = c.vy = 0;
+      if (Math.abs(c.yaw) < 0.05) c.yaw = 0;
+    }
+    const r = c.yaw * h, cr = Math.cos(r), sr = Math.sin(r);
+    [c.dx, c.dz] = [c.dx * cr - c.dz * sr, c.dx * sr + c.dz * cr];
+    c.wx = c.dx * c.v - c.dz * c.vy; c.wz = c.dz * c.v + c.dx * c.vy;
+    c.x += c.wx * h; c.z += c.wz * h;
+    // The body: dives under braking, squats under throttle, leans out of turns.
+    c.ay += (ay - c.ay) * Math.min(1, h * 12);
+    const w = 2 * Math.PI * (k.bus ? 1.1 : 1.5), zeta = 0.45, gain = k.bus ? 0.004 : 0.008;
+    c.pitchV += (w * w * (-ax * gain - c.pitch) - 2 * zeta * w * c.pitchV) * h;
+    c.rollV += (w * w * (c.ay * gain * 0.9 - c.roll) - 2 * zeta * w * c.rollV) * h;
+    c.pitch = Math.max(-0.07, Math.min(0.07, c.pitch + c.pitchV * h));
+    c.roll = Math.max(-0.09, Math.min(0.09, c.roll + c.rollV * h));
+  }
+
+  // Keeps car c's place on its way in step with where its physics took it: its
+  // front axle's distance along the path, onto the next lane through a crossing.
+  follow(c, player, gone) {
+    const path = c.conn ?? c.lane, s = c.conn ? c.cs : c.s, fa = c.kind.length * 0.3;
+    const p = pointAt(path, s, FOLLOW_PT);
+    const ex = c.x + c.dx * fa - p.x, ez = c.z + c.dz * fa - p.z;
+    let ds = ex * p.dx + ez * p.dz;
+    c.lost = Math.abs(-ex * p.dz + ez * p.dx) > LOST + Math.abs(c.side + c.dodge) || c.dx * p.dx + c.dz * p.dz < 0;
+    if (ds < 0) {
+      if (c.conn) c.cs = Math.max(0, c.cs + ds); else c.s = Math.max(0, c.s + ds);
+      ds = 0;
+    }
+    this.advance(c, ds, player, gone);
+  }
+
+  // Moves car c's place ds along its way, through crossings.
   advance(c, ds, player, gone) {
-    const moved = ds;
     for (let guard = 0; guard < 4; guard++) {
       if (c.conn) {
         c.cs += ds;
@@ -574,7 +828,8 @@ export class Traffic {
         c.lane = c.next;
         c.lane.cars.push(c);
         c.s = 0;
-        c.next = this.choose(c.lane);
+        c.next = c.after ?? this.choose(c.lane);
+        c.after = undefined;
         c.stoppedAt = null;
         continue;
       }
@@ -584,7 +839,7 @@ export class Traffic {
       if (!c.next && Math.hypot(c.x - player.x, c.z - player.z) > 50) { gone.push(c); return; }
       // At the line and told to stop: it stops there, unless it's still going too
       // fast to (a light that just changed, a gap that just closed): then it goes through.
-      if (!c.next || (c.v < 3 && this.mustStop(c, player, 0))) { c.s = c.lane.len; c.v = 0; break; }
+      if (!c.next || (c.v < 3 && this.mustStop(c, player, 0))) { c.s = c.lane.len; c.hold = true; break; }
       ds = c.s - c.lane.len;
       const q = c.lane.to.queue.indexOf(c);
       if (q >= 0) c.lane.to.queue.splice(q, 1);
@@ -594,35 +849,20 @@ export class Traffic {
       c.conn.node.inside.add(c);
       c.cs = 0;
     }
-    this.pose(c, moved);
   }
 
-  // Where car c is and points: its front axle is on its path at c.s, its rear
-  // axle a wheelbase back along the path it came by (the piece before, around
-  // a corner), and the car is the line between them. So it turns in smoothly,
-  // its tail cutting the corner a little, as a car's does.
-  pose(c, moved = Infinity) {
-    const path = c.conn ?? c.lane, s = c.conn ? c.cs : c.s, wb = c.kind.length * 0.58;
-    const f = pointAt(path, s, POSE_F);
-    let r;
-    if (s >= wb || !c.behind) r = pointAt(path, Math.max(0, s - wb), POSE_R);
-    else r = pointAt(c.behind, Math.max(0, c.behind.len + s - wb), POSE_R);
+  // Puts a new car c on its path at its place: front axle at c.s, rear axle a
+  // wheelbase back along it, the car the line between them.
+  place(c) {
+    const path = c.lane, wb = c.kind.length * 0.58;
+    const f = pointAt(path, c.s, POSE_F), r = pointAt(path, Math.max(0, c.s - wb), POSE_R);
     let dx = f.x - r.x, dz = f.z - r.z;
     const l = Math.hypot(dx, dz);
     if (l > 0.5) { dx /= l; dz /= l; } else { dx = f.dx; dz = f.dz; }
-    // It can't turn faster than its wheels allow for the distance it moved
-    // (a 4 m turning radius at the tightest), and not at all standing still.
-    if (moved < 50) {
-      const turn = Math.atan2(c.dx * dz - c.dz * dx, c.dx * dx + c.dz * dz), most = moved / 4;
-      if (Math.abs(turn) > most) {
-        const a = Math.sign(turn) * most, cs = Math.cos(a), sn = Math.sin(a);
-        [dx, dz] = [c.dx * cs - c.dz * sn, c.dx * sn + c.dz * cs];
-      }
-    }
-    // The car's middle, a little behind the front axle; moved right when making way.
     const back = c.kind.length * 0.3;
-    c.x = f.x - dx * back - dz * c.side; c.z = f.z - dz * back + dx * c.side;
+    c.x = f.x - dx * back; c.z = f.z - dz * back;
     c.dx = dx; c.dz = dz;
+    c.wx = dx * c.v; c.wz = dz * c.v;
   }
 
   // Whether car c has its own reason to stand still: a red light or a stop sign ahead.
@@ -650,12 +890,30 @@ export class Traffic {
     return Math.max(0, Math.min(1.7, r.w - c.lane.off - c.kind.width / 2 - 0.25));
   }
 
-  // The player ran into car c at `speed` m/s: it stops, hazards on, for a while.
+  // How far left of its lane car c can swerve (m): to the far curb of a one-way
+  // street, a little over the middle line of a two-way one.
+  leftRoom(c) {
+    const r = c.lane.road, hw = c.kind.width / 2;
+    return Math.max(0, Math.min(2.5, r.oneWay ? r.w + c.lane.off - hw - 0.25 : c.lane.off + 0.3));
+  }
+
+  // The player's car shoved car c: its middle's velocity changes by (dvx, dvz),
+  // pushed at (px, pz), which also sets it turning.
+  knock(c, dvx, dvz, px, pz) {
+    if (c.parked) return;
+    const k = c.kind, rx = px - c.x, rz = pz - c.z;
+    c.v += dvx * c.dx + dvz * c.dz;
+    c.vy += -dvx * c.dz + dvz * c.dx;
+    c.yaw = Math.max(-3, Math.min(3, c.yaw + ((rx * dvz - rz * dvx) * 12) / (k.length ** 2 + k.width ** 2)));
+    c.wx += dvx; c.wz += dvz;
+    c.panic = true;
+  }
+
+  // The player ran into car c at `speed` m/s: it brakes to a stop, hazards on, for a while.
   hit(c, speed) {
     if (c.parked || speed < 2) return;
     c.halt = HALT_TIME + Math.random() * 4;
-    c.v = 0;
-    if (this.clock - c.honked > 2) { c.honked = this.clock; this.events.push({ kind: 'honk', car: c }); }
+    if (this.clock - c.honked > 2) this.honk(c);
   }
 
   // What happened since the last call (honks, for the sound).
@@ -851,21 +1109,21 @@ export class Traffic {
 // body's top edge along s, `glass` the greenhouse on it (from, to, roof height,
 // windscreen and rear window run). Parts by how they're drawn: paint, glass,
 // dark trim and tires, head and tail lights, turn signals per side, and an
-// accent (the bus's stripe).
+// accent (the bus's stripe). `mass` (kg): for who gets shoved how far in a crash.
 const CAR_SHAPES = [
-  { name: 'sedan', weight: 6, length: 4.7, width: 1.82, clear: 0.22, wheel: 0.33,
+  { name: 'sedan', mass: 1500, weight: 6, length: 4.7, width: 1.82, clear: 0.22, wheel: 0.33,
     top: [[0, 0.6], [0.25, 0.76], [1.3, 0.9], [3.7, 0.92], [4.5, 0.9], [4.7, 0.72]], glass: [1.3, 3.95, 1.43, 0.8, 0.85] },
-  { name: 'suv', weight: 5, length: 4.8, width: 1.92, clear: 0.3, wheel: 0.37,
+  { name: 'suv', mass: 2000, weight: 5, length: 4.8, width: 1.92, clear: 0.3, wheel: 0.37,
     top: [[0, 0.78], [0.25, 0.98], [1.25, 1.08], [4.6, 1.1], [4.8, 0.92]], glass: [1.25, 4.72, 1.72, 0.6, 0.3] },
-  { name: 'hatch', weight: 5, length: 4.1, width: 1.76, clear: 0.24, wheel: 0.31,
+  { name: 'hatch', mass: 1250, weight: 5, length: 4.1, width: 1.76, clear: 0.24, wheel: 0.31,
     top: [[0, 0.62], [0.25, 0.8], [1.1, 0.92], [3.95, 0.95], [4.1, 0.78]], glass: [1.1, 4.03, 1.46, 0.7, 0.45] },
-  { name: 'pickup', weight: 2, length: 5.5, width: 2.0, clear: 0.34, wheel: 0.4,
+  { name: 'pickup', mass: 2200, weight: 2, length: 5.5, width: 2.0, clear: 0.34, wheel: 0.4,
     top: [[0, 0.85], [0.25, 1.05], [1.4, 1.15], [5.3, 1.15], [5.5, 1.0]], glass: [1.4, 3.35, 1.82, 0.55, 0.15] },
-  { name: 'van', weight: 2, length: 5.4, width: 2.0, clear: 0.32, wheel: 0.36, pace: 0.94, boxy: true,
+  { name: 'van', mass: 2300, weight: 2, length: 5.4, width: 2.0, clear: 0.32, wheel: 0.36, pace: 0.94, boxy: true,
     paints: [[0.9, 0.9, 0.9], [0.86, 0.86, 0.84], [0.78, 0.8, 0.82], [0.9, 0.78, 0.2], [0.2, 0.32, 0.5]],
     top: [[0, 0.85], [0.2, 1.05], [0.9, 1.2], [1.85, 1.25], [2.05, 2.3], [5.3, 2.3], [5.4, 2.2]], glass: [0.85, 2.02, 1.95, 0.6, 0.04] },
   // A city bus: only on the bigger streets, slow away from its stops.
-  { name: 'bus', weight: 1.2, bus: true, length: 12, width: 2.55, clear: 0.34, wheel: 0.48, pace: 0.85, accel: 1.1, boxy: true,
+  { name: 'bus', mass: 12000, weight: 1.2, bus: true, length: 12, width: 2.55, clear: 0.34, wheel: 0.48, pace: 0.85, accel: 1.1, boxy: true,
     axles: [2.7, 8.6], paints: [[0.93, 0.94, 0.95]], accent: [0.0, 0.42, 0.75],
     top: [[0, 2.85], [0.3, 3.05], [11.8, 3.05], [12, 2.9]] },
 ];
@@ -959,6 +1217,6 @@ export function carMeshes() {
     return m;
   });
 }
-CAR_SHAPES.forEach((k, i) => { k.index = i; });
+CAR_SHAPES.forEach((k, i) => { k.index = i; k.wb = k.axles ? k.axles[1] - k.axles[0] : k.length * 0.58; });
 // The shapes behind carMeshes(), in the same order (the police drive the first two).
 carMeshes.shapes = CAR_SHAPES;

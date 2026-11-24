@@ -50,7 +50,10 @@ export function createCityRenderer(gl, program, draw) {
   // One car of the traffic's shapes. `blink`: whether turn signals are in their lit half.
   function car(c, y, eye, blink, paint = c.color) {
     const m = cars[c.kind.index];
-    const B = basis([c.x, y, c.z], [-c.dz, 0, c.dx], [0, 1, 0], [-c.dx, 0, -c.dz]);
+    // The body on its springs (traffic.js step()): pitched nose down by `pitch`,
+    // leaning left by `roll` (small angles).
+    const p = c.pitch ?? 0, q = c.roll ?? 0;
+    const B = basis([c.x, y, c.z], [-c.dz, q, c.dx], [c.dx * p + c.dz * q, 1, c.dz * p - c.dx * q], [-c.dx, p, -c.dz]);
     draw(m.paint, B, paint, 'paint');
     if (m.glass) draw(m.glass, B, CAR_GLASS, 'glass');
     if (m.accent) draw(m.accent, B, c.kind.accent, 'paint');
@@ -108,8 +111,9 @@ export function createCityRenderer(gl, program, draw) {
     // blue stripe and a light bar flashing red and blue. Roadblocks: the cars
     // across the street, cones before them, and the spike strip.
     police(police, y, eye, t) {
-      const flash = Math.floor(t * 5) % 2 === 0;
+      const blink = Math.floor(t * 5) % 2 === 0;
       for (const u of police.cars) {
+        const flash = u.patrol ? null : blink; // cruising: the light bar is off
         if (far(u, eye, DRAW)) continue;
         const k = shapes[u.heavy ? 1 : 0], F = frameOf(u, y), hw = k.width / 2, roof = k.glass[2];
         car({ ...u, kind: k, braking: u.v < 0.5, turn: 0, halt: 0 }, y, eye, false, POLICE_WHITE);
@@ -117,7 +121,7 @@ export function createCityRenderer(gl, program, draw) {
         const mid = (k.glass[0] + k.glass[3] + k.glass[1] - k.glass[4]) / 2 - k.length / 2;
         part(F, 0, roof + 0.04, mid, 1.15, 0.06, 0.3, POLICE_DARK, 'matte');
         part(F, -0.3, roof + 0.11, mid, 0.48, 0.1, 0.26, flash ? [1, 0.1, 0.08] : [0.35, 0.04, 0.04], flash ? 'lamp' : 'glass');
-        part(F, 0.3, roof + 0.11, mid, 0.48, 0.1, 0.26, flash ? [0.08, 0.1, 0.3] : [0.15, 0.35, 1], flash ? 'glass' : 'lamp');
+        part(F, 0.3, roof + 0.11, mid, 0.48, 0.1, 0.26, flash === false ? [0.15, 0.35, 1] : [0.08, 0.1, 0.3], flash === false ? 'lamp' : 'glass');
         if (u.heavy) part(F, 0, 0.62, -k.length / 2 - 0.08, 1.5, 0.5, 0.1, POLICE_DARK, 'metal'); // push bar
       }
       for (const b of police.blocks) {
