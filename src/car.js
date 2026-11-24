@@ -268,6 +268,7 @@ export class Car {
     // Crash damage per side of the car, 0 (fine) .. 1 (crushed); see damage().
     this.damage = { front: 0, rear: 0, left: 0, right: 0 };
     this.flats = 0;         // 0 .. 1: tires let down by a spike strip (less grip, a lot of drag)
+    this.weatherGrip = 1;   // slush, snow or rain (climate.js): a share of the surface's grip
     // Per-axle tire state: share of peak cornering grip on hand right now,
     // whether it is sliding, and how much of its grip it is using (0..1+).
     // `temp` is the tire temperature (deg C); `heat` how fast it is changing (deg C/s).
@@ -497,7 +498,7 @@ export class Car {
     const loadR = Math.max(minLoad, (normal * a) / L + transfer + aero * (1 - this.aeroFront));
     this.loadFront = loadF;
     this.loadRear = loadR;
-    const grip = surf.grip * (1 - 0.42 * this.flats);
+    const grip = surf.grip * this.weatherGrip * (1 - 0.42 * this.flats);
 
     // Drive and brake demand.
     let drive = 0, brake = 0;

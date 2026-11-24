@@ -20,8 +20,10 @@ import { buildTrees, buildTreesAt } from './trees.js';
 import { buildOpenMap, loadOpenMap, BRICKS } from './openmap.js';
 import { Minimap } from './minimap.js';
 import { StartPicker } from './picker.js';
-import { Sky, HORIZON, ZENITH, SUN_DIR } from './sky.js';
+import { Sky } from './sky.js';
 import { SCENE_VS, SCENE_FS, MAT } from './shading.js';
+import { Climate, CLOCKS, CLOCK_ORDER, SEASONS, SEASON_ORDER } from './climate.js';
+import { Precipitation } from './weather.js';
 
 const canvas = document.getElementById('gl');
 const speedEl = document.getElementById('speed');
@@ -67,6 +69,10 @@ const crossEl = document.getElementById('cross');
 const damageBtn = document.getElementById('damage');
 const policeBtn = document.getElementById('police');
 const startBtn = document.getElementById('start');
+const clockBtn = document.getElementById('clock-mode');
+const seasonBtn = document.getElementById('season');
+const clockEl = document.getElementById('clock');
+const weatherEl = document.getElementById('weather');
 const G_SCALE = 28; // px per g on the G-meter (grid rings at 0.5 g and 1 g)
 const gTrail = [];
 const gl = canvas.getContext('webgl2', { antialias: true });
@@ -87,8 +93,46 @@ const uFog = gl.getUniformLocation(program, 'uFog');
 const uZenith = gl.getUniformLocation(program, 'uZenith');
 const uSun = gl.getUniformLocation(program, 'uSun');
 const uTime = gl.getUniformLocation(program, 'uTime');
-const SUN = (() => { const l = Math.hypot(...SUN_DIR); return SUN_DIR.map((v) => v / l); })();
+const U = Object.fromEntries(['uSunCol', 'uAmb', 'uAmbGround', 'uGroundEnv', 'uFogRange', 'uSnow', 'uWet', 'uLeaf', 'uAutumn', 'uFresh',
+  'uGrass', 'uNight', 'uStreet', 'uHeadPos', 'uHeadDir', 'uHeadOn'].map((n) => [n, gl.getUniformLocation(program, n)]));
 const sky = new Sky(gl);
+const precipitation = new Precipitation(gl);
+
+// Montreal's hour, season and weather (climate.js): the clock runs live, or
+// faster; the season follows the date, cycles, or is held. Kept between visits.
+const climate = new Climate();
+try {
+  const c = localStorage.getItem('clock'), se = localStorage.getItem('season');
+  if (CLOCK_ORDER.includes(c)) climate.setClock(c);
+  if (SEASON_ORDER.includes(se)) climate.setSeason(se);
+} catch {}
+function updateClimateBtns() {
+  const set = (btn, text) => { const b = btn?.querySelector('b'); if (b) b.textContent = text; };
+  set(clockBtn, CLOCKS[climate.clock].label);
+  set(seasonBtn, SEASONS[climate.season].label);
+}
+updateClimateBtns();
+clockBtn?.addEventListener('click', () => {
+  const i = CLOCK_ORDER.indexOf(climate.clock);
+  climate.setClock(CLOCK_ORDER[(i + 1) % CLOCK_ORDER.length]);
+  try { localStorage.setItem('clock', climate.clock); } catch {}
+  updateClimateBtns();
+  toast(climate.clock === 'live' ? 'Time: live, as in Montreal now' : `Time: ${CLOCKS[climate.clock].label} · a day in ${Math.round(1440 / CLOCKS[climate.clock].rate)} min`);
+});
+seasonBtn?.addEventListener('click', () => {
+  const i = SEASON_ORDER.indexOf(climate.season);
+  climate.setSeason(SEASON_ORDER[(i + 1) % SEASON_ORDER.length]);
+  try { localStorage.setItem('season', climate.season); } catch {}
+  updateClimateBtns();
+  toast(climate.season === 'live' ? "Season: today's" : climate.season === 'cycle' ? 'Season: a year in 40 min' : `Season: ${SEASONS[climate.season].label}`);
+});
+// , and . move the clock an hour back or ahead.
+addEventListener('keydown', (e) => {
+  if (e.code !== 'Comma' && e.code !== 'Period') return;
+  climate.shift(e.code === 'Period' ? 1 : -1);
+  updateClimateBtns();
+  toast(`${climate.time} · ${climate.date}`);
+});
 
 // Everything that depends on the map: the ground, the roads, signs, trees and
 // buildings. Layouts are 'montreal', the open map of the island of Montreal,
@@ -161,7 +205,7 @@ function buildRingWorld(kind) {
       x: p.x, z: p.z, radius: p.radius,
       parts: [
         [upload(p.trunks), [0.36, 0.25, 0.16], 'bark'],
-        [upload(p.pines), [0.13, 0.33, 0.18], 'leaves'],
+        [upload(p.pines), [0.13, 0.33, 0.18], 'needles'],
         [upload(p.leaves), [0.22, 0.45, 0.17], 'leaves'],
         [upload(p.leavesLight), [0.36, 0.55, 0.2], 'leaves'],
       ],
@@ -401,7 +445,7 @@ for (const name of Object.keys(VARIANTS)) {
 }
 const DEFAULT_CAR = 'gt3';
 // Traffic, police, people and their shadows (the open map).
-const city = createCityRenderer(gl, program, draw, SUN);
+const city = createCityRenderer(gl, program, draw);
 const model = (variant) => MODELS[variant] ?? MODELS[DEFAULT_CAR];
 
 // Grid starts a few meters before the line, facing along the track.
@@ -683,6 +727,7 @@ function updateKerbs(dt) {
   }
 }
 
+let lightsOn = false;
 function drawCar(pose = car, colors = CAR_COLORS, alpha = 1, lean = { pitch: 0, roll: 0 }, cabin = true, m = model(car.variant)) {
   const F = carFrame(pose);
   const body = bodyFrame(F, lean);
@@ -696,9 +741,15 @@ function drawCar(pose = car, colors = CAR_COLORS, alpha = 1, lean = { pitch: 0, 
   }
   for (const p of m.parts) {
     if (!cabin && p.y > 0.98) continue; // wing and mirrors would clutter the cockpit view
-    const c = p.color === 'body' ? colors.body : p.color === 'light' ? colors.light ?? [0.85, 0.88, 0.9]
+    let c = p.color === 'body' ? colors.body : p.color === 'light' ? colors.light ?? [0.85, 0.88, 0.9]
       : p.color === 'tail' ? colors.tail ?? [0.75, 0.05, 0.05] : colors.trim ?? TRIM;
-    draw(meshes.cube, basis(toWorld(body, p.x, p.y, p.z), right, up, back, p.sx, p.sy, p.sz), c, p.mat, alpha);
+    let mat = p.mat;
+    // The player's car (not a ghost) has its lights on at night.
+    if (lightsOn && !colors.light && (p.color === 'light' || p.color === 'tail')) {
+      c = p.color === 'light' ? [1, 0.97, 0.88] : [0.7, 0.06, 0.05];
+      mat = 'lamp';
+    }
+    draw(meshes.cube, basis(toWorld(body, p.x, p.y, p.z), right, up, back, p.sx, p.sy, p.sz), c, mat, alpha);
   }
   // Wheels stay on the road frame and glow orange when past the grip peak.
   m.wheels.forEach(([side, ahead, front, radius, width], i) => {
@@ -1142,6 +1193,9 @@ function frame(now) {
   else if (controls.reset) resetRace();
   if (prevPose === null || controls.switchLayout || controls.switchDrive || controls.reset) syncPose();
 
+  // The hour and the weather; the tires feel the snow and the rain.
+  climate.update(picker.isOpen ? 0 : dt);
+  car.weatherGrip = climate.grip(surface ?? 'road');
   // The game stands still while the start picker is open.
   if (!picker.isOpen) physicsLag += dt;
   let ticks = 0;
@@ -1191,7 +1245,7 @@ function frame(now) {
   cam.y = Math.max(cam.y, terrainHeight(cam.x, cam.z) + 1.2); // never inside a hill
 
   resize();
-  gl.clearColor(...HORIZON, 1);
+  gl.clearColor(...climate.horizon, 1);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
   const aspect = canvas.width / canvas.height;
@@ -1223,14 +1277,41 @@ function frame(now) {
   const proj = perspective(camFov, aspect, cockpit ? 0.05 : 0.1, world.far);
   const viewProj = multiply(proj, viewMat);
   streamCells(eyePos[0], eyePos[2]);
-  sky.draw(viewProj, eyePos, now / 1000);
+  sky.draw(viewProj, eyePos, now / 1000, climate);
   gl.useProgram(program);
   gl.uniformMatrix4fv(uViewProj, false, viewProj);
   gl.uniform3fv(uCam, eyePos);
-  gl.uniform3fv(uFog, HORIZON);
-  gl.uniform3fv(uZenith, ZENITH);
-  gl.uniform3fv(uSun, SUN);
+  gl.uniform3fv(uFog, climate.horizon);
+  gl.uniform3fv(uZenith, climate.zenith);
+  gl.uniform3fv(uSun, climate.key);
   gl.uniform1f(uTime, world.traffic?.clock ?? 0);
+  gl.uniform3fv(U.uSunCol, climate.keyCol);
+  gl.uniform3fv(U.uAmb, climate.amb);
+  gl.uniform3fv(U.uAmbGround, climate.ambGround);
+  gl.uniform3fv(U.uGroundEnv, climate.groundEnv);
+  gl.uniform2fv(U.uFogRange, climate.fog);
+  gl.uniform1f(U.uSnow, climate.snow);
+  gl.uniform1f(U.uWet, climate.wet);
+  gl.uniform1f(U.uLeaf, climate.leaf);
+  gl.uniform1f(U.uAutumn, climate.autumn);
+  gl.uniform1f(U.uFresh, climate.fresh);
+  gl.uniform3fv(U.uGrass, climate.grass);
+  gl.uniform1f(U.uNight, climate.night);
+  // Montreal's streets are lit at night; the Nürburgring isn't.
+  gl.uniform1f(U.uStreet, world.traffic ? climate.night : 0);
+  lightsOn = climate.headlights;
+  {
+    // The headlights: from the nose, a little up, aimed a touch down the road ahead.
+    const B = bodyFrame(carFrame(shown), lean);
+    const len = model(car.variant).spec.length ?? 4.4;
+    const at = toWorld(B, 0, 0.7, -len / 2);
+    const dir = rotate(B.back.map((v) => -v), B.right, -0.045);
+    gl.uniform3fv(U.uHeadPos, at);
+    gl.uniform3fv(U.uHeadDir, dir);
+    gl.uniform1f(U.uHeadOn, lightsOn ? 0.2 + 0.8 * climate.night : 0);
+  }
+  city.setSun(climate.key, climate.keyStrength);
+  city.setLights(lightsOn);
 
   // Road layers sit a few cm above the ground; polygon offset keeps them from
   // z-fighting with it (and the start line and skids with the road) far away.
@@ -1308,6 +1389,7 @@ function frame(now) {
   if (cockpit) drawCockpit();
   drawGhost(clock);
   drawPuffs();
+  precipitation.draw(viewProj, eyePos, now / 1000, climate, canvas.height / 2 / Math.tan(camFov / 2));
 
   speedEl.textContent = Math.abs(car.speed * 3.6).toFixed(0).padStart(3, ' ');
   speedEl.classList.toggle('grass', !where.onTrack && surface !== 'road');
@@ -1339,13 +1421,17 @@ function frame(now) {
     while (k > 0 && s[k][0] > after.along) k--;
     if (sectionEl.textContent !== s[k][1]) sectionEl.textContent = s[k][1];
   }
+  // The hour, the date and the weather in Montreal.
+  const time = climate.time, cond = `${climate.date} · ${climate.conditions}`;
+  if (clockEl.textContent !== time) clockEl.textContent = time;
+  if (weatherEl.textContent !== cond) weatherEl.textContent = cond;
   const grade = Math.round(car.grade * 100);
   gradeEl.textContent = `${grade > 0 ? '+' : grade < 0 ? '−' : ''}${Math.abs(grade)}%`;
 
   requestAnimationFrame(frame);
 }
 // For poking at the game from the browser's console: open the page with ?debug.
-if (location.search.includes('debug')) window.game = { get world() { return world; }, car };
+if (location.search.includes('debug')) window.game = { get world() { return world; }, car, climate };
 // Start once the open map's data is unpacked (it's packed in the page).
 loadOpenMap().then(() => {
   setLayout(layout);

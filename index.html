@@ -55,6 +55,8 @@
   .times .unit { min-width: 4.6em; display: inline-block; }
   #section-row[hidden], #fines-row[hidden], #cross-row[hidden], .lap-only[hidden], .city-only[hidden] { display: none; }
   #cross { color: var(--hud-fg); white-space: nowrap; }
+  #clock { color: var(--hud-fg); font-weight: 700; font-variant-numeric: tabular-nums; }
+  #weather { white-space: nowrap; }
   #cross-row .unit { min-width: 3em; }
   /* Open map: the streets around the car, heading up. */
   #minimap { position: static; width: 130px; height: 130px; border-radius: 8px; display: block; margin-top: 2px; }
@@ -324,12 +326,13 @@
   <div class="times lap-only"><span class="unit" id="lap-label">Lap</span><span id="lap">–:––.––</span></div>
   <div class="times lap-only"><span class="unit">Best</span><span id="best">–:––.––</span></div>
   <div class="times lap-only" title="Claude's run, the amber ghost"><span class="unit">Claude</span><span id="bot">–:––.––</span></div>
+  <div class="times" id="sky-row" title="Montreal: the time, the date and the weather"><span class="unit" id="clock">--:--</span><span id="weather"></span></div>
   <div class="times"><span class="unit">Grade</span><span id="grade">0%</span></div>
   <div class="times" title="Weight on front / rear axle, % of the car's weight"><span class="unit">F / R</span><span id="load">50 / 50</span></div>
   <div id="balance" aria-live="polite"></div>
   <canvas id="minimap" hidden aria-label="Map of the streets around the car"></canvas>
 </div>
-<div class="hint">W/S or ↑/↓ drive · A/D or ←/→ steer · Space handbrake · T car (Yaris/GT3) · G ghost · C camera · M track · P start · R reset</div>
+<div class="hint">W/S or ↑/↓ drive · A/D or ←/→ steer · Space handbrake · T car (Yaris/GT3) · G ghost · C camera · M track · P start · R reset · , / . hour</div>
 <div class="top-right">
   <div class="top-bar">
   <button id="reset" type="button" aria-label="Reset car (R)">Reset</button>
@@ -345,6 +348,8 @@
     <button id="sound" type="button" aria-pressed="true" aria-label="Engine and tire sounds (N)">Sound <b>On</b></button>
     <button id="damage" type="button" aria-pressed="true" aria-label="Crash damage">Damage <b>On</b></button>
     <button id="police" type="button" class="city-only" aria-pressed="true" aria-label="Police and the rules of the road (Montreal)">Police <b>On</b></button>
+    <button id="clock-mode" type="button" aria-label="Time of day: live (Montreal now) or faster; , and . move it an hour">Time <b>Live</b></button>
+    <button id="season" type="button" aria-label="Season: today's, a fast cycle through the year, or one held">Season <b>Live</b></button>
     <button id="start" type="button" class="city-only" aria-label="Choose where to start on the map of Montreal (P)">Start <b>Pick on map</b></button>
     <button id="install" type="button" hidden aria-label="Install the game as an app on this device">Install <b>App</b></button>
   </div>

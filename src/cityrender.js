@@ -16,11 +16,12 @@ const PARKED_DETAIL = 80;
 const CAR_GLASS = [0.1, 0.12, 0.15], CAR_TRIM = [0.06, 0.06, 0.07], HEAD = [0.86, 0.88, 0.9];
 const TAIL = [0.5, 0.05, 0.05], TAIL_ON = [1, 0.12, 0.08], AMBER = [1, 0.6, 0.05], AMBER_OFF = [0.45, 0.25, 0.05];
 const POLICE_WHITE = [0.92, 0.93, 0.95], POLICE_BLUE = [0.04, 0.12, 0.42], POLICE_DARK = [0.1, 0.1, 0.12];
-const BLACK = [0, 0, 0];
+const BLACK = [0, 0, 0], HEAD_ON = [1, 0.97, 0.88], TAIL_LIT = [0.65, 0.06, 0.05];
 
-// gl, the scene's program, its draw(mesh, model, color, material, alpha), and
-// the unit direction to the sun (shadows fall away from it).
-export function createCityRenderer(gl, program, draw, sun) {
+// gl, the scene's program, and its draw(mesh, model, color, material, alpha).
+// setSun() gives the direction of the light (shadows fall away from it) and
+// how strong it is; setLights() turns the cars' headlights on at night.
+export function createCityRenderer(gl, program, draw) {
   const box = createMesh(gl, program, cube());
   const cars = carMeshes().map((m) => Object.fromEntries(Object.entries(m).filter(([, v]) => v.positions.length).map(([k, v]) => [k, createMesh(gl, program, v)])));
   const shapes = carMeshes.shapes;
@@ -30,8 +31,15 @@ export function createCityRenderer(gl, program, draw, sun) {
     normals: [0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0],
     uvs: [-1, -1, -1, 1, 1, 1, -1, -1, 1, 1, 1, -1],
   });
-  const lean = Math.hypot(sun[0], sun[2]) / Math.max(0.2, sun[1]); // shadow length per meter of height
-  const [sx, sz] = [-sun[0], -sun[2]].map((v) => v / (Math.hypot(sun[0], sun[2]) || 1));
+  let lean = 0, sx = 0, sz = 0, shade = 1, lights = false;
+  function setSun(sun, strength = 1) {
+    lean = Math.min(3, Math.hypot(sun[0], sun[2]) / Math.max(0.2, sun[1])); // shadow length per meter of height
+    [sx, sz] = [-sun[0], -sun[2]].map((v) => v / (Math.hypot(sun[0], sun[2]) || 1));
+    // Under a grey sky or at night only the dark patch right under things is left.
+    lean *= strength;
+    shade = 0.55 + 0.45 * strength;
+  }
+  setSun([0.33, 0.83, 0.25]);
   const far = (o, eye, d) => Math.abs(o.x - eye[0]) > d || Math.abs(o.z - eye[2]) > d || Math.hypot(o.x - eye[0], o.z - eye[2]) > d;
 
   // A part in the frame F ({ o, right, up, back }) at (x, y, z), sized (w, h, l).
@@ -48,8 +56,10 @@ export function createCityRenderer(gl, program, draw, sun) {
     if (m.accent) draw(m.accent, B, c.kind.accent, 'paint');
     if (far(c, eye, c.parked ? PARKED_DETAIL : DETAIL)) return;
     draw(m.trim, B, CAR_TRIM, 'rubber');
-    draw(m.head, B, HEAD, 'glass');
-    draw(m.tail, B, c.braking ? TAIL_ON : TAIL, c.braking ? 'lamp' : 'paint');
+    // At night the headlights are lit (parked cars' are off) and the tail lights glow.
+    const on = lights && !c.parked;
+    draw(m.head, B, on ? HEAD_ON : HEAD, on ? 'lamp' : 'glass');
+    draw(m.tail, B, c.braking ? TAIL_ON : on ? TAIL_LIT : TAIL, c.braking || on ? 'lamp' : 'paint');
     if (c.parked) return;
     const hazard = c.halt > 0;
     for (const [mesh, side] of [[m.blinkL, -1], [m.blinkR, 1]]) {
@@ -59,13 +69,16 @@ export function createCityRenderer(gl, program, draw, sun) {
   }
 
   return {
+    setSun,
+    setLights(on) { lights = on; },
+
     // Soft shadows on the road under everything given: [{ x, z, dx, dz, length, width, height }].
     // Call with blending on and depth writes off, after the roads.
     shadows(list, y, eye, reach = 200) {
       for (const c of list) {
         if (far(c, eye, reach)) continue;
         const h = c.height ?? 1.3, w = c.width / 2 + 0.3, l = c.length / 2 + 0.3, off = h * lean * 0.5;
-        draw(quad, basis([c.x + sx * off, y, c.z + sz * off], [-c.dz, 0, c.dx], [0, 1, 0], [-c.dx, 0, -c.dz], w + off * 0.4, 1, l + off * 0.4), BLACK, 'shadow', c.alpha ?? 0.5);
+        draw(quad, basis([c.x + sx * off, y, c.z + sz * off], [-c.dz, 0, c.dx], [0, 1, 0], [-c.dx, 0, -c.dz], w + off * 0.4, 1, l + off * 0.4), BLACK, 'shadow', (c.alpha ?? 0.5) * shade);
       }
     },
 
