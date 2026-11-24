@@ -228,13 +228,16 @@ function buildMontrealWorld() {
   const signs = new Signs(gl, program, []);
   gpu.push(signs.faces);
   const traffic = new Traffic(t);
+  const rules = new Rules(t, traffic), police = new Police(t, traffic);
+  // Offences count only when the police see them (ramming one, they do).
+  rules.witness = (kind) => kind === 'ramPolice' || police.witnessed();
   return {
     kind: 'montreal',
     // Traffic, and the lights and stop signs at the crossings.
     traffic,
     // The rules of the road, and the police who come after those who break them.
-    rules: new Rules(t, traffic),
-    police: new Police(t, traffic),
+    rules,
+    police,
     people: new Pedestrians(t),
     streetSigns: { texture: createTexture(gl, stopSignCanvas()) },
     track: t,

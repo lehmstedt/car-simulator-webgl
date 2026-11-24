@@ -95,8 +95,9 @@ export function createCityRenderer(gl, program, draw, sun) {
     // blue stripe and a light bar flashing red and blue. Roadblocks: the cars
     // across the street, cones before them, and the spike strip.
     police(police, y, eye, t) {
-      const flash = Math.floor(t * 5) % 2 === 0;
+      const blink = Math.floor(t * 5) % 2 === 0;
       for (const u of police.cars) {
+        const flash = u.patrol ? null : blink; // cruising: the light bar is off
         if (far(u, eye, DRAW)) continue;
         const k = shapes[u.heavy ? 1 : 0], F = frameOf(u, y), hw = k.width / 2, roof = k.glass[2];
         car({ ...u, kind: k, braking: u.v < 0.5, turn: 0, halt: 0 }, y, eye, false, POLICE_WHITE);
@@ -104,7 +105,7 @@ export function createCityRenderer(gl, program, draw, sun) {
         const mid = (k.glass[0] + k.glass[3] + k.glass[1] - k.glass[4]) / 2 - k.length / 2;
         part(F, 0, roof + 0.04, mid, 1.15, 0.06, 0.3, POLICE_DARK, 'matte');
         part(F, -0.3, roof + 0.11, mid, 0.48, 0.1, 0.26, flash ? [1, 0.1, 0.08] : [0.35, 0.04, 0.04], flash ? 'lamp' : 'glass');
-        part(F, 0.3, roof + 0.11, mid, 0.48, 0.1, 0.26, flash ? [0.08, 0.1, 0.3] : [0.15, 0.35, 1], flash ? 'glass' : 'lamp');
+        part(F, 0.3, roof + 0.11, mid, 0.48, 0.1, 0.26, flash === false ? [0.15, 0.35, 1] : [0.08, 0.1, 0.3], flash === false ? 'lamp' : 'glass');
         if (u.heavy) part(F, 0, 0.62, -k.length / 2 - 0.08, 1.5, 0.5, 0.1, POLICE_DARK, 'metal'); // push bar
       }
       for (const b of police.blocks) {

@@ -139,6 +139,10 @@ Break the rules in Montreal and the police come after you (`src/rules.js`, `src/
   through a stop sign (you must slow under 5 km/h), driving the wrong way up a one-way street,
   driving on the sidewalk or the lawns, scaring people there, and crashing into other cars (worse
   into a patrol car).
+- **Only if the police see it**: a few patrol cars cruise the streets around you, light bars off
+  (steady blue dots on the minimap). An offence counts only when one of them (or the helicopter)
+  has you in sight; nobody watching, nothing happens. Speeding still counts the moment one comes
+  into view. The car that saw it gives chase at once.
 - Each offence adds points; points make the **wanted level** (1–5 stars). Running from patrol cars
   that have you in sight adds a point every 14 s, so a chase that goes on gets worse by itself.
 - What each level brings:

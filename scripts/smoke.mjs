@@ -56,6 +56,21 @@ people.reset(player);
 assert(traffic.cars.length > 100, `traffic: only ${traffic.cars.length} cars`);
 assert(people.people.length > 50, `pedestrians: only ${people.people.length}`);
 
+// Nobody wanted yet: patrol cars cruise around, lights off, watching.
+let patrolSaw = false;
+for (let t = 0; t < 40; t += DT) {
+  drivePlayer(DT, 12);
+  traffic.update(DT, player);
+  police.update(DT, player, false);
+  traffic.extra = police.cars;
+  traffic.take();
+  if (police.witnessed()) patrolSaw = true;
+}
+assert(police.state === 'clear', `patrolling, yet ${police.state}`);
+assert(police.units.length >= 2 && police.units.every((u) => u.patrol), `only ${police.units.length} patrol cars cruising`);
+assert(patrolSaw, 'no patrol car ever had the player in sight');
+police.take();
+
 let maxUnits = 0, maxLevel = 0;
 for (let t = 0, step = 0; t < 240; t += DT, step++) {
   // An offence every few seconds: the level climbs to 5 over the first minutes.
