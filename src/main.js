@@ -1464,7 +1464,7 @@ function frame(now) {
 
   speedEl.textContent = Math.abs(car.speed * 3.6).toFixed(0).padStart(3, ' ');
   speedEl.classList.toggle('grass', !where.onTrack && surface !== 'road');
-  gearEl.textContent = car.speed < -0.3 ? 'R' : Math.abs(car.speed) < 0.3 ? 'N' : 'D';
+  gearEl.textContent = car.reverse ? 'R' : Math.abs(car.speed) < 0.3 ? 'N' : 'D';
   lapEl.textContent = fmt(lap.done ? lap.last : lap.start === null ? null : clock - lap.start);
   bestEl.textContent = fmt(lap.best[car.variant]);
   botEl.textContent = fmt(BOT_LAPS[layout]?.[car.variant]?.time ?? null);

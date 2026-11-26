@@ -227,6 +227,7 @@ const STEP = PHYSICS_STEP; // fixed physics step; tire forces are stiff
 export class Car {
   constructor(variant = 'gt3') {
     this.pedalRate = 3;        // pedals reach full travel in ~1/3 s
+    this._brakeHeld = false;   // brake pressed last update (raw input)
     this.setVariant(variant);
     this.reset();
   }
@@ -251,6 +252,9 @@ export class Car {
     this.steer = 0;         // road wheel angle (rad)
     this.throttle = 0;      // smoothed pedals, 0..1
     this.brake = 0;
+    // Reverse is engaged by pressing the brake afresh while stopped: holding it
+    // through a stop keeps the car stopped. Throttle or rolling forward ends it.
+    this.reverse = false;
     this.accel = 0;         // filtered longitudinal accel, drives body pitch
     this.accelLat = 0;      // filtered lateral tire accel (+ left), drives body roll
     // Body on its suspension: heave (m, + = springs compressed), pitch (rad,
@@ -336,11 +340,18 @@ export class Car {
     const lock = this.maxSteer / (1 + Math.abs(this.vx) * this.steerFalloff);
     this.steer = c.steer * lock + (this.damage.left - this.damage.right) * 0.03 * clamp(Math.abs(this.vx) / 10, 0, 1);
 
+    // Brake held through the stop: holds the car. Released and pressed again
+    // while stopped: reverse.
+    const freshBrake = c.brake > 0 && !this._brakeHeld;
+    this._brakeHeld = c.brake > 0;
+    if (c.throttle > 0 || this.vx > 0.5) this.reverse = false;
+    else if (freshBrake && Math.abs(this.vx) < 0.5) this.reverse = true;
+
     // Pedals ramp in (keys are on/off) but release twice as fast.
     const ramp = (cur, want) => cur + clamp(want - cur, -2 * this.pedalRate * dt, this.pedalRate * dt);
     this.throttle = ramp(this.throttle, c.throttle);
     this.brake = ramp(this.brake, c.brake);
-    const pedals = { throttle: this.throttle, brake: this.brake, handbrake: c.handbrake };
+    const pedals = { throttle: this.throttle, brake: this.brake, handbrake: c.handbrake, reverse: this.reverse };
 
     let front = { slip: 0 }, rear = front;
     for (let t = dt; t > 1e-6; t -= STEP) [front, rear] = this.step(Math.min(STEP, t), pedals, surf);
@@ -506,7 +517,7 @@ export class Car {
     if (c.throttle) drive += c.throttle * left * Math.min(this.maxDrive, this.power / Math.max(Math.abs(vx), 1))
       * clamp(this.topSpeed * (0.55 + 0.45 * left) - vx, 0, 1); // the limiter fades drive out over the last 1 m/s
     if (c.brake) {
-      if (vx > 0.5) brake = c.brake * this.brakeForce;
+      if (!c.reverse) brake = c.brake * this.brakeForce; // either way it's rolling
       else if (vx > -this.maxReverse) drive -= c.brake * this.reverseForce * (left > 0 ? 1 : 0);
     }
 
@@ -555,10 +566,11 @@ export class Car {
     this.accelLat += ((fyF + rear.fy) / m - this.accelLat) * kA;
 
     // Let the car come to rest instead of creeping, unless the slope is steep
-    // enough to roll it (the handbrake holds it on any hill).
+    // enough to roll it (the handbrake, or the brake pedal held, holds it on any hill).
     const slow = (lim) => Math.abs(this.vx) < lim && Math.abs(this.vy) < lim;
-    const rests = c.handbrake ? slow(0.3) : m * G * Math.abs(sinPitch) <= this.rolling && slow(0.05);
-    if (rests && !c.throttle && !c.brake) {
+    const footHold = c.brake > 0.5 && !c.reverse;
+    const rests = c.handbrake || footHold ? slow(0.3) : m * G * Math.abs(sinPitch) <= this.rolling && slow(0.05);
+    if (rests && !c.throttle && (!c.brake || footHold)) {
       this.vx = this.vy = 0;
       if (Math.abs(this.yawRate) < 0.05) this.yawRate = 0;
     }

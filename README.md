@@ -351,7 +351,7 @@ With the keyboard, holding A/D turns the wheel gradually; let go and it returns 
 | Key            | Action          |
 | -------------- | --------------- |
 | W / ↑          | Throttle        |
-| S / ↓          | Brake / reverse |
+| S / ↓          | Brake (hold it to stay stopped); release and press again when stopped to reverse |
 | A / D, ← / →   | Steer           |
 | Space          | Handbrake       |
 | T              | Switch car (Yaris/GT3)   |
