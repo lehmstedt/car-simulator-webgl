@@ -19,6 +19,9 @@ const POLICE_WHITE = [0.92, 0.93, 0.95], POLICE_BLUE = [0.04, 0.12, 0.42], POLIC
 const BLACK = [0, 0, 0], HEAD_ON = [1, 0.97, 0.88], TAIL_LIT = [0.65, 0.06, 0.05];
 
 // gl, the scene's program, and its draw(mesh, model, color, material, alpha).
+// `ground` is what everything stands on, for something at (x, z) heading (dx, dz):
+// { y(x, z, dx, dz): height, slope(x, z, dx, dz): { gx, gz } }
+// (set with setGround()); cars and shadows lean with its slope, people stand up straight.
 // setSun() gives the direction of the light (shadows fall away from it) and
 // how strong it is; setLights() turns the cars' headlights on at night.
 export function createCityRenderer(gl, program, draw) {
@@ -32,6 +35,7 @@ export function createCityRenderer(gl, program, draw) {
     uvs: [-1, -1, -1, 1, 1, 1, -1, -1, 1, 1, 1, -1],
   });
   let lean = 0, sx = 0, sz = 0, shade = 1, lights = false;
+  let ground = { y: () => 0, slope: () => ({ gx: 0, gz: 0 }) };
   function setSun(sun, strength = 1) {
     lean = Math.min(3, Math.hypot(sun[0], sun[2]) / Math.max(0.2, sun[1])); // shadow length per meter of height
     [sx, sz] = [-sun[0], -sun[2]].map((v) => v / (Math.hypot(sun[0], sun[2]) || 1));
@@ -45,15 +49,20 @@ export function createCityRenderer(gl, program, draw) {
   // A part in the frame F ({ o, right, up, back }) at (x, y, z), sized (w, h, l).
   const part = (F, x, y, z, w, h, l, color, mat, alpha = 1) => draw(box, basis(
     [0, 1, 2].map((i) => F.o[i] + F.right[i] * x + F.up[i] * y + F.back[i] * z), F.right, F.up, F.back, w, h, l), color, mat, alpha);
-  const frameOf = (c, y) => ({ o: [c.x, y, c.z], right: [-c.dz, 0, c.dx], up: [0, 1, 0], back: [-c.dx, 0, -c.dz] });
+  // A frame at (x, z) on the ground facing (dx, dz), tilted with its slope (small angles).
+  const onGround = (x, z, dx, dz, lift = 0) => {
+    const { gx, gz } = ground.slope(x, z, dx, dz);
+    return { o: [x, ground.y(x, z, dx, dz) + lift, z], right: [-dz, gz * dx - gx * dz, dx], up: [-gx, 1, -gz], back: [-dx, -(gx * dx + gz * dz), -dz] };
+  };
+  const frameOf = (c) => onGround(c.x, c.z, c.dx, c.dz);
 
   // One car of the traffic's shapes. `blink`: whether turn signals are in their lit half.
-  function car(c, y, eye, blink, paint = c.color) {
+  function car(c, eye, blink, paint = c.color) {
     const m = cars[c.kind.index];
     // The body on its springs (traffic.js step()): pitched nose down by `pitch`,
-    // leaning left by `roll` (small angles).
-    const p = c.pitch ?? 0, q = c.roll ?? 0;
-    const B = basis([c.x, y, c.z], [-c.dz, q, c.dx], [c.dx * p + c.dz * q, 1, c.dz * p - c.dx * q], [-c.dx, p, -c.dz]);
+    // leaning left by `roll` (small angles), on the slope of the ground.
+    const p = c.pitch ?? 0, q = c.roll ?? 0, F = frameOf(c);
+    const B = basis(F.o, [F.right[0], F.right[1] + q, F.right[2]], [F.up[0] + c.dx * p + c.dz * q, 1, F.up[2] + c.dz * p - c.dx * q], [F.back[0], F.back[1] + p, F.back[2]]);
     draw(m.paint, B, paint, 'paint');
     if (m.glass) draw(m.glass, B, CAR_GLASS, 'glass');
     if (m.accent) draw(m.accent, B, c.kind.accent, 'paint');
@@ -74,14 +83,17 @@ export function createCityRenderer(gl, program, draw) {
   return {
     setSun,
     setLights(on) { lights = on; },
+    setGround(g) { ground = g; },
 
     // Soft shadows on the road under everything given: [{ x, z, dx, dz, length, width, height }].
     // Call with blending on and depth writes off, after the roads.
-    shadows(list, y, eye, reach = 200) {
+    // `lift`: how far above the ground.
+    shadows(list, lift, eye, reach = 200) {
       for (const c of list) {
         if (far(c, eye, reach)) continue;
         const h = c.height ?? 1.3, w = c.width / 2 + 0.3, l = c.length / 2 + 0.3, off = h * lean * 0.5;
-        draw(quad, basis([c.x + sx * off, y, c.z + sz * off], [-c.dz, 0, c.dx], [0, 1, 0], [-c.dx, 0, -c.dz], w + off * 0.4, 1, l + off * 0.4), BLACK, 'shadow', (c.alpha ?? 0.5) * shade);
+        const F = onGround(c.x + sx * off, c.z + sz * off, c.dx, c.dz, lift);
+        draw(quad, basis(F.o, F.right, F.up, F.back, w + off * 0.4, 1, l + off * 0.4), BLACK, 'shadow', (c.alpha ?? 0.5) * shade);
       }
     },
 
@@ -96,27 +108,27 @@ export function createCityRenderer(gl, program, draw) {
       return out;
     },
 
-    traffic(traffic, y, eye, t) {
+    traffic(traffic, eye, t) {
       const blink = (t * 2.7) % 1 < 0.5;
       for (const c of traffic.cars) {
         if (far(c, eye, DRAW)) continue;
-        car(c, y, eye, blink);
+        car(c, eye, blink);
         // A taxi's roof light.
-        if (c.taxi && !far(c, eye, DETAIL)) part(frameOf(c, y), 0, 1.5, -0.1, 0.5, 0.14, 0.22, [1, 0.95, 0.7], 'lamp');
+        if (c.taxi && !far(c, eye, DETAIL)) part(frameOf(c), 0, 1.5, -0.1, 0.5, 0.14, 0.22, [1, 0.95, 0.7], 'lamp');
       }
-      for (const c of traffic.parkedNear(eye[0], eye[2], PARKED_DRAW)) car(c, y, eye, false);
+      for (const c of traffic.parkedNear(eye[0], eye[2], PARKED_DRAW)) car(c, eye, false);
     },
 
     // Patrol cars: the traffic's sedan (or SUV, the heavy units) in white with a
     // blue stripe and a light bar flashing red and blue. Roadblocks: the cars
     // across the street, cones before them, and the spike strip.
-    police(police, y, eye, t) {
+    police(police, eye, t) {
       const blink = Math.floor(t * 5) % 2 === 0;
       for (const u of police.cars) {
         const flash = u.patrol ? null : blink; // cruising: the light bar is off
         if (far(u, eye, DRAW)) continue;
-        const k = shapes[u.heavy ? 1 : 0], F = frameOf(u, y), hw = k.width / 2, roof = k.glass[2];
-        car({ ...u, kind: k, braking: u.v < 0.5, turn: 0, halt: 0 }, y, eye, false, POLICE_WHITE);
+        const k = shapes[u.heavy ? 1 : 0], F = frameOf(u), hw = k.width / 2, roof = k.glass[2];
+        car({ ...u, kind: k, braking: u.v < 0.5, turn: 0, halt: 0 }, eye, false, POLICE_WHITE);
         for (const side of [-1, 1]) part(F, side * (hw - 0.012), k.clear + (u.heavy ? 0.52 : 0.42), 0.1, 0.03, 0.2, k.length - 1.3, POLICE_BLUE, 'paint');
         const mid = (k.glass[0] + k.glass[3] + k.glass[1] - k.glass[4]) / 2 - k.length / 2;
         part(F, 0, roof + 0.04, mid, 1.15, 0.06, 0.3, POLICE_DARK, 'matte');
@@ -128,7 +140,7 @@ export function createCityRenderer(gl, program, draw) {
         if (far(b, eye, DRAW)) continue;
         const s = b.spikes;
         if (!s) continue;
-        const F = { o: [s.x, y, s.z], right: [-s.dz, 0, s.dx], up: [0, 1, 0], back: [-s.dx, 0, -s.dz] };
+        const F = onGround(s.x, s.z, s.dx, s.dz);
         part(F, 0, 0.03, 0, 2 * s.half, 0.05, 0.45, [0.12, 0.12, 0.13], 'rubber');
         for (let x = -s.half + 0.2; x < s.half; x += 0.45) part(F, x, 0.08, 0, 0.05, 0.1, 0.05, [0.75, 0.77, 0.8], 'metal');
         for (const side of [-1, 1]) part(F, side * (s.half + 0.5), 0.3, 0, 0.3, 0.6, 0.3, [1, 0.45, 0.05], 'paint'); // cones at its ends
@@ -141,7 +153,8 @@ export function createCityRenderer(gl, program, draw) {
       if (!h || far(h, eye, 900)) return;
       const tilt = Math.min(0.25, h.v / 220);
       const up = [h.dx * tilt, Math.sqrt(1 - tilt * tilt), h.dz * tilt], back = [-h.dx * up[1], tilt, -h.dz * up[1]];
-      const F = { o: [h.x, h.y, h.z], right: [-h.dz, 0, h.dx], up, back };
+      // (Its height is above the ground under it.)
+      const F = { o: [h.x, h.y + ground.y(h.x, h.z, 0, 0), h.z], right: [-h.dz, 0, h.dx], up, back };
       part(F, 0, 0, 0, 1.7, 1.6, 3.4, POLICE_WHITE, 'paint');
       part(F, 0, 0.15, -1.0, 1.72, 0.9, 1.5, CAR_GLASS, 'glass');
       part(F, 0, -0.3, 0.4, 1.74, 0.35, 2.4, POLICE_BLUE, 'paint');
@@ -158,16 +171,17 @@ export function createCityRenderer(gl, program, draw) {
     },
 
     // The searchlight's pool on the ground: with blending on, depth writes off.
-    spot(h, at, y) {
+    spot(h, at, lift) {
       if (!h?.sees) return;
-      draw(quad, basis([at.x, y, at.z], [1, 0, 0], [0, 1, 0], [0, 0, 1], 11, 1, 11), [1, 0.97, 0.8], 'shadow', 0.22);
+      const F = onGround(at.x, at.z, at.dx ?? 0, at.dz ?? -1, lift);
+      draw(quad, basis(F.o, F.right, F.up, F.back, 11, 1, 11), [1, 0.97, 0.8], 'shadow', 0.22);
     },
 
     // People (pedestrians.js): torso, head, and legs and arms that swing as they walk.
-    people(people, y, eye) {
+    people(people, lift, eye) {
       for (const p of people) {
         if (far(p, eye, PEOPLE_DRAW)) continue;
-        const k = p.size, F = { o: [p.x, y, p.z], right: [-p.dz, 0, p.dx], up: [0, 1, 0], back: [-p.dx, 0, -p.dz] };
+        const k = p.size, y = ground.y(p.x, p.z, p.dx, p.dz) + lift, F = { o: [p.x, y, p.z], right: [-p.dz, 0, p.dx], up: [0, 1, 0], back: [-p.dx, 0, -p.dz] };
         const swing = Math.sin(p.step) * 0.55 * Math.min(1.4, p.moving), bob = Math.abs(Math.cos(p.step)) * 0.03 * Math.min(1, p.moving);
         part(F, 0, (1.14 + bob) * k, 0, 0.42 * k, 0.6 * k, 0.24 * k, p.shirt, 'matte');
         part(F, 0, (1.58 + bob) * k, 0, 0.21 * k, 0.24 * k, 0.22 * k, p.skin, 'matte');

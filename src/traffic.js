@@ -52,6 +52,7 @@ import { nodeKey } from './openmap.js';
 import { cube, cylinder } from './geometry.js';
 import { loft, profile } from './bodies.js';
 import { ROAD_LIFT } from './track.js';
+import { levelHeight, terrainSlope } from './terrain.js';
 
 const TRAFFIC_COUNT = 70;          // cars around the player
 const SPAWN_NEAR = 400, SPAWN_FAR = 500; // m: cars are put this far out at most, taken away past SPAWN_FAR
@@ -1062,11 +1063,13 @@ export class Traffic {
     const lines = { positions: [], normals: [] };
     const posts = []; // solid: [x, z, radius] of every pole, for collisions
     const C = cube();
+    // Heights (c[1]) are above the ground at the foot of what's being put up.
+    let foot = 0;
     // A box at c with axes right (x), up (y) and face (z, toward the driver).
     const box = (m, c, rgt, face, sx, sy, sz) => {
       for (let i = 0; i < C.positions.length; i += 3) {
         const [x, y, z] = [C.positions[i] * sx, C.positions[i + 1] * sy, C.positions[i + 2] * sz];
-        m.positions.push(c[0] + rgt[0] * x + face[0] * z, c[1] + y, c[2] + rgt[1] * x + face[1] * z);
+        m.positions.push(c[0] + rgt[0] * x + face[0] * z, foot + c[1] + y, c[2] + rgt[1] * x + face[1] * z);
         const [nx, ny, nz] = [C.normals[i], C.normals[i + 1], C.normals[i + 2]];
         m.normals.push(rgt[0] * nx + face[0] * nz, ny, rgt[1] * nx + face[1] * nz);
       }
@@ -1076,7 +1079,7 @@ export class Traffic {
       const pt = (k) => { const a = Math.PI / 8 + (k * Math.PI) / 4; return [Math.cos(a), Math.sin(a)]; };
       for (let k = 0; k < 8; k++) {
         for (const [u, v] of [[0, 0], pt(k), pt(k + 1)]) {
-          m.positions.push(c[0] + rgt[0] * u * r, c[1] + v * r, c[2] + rgt[1] * u * r);
+          m.positions.push(c[0] + rgt[0] * u * r, foot + c[1] + v * r, c[2] + rgt[1] * u * r);
           m.normals.push(face[0], 0, face[1]);
           if (m.uvs) m.uvs.push(...uv(u, v));
         }
@@ -1084,7 +1087,10 @@ export class Traffic {
     };
     const line = (p, q, half) => {
       const dx = q[0] - p[0], dz = q[1] - p[1], l = Math.hypot(dx, dz) || 1, nx = (-dz / l) * half, nz = (dx / l) * half;
-      const put = (x, z) => { lines.positions.push(x, ROAD_LIFT + 0.02, z); lines.normals.push(0, 1, 0); };
+      // On the road's plane at its middle (as openmap.js lays the streets; the road runs across the line).
+      const mx = (p[0] + q[0]) / 2, mz = (p[1] + q[1]) / 2, f = (x, z) => levelHeight(x, z, -dz, dx);
+      const h = f(mx, mz), g = terrainSlope(mx, mz, f), n = Math.hypot(g.gx, 1, g.gz);
+      const put = (x, z) => { lines.positions.push(x, h + g.gx * (x - mx) + g.gz * (z - mz) + ROAD_LIFT + 0.02, z); lines.normals.push(-g.gx / n, 1 / n, -g.gz / n); };
       put(p[0] + nx, p[1] + nz); put(p[0] - nx, p[1] - nz); put(q[0] - nx, q[1] - nz);
       put(p[0] + nx, p[1] + nz); put(q[0] - nx, q[1] - nz); put(q[0] + nx, q[1] + nz);
     };
@@ -1097,6 +1103,7 @@ export class Traffic {
         pointAt(path, s, o);
         const side = k % 2 ? 1 : -1, rgt = [-o.dz * side, o.dx * side], face = [o.dx, o.dz];
         const off = r.w + 0.7, base = [o.x + rgt[0] * off, o.z + rgt[1] * off];
+        foot = levelHeight(base[0], base[1], o.dx, o.dz);
         box(poles, [base[0], 3.6, base[1]], rgt, face, 0.14, 7.2, 0.14);
         posts.push([base[0], base[1], 0.1]);
         box(poles, [base[0] - rgt[0] * 1.0, 7.15, base[1] - rgt[1] * 1.0], rgt, face, 2.1, 0.09, 0.09);
@@ -1129,6 +1136,7 @@ export class Traffic {
         const b = spot(at(0, 0), at(0.8, 0), at(0, 2.5), at(0.8, 2.5), at(1.6, 5), at(0, 8));
         if (!b) continue;
         const base = [b[0], 0, b[1]];
+        foot = levelHeight(b[0], b[1], dx, dz);
         box(poles, [base[0], 1.15, base[2]], rgt, face, 0.07, 2.3, 0.07);
         posts.push([base[0], base[2], 0.06]);
         const c = [base[0] + face[0] * 0.06, 2.35, base[2] + face[1] * 0.06];
@@ -1141,6 +1149,7 @@ export class Traffic {
         const at = (ahead, out) => [mid[0] + dx * ahead + rgt[0] * (side + out), mid[1] + dz * ahead + rgt[1] * (side + out)];
         const base = spot(at(far * 2 + 1, 0), at(far * 2 + 1, 1.2), at(far * 2 + 3, 0.6), at(far * 2 + 3, 2), at(0, 0), at(0, 1), at(-2, 0.6));
         if (!base) continue;
+        foot = levelHeight(base[0], base[1], dx, dz);
         box(poles, [base[0], 1.9, base[1]], rgt, face, 0.16, 3.8, 0.16);
         posts.push([base[0], base[1], 0.1]);
         const head = [base[0] + face[0] * 0.25, 3.3, base[1] + face[1] * 0.25];

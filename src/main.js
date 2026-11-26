@@ -2,7 +2,7 @@ import { createProgram, createMesh, deleteMesh, canReverseDepth, createReversedD
 import { cube, torus, cylinder } from './geometry.js';
 import { gt3Body, yarisBody } from './bodies.js';
 import { perspective, lookAt, multiply, identity, basis, rotate } from './math.js';
-import { terrainHeight, terrainNormal, terrainSample, terrainMesh, ringTerrainChunks, setTerrain } from './terrain.js';
+import { terrainHeight, terrainNormal, terrainSample, terrainSlope, groundHeight, levelHeight, cityGroundTile, ringTerrainChunks, setTerrain } from './terrain.js';
 import { readControls, resetWheel, wheelAngle } from './input.js';
 import { Car, PHYSICS_STEP, VARIANTS, TIRE_TEMP, tempGrip, variantSpec, wheelLayout, clamp } from './car.js';
 import { Skids } from './skids.js';
@@ -161,6 +161,7 @@ function buildWorld(kind) {
   if (world) {
     for (const m of world.gpu) deleteMesh(gl, m);
     for (const c of world.cells ?? []) unloadCell(c);
+    for (const g of world.groundTiles?.values() ?? []) deleteMesh(gl, g.mesh);
     gl.deleteTexture(world.signs.texture);
     if (world.streetSigns) gl.deleteTexture(world.streetSigns.texture);
   }
@@ -293,8 +294,9 @@ function buildMontrealWorld() {
     // Lots of buildings and trees: far ones (mostly lost in the haze) aren't drawn.
     drawDistance: 800,
     treeDistance: 500,
-    // The ground: a flat square that follows the car (in steps of its grid).
-    ground: [{ mesh: upload(terrainMesh(6000, 250)), x: 0, z: 0, radius: Infinity, follow: 250 }],
+    // The ground: square tiles made as the car comes near (see streamCells).
+    ground: [],
+    groundTiles: new Map(),
     groundLook: [[0.3, 0.55, 0.3], 'grass'],
     far: 1000,
     offTrack: () => 'grass', // lawns and yards
@@ -364,7 +366,7 @@ function updatePuffs(dt) {
     if (p.age > p.life) { puffs.splice(i, 1); continue; }
     p.vy -= p.gravity * dt;
     p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
-    if (p.spark && p.y < 0.05) { p.y = 0.05; p.vy *= -0.3; p.vx *= 0.6; p.vz *= 0.6; }
+    if (p.spark && p.y < (p.floor ??= terrainHeight(p.x, p.z) + 0.05)) { p.y = p.floor; p.vy *= -0.3; p.vx *= 0.6; p.vz *= 0.6; }
   }
 }
 function drawPuffs() {
@@ -411,12 +413,35 @@ function loadCell(c) {
     [m.sheds.positions.length && upload(m.sheds), [0.55, 0.5, 0.44], 'concrete'],
     [m.roofs.positions.length && upload(m.roofs), [0.27, 0.27, 0.28], 'concrete'],
   ].filter(([mesh]) => mesh);
-  const p = buildTreesAt(m.trees, terrainHeight, 1e9).pieces[0];
+  const p = buildTreesAt(m.trees, groundHeight, 1e9).pieces[0];
   c.trees = p ? [
     [upload(p.trunks), [0.36, 0.25, 0.16], 'bark'],
     [upload(p.leaves), [0.22, 0.45, 0.17], 'leaves'],
     [upload(p.leavesLight), [0.36, 0.55, 0.2], 'leaves'],
   ].filter(([mesh]) => mesh.count) : [];
+}
+// Montreal's ground: GROUND_TILE m squares with a GROUND_CELL m grid, made
+// within GROUND_REACH m of the car and freed past GROUND_REACH + 500.
+const GROUND_TILE = 300, GROUND_CELL = 10, GROUND_REACH = 1250;
+function streamGround(x, z, all) {
+  const T = GROUND_TILE, tiles = world.groundTiles, want = [];
+  for (const [k, g] of tiles) {
+    if (Math.hypot(g.x - x, g.z - z) - g.radius > GROUND_REACH + 500) {
+      deleteMesh(gl, g.mesh);
+      tiles.delete(k);
+    }
+  }
+  for (let i = Math.floor((x - GROUND_REACH) / T); i <= Math.floor((x + GROUND_REACH) / T); i++) {
+    for (let j = Math.floor((z - GROUND_REACH) / T); j <= Math.floor((z + GROUND_REACH) / T); j++) {
+      const k = `${i},${j}`, d = Math.hypot((i + 0.5) * T - x, (j + 0.5) * T - z) - T * 0.71;
+      if (!tiles.has(k) && d < GROUND_REACH) want.push([d, i, j, k]);
+    }
+  }
+  want.sort((a, b) => a[0] - b[0]);
+  for (const [, i, j, k] of all ? want : want.slice(0, 2)) {
+    tiles.set(k, { mesh: createMesh(gl, program, cityGroundTile(i * T, j * T, T, GROUND_CELL, track.groundUnder)), x: (i + 0.5) * T, z: (j + 0.5) * T, radius: T * 0.71 });
+  }
+  world.ground = [...tiles.values()];
 }
 function unloadCell(c) {
   for (const m of c.gpu) deleteMesh(gl, m);
@@ -428,6 +453,7 @@ function unloadCell(c) {
 // unless `all`, so driving never stutters), and frees those left far behind.
 function streamCells(x, z, all = false) {
   if (!world.cells) return;
+  streamGround(x, z, all);
   const near = (c) => Math.hypot(c.x - x, c.z - z) - c.radius;
   const want = [];
   for (const c of world.cells) {
@@ -459,6 +485,22 @@ for (const name of Object.keys(VARIANTS)) {
 const DEFAULT_CAR = 'gt3';
 // Traffic, police, people and their shadows (the open map).
 const city = createCityRenderer(gl, program, draw);
+city.setGround({
+  y: (x, z, dx, dz) => levelHeight(x, z, dx, dz) + ROAD_LIFT,
+  slope: (x, z, dx, dz) => terrainSlope(x, z, (x, z) => levelHeight(x, z, dx, dz)),
+});
+
+// The road under the player's car. On Montreal's bridges that's the deck or
+// the street under it, whichever the car is on: the nearer to where it was
+// (carLevel, its last height), or after a reset the one running its way.
+let carLevel = null;
+function carGround(x, z) {
+  if (world?.kind !== 'montreal') return terrainHeight(x, z);
+  const t = terrainHeight(x, z), g = groundHeight(x, z);
+  if (t === g) return t;
+  if (carLevel === null) return levelHeight(x, z, -Math.sin(car.heading), -Math.cos(car.heading));
+  return Math.abs(t - carLevel) <= Math.abs(g - carLevel) ? t : g;
+}
 const model = (variant) => MODELS[variant] ?? MODELS[DEFAULT_CAR];
 
 // Grid starts a few meters before the line, facing along the track.
@@ -568,7 +610,8 @@ function resetRace() {
   resetWheel();
   cam.x = car.x + Math.sin(car.heading) * 9;
   cam.z = car.z + Math.cos(car.heading) * 9;
-  cam.y = terrainHeight(car.x, car.z) + 3.5;
+  carLevel = null;
+  cam.y = carGround(car.x, car.z) + 3.5;
   glance = 0;
   Object.assign(kerb, { lift: 0, vlift: 0, pitch: 0, vpitch: 0, roll: 0, vroll: 0, wheels: [0, 0, 0, 0] });
   lap.start = null;
@@ -661,7 +704,7 @@ function draw(mesh, model, color, mat = 'matte', alpha = 1) {
 // A car's frame, lying on the slope under it: origin on the road surface,
 // right / up (surface normal) / back axes.
 function carFrame({ x, z, heading: h }) {
-  const up = terrainNormal(x, z);
+  const up = terrainNormal(x, z, carGround);
   const f = [-Math.sin(h), 0, -Math.cos(h)];
   const d = f[0] * up[0] + f[1] * up[1] + f[2] * up[2];
   let fwd = [f[0] - up[0] * d, f[1] - up[1] * d, f[2] - up[2] * d];
@@ -669,7 +712,7 @@ function carFrame({ x, z, heading: h }) {
   fwd = fwd.map((v) => v / l);
   const back = fwd.map((v) => -v);
   const right = [up[1] * back[2] - up[2] * back[1], up[2] * back[0] - up[0] * back[2], up[0] * back[1] - up[1] * back[0]];
-  return { o: [x, terrainHeight(x, z) + ROAD_LIFT, z], right, up, back };
+  return { o: [x, carGround(x, z) + ROAD_LIFT, z], right, up, back };
 }
 
 // World position of a point given in a car's frame (x right, y up, z back).
@@ -680,7 +723,7 @@ function wheelPositions(pose = car, m = model(car.variant)) {
   const F = carFrame(pose);
   return m.wheels.map(([side, ahead, front]) => {
     const [x, , z] = toWorld(F, side, 0, -ahead);
-    return { x, z, y: terrainHeight(x, z) + ROAD_LIFT + 0.03, front, sliding: front ? pose.frontSliding : pose.rearSliding };
+    return { x, z, y: carGround(x, z) + ROAD_LIFT + 0.03, front, sliding: front ? pose.frontSliding : pose.rearSliding };
   });
 }
 
@@ -1218,7 +1261,8 @@ function physicsTick(h, controls) {
   where = track.locate(car.x, car.z);
   surface = where.surface ?? world.offTrack(car.x, car.z, where);
   updateKerbs(h);
-  car.update(h, controls, surface, terrainSample(car.x, car.z));
+  car.update(h, controls, surface, terrainSample(car.x, car.z, carGround));
+  carLevel = carGround(car.x, car.z);
   collide();
   simTime += h * 1000;
   after = track.locate(car.x, car.z);
@@ -1300,7 +1344,7 @@ function frame(now) {
     roll: b.roll + kerb.roll + sag * 0.045 * (dmg.left - dmg.right),
     lift: kerb.lift - clamp(b.heave, -0.1, 0.1), wheels: kerb.wheels,
   };
-  const carY = terrainHeight(shown.x, shown.z);
+  const carY = carGround(shown.x, shown.z);
 
   // Chase camera: lag behind the car, smoothed.
   const back = 9, height = 3.5;
@@ -1310,7 +1354,7 @@ function frame(now) {
   cam.x += (tx - cam.x) * k;
   cam.z += (tz - cam.z) * k;
   cam.y += (carY + height - cam.y) * k;
-  cam.y = Math.max(cam.y, terrainHeight(cam.x, cam.z) + 1.2); // never inside a hill
+  cam.y = Math.max(cam.y, groundHeight(cam.x, cam.z) + 1.2); // never inside a hill
 
   resize();
   depthTarget?.begin(canvas.width, canvas.height);
@@ -1388,12 +1432,7 @@ function frame(now) {
   const pull = depthTarget ? 1 : -1;
   gl.disable(gl.CULL_FACE);
   const seen = (c, far = world.drawDistance ?? DRAW_DISTANCE) => Math.hypot(c.x - eyePos[0], c.z - eyePos[2]) - c.radius < far;
-  for (const g of world.ground) {
-    if (!seen(g)) continue;
-    // A ground that follows the car moves in whole steps of its grid.
-    const at = g.follow ? basis([Math.round(eyePos[0] / g.follow) * g.follow, 0, Math.round(eyePos[2] / g.follow) * g.follow], [1, 0, 0], [0, 1, 0], [0, 0, 1]) : identity();
-    draw(g.mesh, at, ...world.groundLook);
-  }
+  for (const g of world.ground) if (seen(g, world.far + 100)) draw(g.mesh, identity(), ...world.groundLook);
   // The open map's cells in view, with their meshes made.
   const cells = world.loaded ? [...world.loaded].filter((c) => seen(c)) : [];
   gl.enable(gl.POLYGON_OFFSET_FILL);
@@ -1412,8 +1451,8 @@ function frame(now) {
     const casters = city.casters(eyePos, world.traffic, world.police, world.people.people);
     const v = model(car.variant).spec;
     casters.push({ x: shown.x, z: shown.z, dx: -Math.sin(shown.heading), dz: -Math.cos(shown.heading), length: v.length, width: v.width, height: 1.2 });
-    city.shadows(casters, ROAD_LIFT + 0.01, eyePos);
-    city.spot(world.police.heli, shown, ROAD_LIFT + 0.012);
+    city.shadows(casters, 0.01, eyePos);
+    city.spot(world.police.heli, shown, 0.012);
     gl.depthMask(true);
     gl.disable(gl.BLEND);
   }
@@ -1439,9 +1478,9 @@ function frame(now) {
   gl.uniform1i(uTextured, 0);
   if (world.traffic) {
     const ss = world.streetSigns;
-    city.traffic(world.traffic, ROAD_LIFT, eyePos, now / 1000);
-    city.police(world.police, ROAD_LIFT, eyePos, now / 1000);
-    city.people(world.people.people, ROAD_LIFT * 0.6, eyePos);
+    city.traffic(world.traffic, eyePos, now / 1000);
+    city.police(world.police, eyePos, now / 1000);
+    city.people(world.people.people, -ROAD_LIFT * 0.4, eyePos);
     city.heli(world.police.heli, eyePos, now / 1000);
     gl.disable(gl.CULL_FACE);
     const lit = cells.filter((c) => c.furniture);

@@ -1,7 +1,7 @@
 // The island of Montreal: an open map to drive around freely, no laps.
 // Streets, buildings, trees and the rivers come from public map data
-// (montreal.js). The ground is flat, so everything sits at height 0 (in truth
-// the island rises from the river to Mount Royal's 233 m).
+// (montreal.js). They sit on the real ground (terrain.js): from the rivers up
+// to Mount Royal, with the street bridges on straight decks.
 //
 // - Streets are asphalt strips with round joins, so bends and crossings have
 //   no gaps; the bigger ones have sidewalks and a yellow center line.
@@ -16,6 +16,7 @@
 
 import { MONTREAL } from './montreal.js';
 import { ROAD_LIFT } from './track.js';
+import { levelHeight, terrainSlope, groundHeight, cityWaterLevel, loadCityGround } from './terrain.js';
 
 // Half widths (m) of the roadway by class, and sidewalk widths beside it.
 const HALF = { primary: 7, secondary: 6.5, tertiary: 5.5, residential: 4.5, unclassified: 4, living_street: 3.5, service: 2.6, pedestrian: 3 };
@@ -28,6 +29,24 @@ const CHUNK = MONTREAL.chunk; // m: the cells the map is stored and drawn in
 const CELL = 25;     // m: lookup grid for roads and buildings (CHUNK is a multiple)
 const KEEP_CELLS = 600; // cells whose buildings and trees stay unpacked
 const AREA_ROW = 2;     // m: rows of the area's inside/outside lookup
+const DRAPE_STEP = 8;         // m: streets, paint and barriers are cut in pieces this long at most, to follow the ground
+const WATER_STEP = 300; // m: longest edge of the water's triangles
+
+// The ground under a street at (x, z), the street running (dx, dz) (on a
+// bridge's deck when it runs along it): its height there and the way it slopes.
+// A street is laid level across, tilted with the ground at its line: points
+// beside it take their height from that plane (planeY), so the roadway, the
+// sidewalks and the paint all agree.
+const groundAt = (x, z, dx, dz) => {
+  const f = (x, z) => levelHeight(x, z, dx, dz);
+  return { x, z, h: f(x, z), ...terrainSlope(x, z, f) };
+};
+const planeY = (g, x, z) => g.h + g.gx * (x - g.x) + g.gz * (z - g.z);
+// Points every DRAPE_STEP m or less from a to b (a included, b not).
+function* drapeSteps([ax, az], [bx, bz]) {
+  const n = Math.max(1, Math.ceil(Math.hypot(bx - ax, bz - az) / DRAPE_STEP));
+  for (let k = 0; k < n; k++) yield [ax + ((bx - ax) * k) / n, az + ((bz - az) * k) / n];
+}
 // Brick colors of Montreal's plexes (red, brown, buff, grey stone), with weights.
 export const BRICKS = [[[0.52, 0.24, 0.17], 4], [[0.42, 0.28, 0.2], 3], [[0.7, 0.6, 0.46], 2], [[0.58, 0.57, 0.55], 1]];
 
@@ -56,6 +75,7 @@ class Reader {
 let packed = null;
 export async function loadOpenMap() {
   if (packed) return packed;
+  await loadCityGround(); // the ground under it (terrain.js)
   const bin = atob(MONTREAL.data), bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate'));
@@ -230,13 +250,16 @@ export function buildOpenMap() {
   function barriers() {
     const positions = [], normals = [], H = 0.9, W = 0.3;
     const quad = (a, b, c, d, n) => { for (const p of [a, b, c, a, c, d]) { positions.push(...p); normals.push(...n); } };
-    for (const line of walls) {
+    for (const wall of walls) {
+      const line = [];
+      for (let i = 0; i + 1 < wall.length; i++) line.push(...drapeSteps(wall[i], wall[i + 1]));
+      line.push(wall[wall.length - 1]);
       for (let i = 0; i + 1 < line.length; i++) {
         const [ax, az] = line[i], [bx, bz] = line[i + 1];
         const l = Math.hypot(bx - ax, bz - az);
         if (l < 0.01) continue;
         const nx = -(bz - az) / l, nz = (bx - ax) / l;
-        const P = (x, z, s, y) => [x + nx * W * s, y, z + nz * W * s];
+        const P = (x, z, s, y) => [x + nx * W * s, levelHeight(x, z, nz, -nx) + (y ? y : -0.3), z + nz * W * s];
         quad(P(ax, az, 1, 0), P(bx, bz, 1, 0), P(bx, bz, 1, H), P(ax, az, 1, H), [nx, 0, nz]);
         quad(P(bx, bz, -1, 0), P(ax, az, -1, 0), P(ax, az, -1, H), P(bx, bz, -1, H), [-nx, 0, -nz]);
         quad(P(ax, az, 1, H), P(bx, bz, 1, H), P(bx, bz, -1, H), P(ax, az, -1, H), [0, 1, 0]);
@@ -253,11 +276,46 @@ export function buildOpenMap() {
     for (let i = 0; i < n; i++) { x += r.s(); z += r.s(); out[2 * i] = x; out[2 * i + 1] = z; }
     return out; // triangles, x z x z x z, in whole meters
   })();
+  // The water's surface follows its level along the rivers (Lac Saint-Louis
+  // sits ~15 m above the harbour, below the Lachine Rapids): big triangles are
+  // split so it can.
   function waterMesh() {
-    const positions = [], normals = [];
-    for (let i = 0; i < water.length; i += 2) { positions.push(water[i], 0.01, water[i + 1]); normals.push(0, 1, 0); }
+    const positions = [], normals = [], level = new Map();
+    const y = (x, z) => {
+      const k = `${x.toFixed(1)},${z.toFixed(1)}`;
+      if (!level.has(k)) level.set(k, cityWaterLevel(x, z));
+      return level.get(k);
+    };
+    const tri = (a, b, c) => {
+      const ab = Math.hypot(a[0] - b[0], a[1] - b[1]), bc = Math.hypot(b[0] - c[0], b[1] - c[1]), ca = Math.hypot(c[0] - a[0], c[1] - a[1]);
+      const m = Math.max(ab, bc, ca);
+      if (m > WATER_STEP) {
+        // Split the longest edge in two.
+        const mid = (p, q) => [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2];
+        if (m === ab) { const d = mid(a, b); tri(a, d, c); tri(d, b, c); }
+        else if (m === bc) { const d = mid(b, c); tri(a, b, d); tri(a, d, c); }
+        else { const d = mid(c, a); tri(a, b, d); tri(d, b, c); }
+        return;
+      }
+      for (const [x, z] of [a, b, c]) { positions.push(x, y(x, z), z); normals.push(0, 1, 0); }
+    };
+    for (let i = 0; i < water.length; i += 6) tri([water[i], water[i + 1]], [water[i + 2], water[i + 3]], [water[i + 4], water[i + 5]]);
     fixWinding(positions);
     return { positions, normals };
+  }
+  // Whether (x, z) is under the water (in one of its triangles), by CHUNK-meter square.
+  const waterIndex = new Map();
+  for (let i = 0; i < water.length; i += 6) {
+    const xs = [water[i], water[i + 2], water[i + 4]], zs = [water[i + 1], water[i + 3], water[i + 5]];
+    index(waterIndex, i, Math.min(...xs), Math.max(...xs), Math.min(...zs), Math.max(...zs), CHUNK);
+  }
+  function inWater(x, z) {
+    for (const i of waterIndex.get(key(Math.floor(x / CHUNK), Math.floor(z / CHUNK))) ?? []) {
+      const [ax, az, bx, bz, cx, cz] = water.subarray(i, i + 6);
+      const d1 = (bx - ax) * (z - az) - (bz - az) * (x - ax), d2 = (cx - bx) * (z - bz) - (cz - bz) * (x - bx), d3 = (ax - cx) * (z - cz) - (az - cz) * (x - cx);
+      if ((d1 >= 0 && d2 >= 0 && d3 >= 0) || (d1 <= 0 && d2 <= 0 && d3 <= 0)) return true;
+    }
+    return false;
   }
 
   // --- buildings and trees, unpacked per cell --------------------------
@@ -333,23 +391,37 @@ export function buildOpenMap() {
   // --- meshes ----------------------------------------------------------
   // Asphalt (or sidewalk) along each road: a quad per segment and a disc at
   // every point, so bends and crossings are filled.
+  // Each piece is laid level across, on the ground at its line (planeY).
   function ribbons(list, half, lift) {
-    const positions = [], normals = [], put = (x, z) => { positions.push(x, lift, z); normals.push(0, 1, 0); };
+    const positions = [], normals = [];
+    const put = (g, x, z) => {
+      positions.push(x, planeY(g, x, z) + lift, z);
+      const l = Math.hypot(g.gx, 1, g.gz);
+      normals.push(-g.gx / l, 1 / l, -g.gz / l);
+    };
     for (const r of list) {
       const w = half(r);
       if (!w) continue;
+      const at = r.ground ?? (r.ground = r.pts.map(([x, z], i, p) => {
+        const a = p[Math.max(0, i - 1)], b = p[Math.min(p.length - 1, i + 1)];
+        return groundAt(x, z, b[0] - a[0], b[1] - a[1]);
+      }));
       for (let i = 0; i + 1 < r.pts.length; i++) {
         const [ax, az] = r.pts[i], [bx, bz] = r.pts[i + 1], l = Math.hypot(bx - ax, bz - az) || 1;
         const nx = (-(bz - az) / l) * w, nz = ((bx - ax) / l) * w;
-        // Counter-clockwise seen from above.
-        put(ax + nx, az + nz); put(ax - nx, az - nz); put(bx - nx, bz - nz);
-        put(ax + nx, az + nz); put(bx - nx, bz - nz); put(bx + nx, bz + nz);
+        const line = [at[i], ...[...drapeSteps(r.pts[i], r.pts[i + 1])].slice(1).map(([x, z]) => groundAt(x, z, bx - ax, bz - az)), at[i + 1]];
+        for (let k = 0; k + 1 < line.length; k++) {
+          const a = line[k], b = line[k + 1];
+          // Counter-clockwise seen from above.
+          put(a, a.x + nx, a.z + nz); put(a, a.x - nx, a.z - nz); put(b, b.x - nx, b.z - nz);
+          put(a, a.x + nx, a.z + nz); put(b, b.x - nx, b.z - nz); put(b, b.x + nx, b.z + nz);
+        }
       }
-      for (const [x, z] of r.pts) {
-        const n = w > 4 ? 12 : 8;
+      for (const g of at) {
+        const { x, z } = g, n = w > 4 ? 12 : 8;
         for (let k = 0; k < n; k++) {
           const a0 = (k / n) * 2 * Math.PI, a1 = ((k + 1) / n) * 2 * Math.PI;
-          put(x, z); put(x + Math.cos(a1) * w, z + Math.sin(a1) * w); put(x + Math.cos(a0) * w, z + Math.sin(a0) * w);
+          put(g, x, z); put(g, x + Math.cos(a1) * w, z + Math.sin(a1) * w); put(g, x + Math.cos(a0) * w, z + Math.sin(a0) * w);
         }
       }
     }
@@ -364,7 +436,13 @@ export function buildOpenMap() {
     const yellow = { positions: [], normals: [] }, white = { positions: [], normals: [] };
     // A strip `half` wide, `off` m right of the road's line, dashed if `dash` ([on, off] m).
     const strip = (m, r, off, half, dash) => {
-      const put = (x, z) => { m.positions.push(x, ROAD_LIFT + 0.02, z); m.normals.push(0, 1, 0); };
+      // (Heights from the street's ground at the point on its line across from it.)
+      let g = null;
+      const put = (x, z) => {
+        m.positions.push(x, planeY(g, x, z) + ROAD_LIFT + 0.02, z);
+        const l = Math.hypot(g.gx, 1, g.gz);
+        m.normals.push(-g.gx / l, 1 / l, -g.gz / l);
+      };
       const len = r.pts.reduce((s, p, i) => (i ? s + Math.hypot(p[0] - r.pts[i - 1][0], p[1] - r.pts[i - 1][1]) : 0), 0);
       const from = r.clear[0], to = len - r.clear[1];
       let s = 0;
@@ -381,13 +459,19 @@ export function buildOpenMap() {
             spans.push([Math.max(d, from, s), Math.min(d + dash[0], to, s + l)]);
           }
         }
-        for (const [d0, d1] of spans) {
-          if (d1 - d0 < 0.05) continue;
-          const px = ax + ux * (d0 - s) + rx * off, pz = az + uz * (d0 - s) + rz * off;
-          const qx = ax + ux * (d1 - s) + rx * off, qz = az + uz * (d1 - s) + rz * off;
-          const nx = rx * half, nz = rz * half;
-          put(px + nx, pz + nz); put(px - nx, pz - nz); put(qx - nx, qz - nz);
-          put(px + nx, pz + nz); put(qx - nx, qz - nz); put(qx + nx, qz + nz);
+        for (const [e0, e1] of spans) {
+          if (e1 - e0 < 0.05) continue;
+          // In pieces of DRAPE_STEP m at most, each on the ground at its middle.
+          const n = Math.ceil((e1 - e0) / DRAPE_STEP);
+          for (let k = 0; k < n; k++) {
+            const d0 = e0 + ((e1 - e0) * k) / n, d1 = e0 + ((e1 - e0) * (k + 1)) / n, dm = (d0 + d1) / 2;
+            g = groundAt(ax + ux * (dm - s), az + uz * (dm - s), ux, uz);
+            const px = ax + ux * (d0 - s) + rx * off, pz = az + uz * (d0 - s) + rz * off;
+            const qx = ax + ux * (d1 - s) + rx * off, qz = az + uz * (d1 - s) + rz * off;
+            const nx = rx * half, nz = rz * half;
+            put(px + nx, pz + nz); put(px - nx, pz - nz); put(qx - nx, qz - nz);
+            put(px + nx, pz + nz); put(qx - nx, qz - nz); put(qx + nx, qz + nz);
+          }
         }
         s += l;
       }
@@ -429,12 +513,16 @@ export function buildOpenMap() {
       const shed = b.h < 4.5;
       const m = shed ? c.sheds : b.h >= 35 ? c.towers : c.walls[color];
       const n = b.ring.length;
+      // On a slope: walls from below the lowest corner's ground, the roof its
+      // height above the ground at the corners on average; windows count from there.
+      const gs = b.ring.map(([x, z]) => groundHeight(x, z));
+      const g0 = gs.reduce((s, h) => s + h, 0) / n, base = Math.min(...gs) - 0.3, top = g0 + b.h;
       let u = 0;
       for (let i = 0; i < n; i++) {
         const [ax, az] = b.ring[i], [bx, bz] = b.ring[(i + 1) % n], l = Math.hypot(bx - ax, bz - az);
         if (l < 1e-3) continue;
         const nx = -(bz - az) / l, nz = (bx - ax) / l; // outward for a clockwise ring
-        const v = [[ax, 0, az, u, 0], [bx, 0, bz, u + l, 0], [bx, b.h, bz, u + l, b.h], [ax, b.h, az, u, b.h]];
+        const v = [[ax, base, az, u, base - g0], [bx, base, bz, u + l, base - g0], [bx, top, bz, u + l, b.h], [ax, top, az, u, b.h]];
         for (const q of [0, 1, 2, 0, 2, 3]) {
           m.positions.push(v[q][0], v[q][1], v[q][2]);
           m.normals.push(nx, 0, nz);
@@ -443,7 +531,7 @@ export function buildOpenMap() {
         u += l;
       }
       for (const tri of earClip(b.ring)) {
-        for (const i of tri) { c.roofs.positions.push(b.ring[i][0], b.h, b.ring[i][1]); c.roofs.normals.push(0, 1, 0); }
+        for (const i of tri) { c.roofs.positions.push(b.ring[i][0], top, b.ring[i][1]); c.roofs.normals.push(0, 1, 0); }
       }
     }
     for (const m of [...c.walls, c.towers, c.sheds]) fixWinding(m.positions, m.normals);
@@ -484,6 +572,8 @@ export function buildOpenMap() {
     cellMeshes,
     layers: [{ mesh: waterMesh(), color: [0.2, 0.36, 0.45], mat: 'water' }],
     barriers: barriers(),
+    // The ground for a tile of it (terrain.js cityGroundTile()): under the water, below its surface.
+    groundUnder: (x, z, h) => (inWater(x, z) ? Math.min(h, cityWaterLevel(x, z) - 0.8) : h),
     // Car roads with a piece within r m of (x, z) (by cell).
     roadsNear: (x, z, r) => cellsNear(x, z, r + CHUNK).flatMap((c) => c.roads),
     // For the minimap: buildings and roads touching a box.

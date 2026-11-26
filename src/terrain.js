@@ -6,15 +6,20 @@
 // the two links between them). Near a road the ground takes the road's height
 // (flat across it), then blends back into the elevation grid over BLEND meters.
 //
-// Montreal ('montreal') is flat (the island, Mount Royal aside, is low and level), and wide.
+// Montreal ('montreal') uses real ground too (montreal-ground.js): a 30 m
+// bare-earth elevation grid (NRCan's MRDEM), from the rivers (~6 m by the Old
+// Port, ~21 m on Lac Saint-Louis) to Mount Royal (~232 m). The grid has no
+// bridges, so the street bridges come as lines and get a straight deck from
+// one end to the other (road bumps on top of the ground). It's unpacked once
+// (loadCityGround()), before the map is built.
 
 import { NORDSCHLEIFE, GP_STRECKE, RING_LINKS } from './nordschleife.js';
+import { MONTREAL_GROUND } from './montreal-ground.js';
 
-// flat: half-size (m) of the ground's fine middle part.
 const LANDS = {
   ring: { real: true },
   gp: { real: true },
-  montreal: { flat: 3000 },
+  montreal: { city: true },
 };
 let land = LANDS.ring;
 let bumps = null; // (x, z) -> extra height (m, >= 0) on the road, or null
@@ -22,7 +27,7 @@ let bumps = null; // (x, z) -> extra height (m, >= 0) on the road, or null
 // Picks the ground for a layout ('ring', 'gp' or 'montreal'); call before building anything on it.
 export function setTerrain(kind) {
   land = LANDS[kind];
-  bumps = null;
+  bumps = land.city ? deckBump : null;
 }
 
 // Road bumps on top of the ground; null for none.
@@ -37,7 +42,7 @@ export function terrainHeight(x, z) {
 
 // The ground alone, without road bumps.
 export function groundHeight(x, z) {
-  return land.real ? ringHeight(x, z) : 0;
+  return land.real ? ringHeight(x, z) : land.city ? cityHeight(x, z) : 0;
 }
 
 // Height, gradient (gx = dh/dx, gz = dh/dz) and second derivatives at (x, z),
@@ -67,34 +72,6 @@ export function terrainNormal(x, z, f = terrainHeight) {
   const { gx, gz } = terrainSlope(x, z, f);
   const l = Math.hypot(gx, 1, gz);
   return [-gx / l, 1 / l, -gz / l];
-}
-
-// Ground grid covering [-half, half]^2: cells of about `cell` meters in the
-// middle, then a few wide cells out to the edge. Rows and columns share the
-// same coordinates everywhere, so there are no cracks between the two.
-export function terrainMesh(half, cell) {
-  const FLAT = land.flat, fine = Math.ceil((2 * FLAT) / cell), coarse = 6;
-  const axis = [];
-  for (let i = 0; i < coarse; i++) axis.push(-half + ((half - FLAT) * i) / coarse);
-  for (let i = 0; i <= fine; i++) axis.push(-FLAT + (2 * FLAT * i) / fine);
-  for (let i = coarse - 1; i >= 0; i--) axis.push(half - ((half - FLAT) * i) / coarse);
-
-  // Shared vertices + an index list: ~6x fewer vertices for the GPU to process.
-  const n = axis.length, positions = [], normals = [], indices = [];
-  for (const x of axis) {
-    for (const z of axis) {
-      positions.push(x, groundHeight(x, z), z);
-      normals.push(...terrainNormal(x, z, groundHeight));
-    }
-  }
-  const at = (i, j) => i * n + j;
-  for (let i = 0; i + 1 < n; i++) {
-    for (let j = 0; j + 1 < n; j++) {
-      // Counter-clockwise seen from above.
-      indices.push(at(i, j), at(i, j + 1), at(i + 1, j + 1), at(i, j), at(i + 1, j + 1), at(i + 1, j));
-    }
-  }
-  return { positions, normals, indices };
 }
 
 // --- Nürburgring ground -------------------------------------------------
@@ -411,4 +388,138 @@ function nearRoad(x, z) {
   let best = Infinity;
   for (const g of list ?? []) best = Math.min(best, Math.sqrt(probe(g, x, z)) - (R.roads[R.segRoad[g]].flat - RING_FLAT));
   return best;
+}
+
+// --- Montreal's ground ----------------------------------------------------
+
+// Half width (m) a bridge's deck reaches from its line, by street class
+// (montreal-ground.js `classes`): the roadway and sidewalks (openmap.js), plus a little.
+const DECK_HALF = { primary: 10, secondary: 9.5, tertiary: 8.2, residential: 7, unclassified: 6.3, living_street: 4.5, service: 3.6 };
+const DECK_EDGE = 4;  // m beyond that over which the deck lets go of the road (no cliff at its side)
+const DECK_CELL = 50; // m: lookup grid for the decks
+let cityLand = null;
+
+// Unpacks the elevation grid and the bridges (deflated, base64): call once, before building Montreal.
+export async function loadCityGround() {
+  if (cityLand) return cityLand;
+  const G = MONTREAL_GROUND, bin = atob(G.data), bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate'));
+  const raw = new Uint8Array(await new Response(stream).arrayBuffer());
+  const h = new Float32Array(G.nx * G.nz);
+  let p = 0;
+  const zig = (b) => {
+    let v = 0, s = 0, c;
+    do { c = b[p++]; v += (c & 127) * 2 ** s; s += 7; } while (c & 128);
+    return v % 2 ? -(v + 1) / 2 : v / 2;
+  };
+  // Rows of steps from the row before, in decimeters.
+  for (let j = 0, o = 0; j < G.nz; j++) {
+    for (let i = 0; i < G.nx; i++, o++) h[o] = (j ? h[o - G.nx] : 0) + zig(raw) / 10;
+  }
+  cityLand = { h, decks: [], cells: new Map() };
+  // Bridges: lines with their street class.
+  const bb = atob(G.bridges), b = new Uint8Array(bb.length);
+  for (let i = 0; i < bb.length; i++) b[i] = bb.charCodeAt(i);
+  p = 0;
+  for (let n = zig(b), q = 0; q < n; q++) {
+    const half = DECK_HALF[G.classes[zig(b)]] ?? 7, pts = [];
+    let x = 0, z = 0;
+    for (let m = zig(b), k = 0; k < m; k++) { x += zig(b); z += zig(b); pts.push([x / 10, z / 10]); }
+    const along = [0];
+    for (let k = 1; k < pts.length; k++) along.push(along[k - 1] + Math.hypot(pts[k][0] - pts[k - 1][0], pts[k][1] - pts[k - 1][1]));
+    const L = along[along.length - 1], [ax, az] = pts[0], [bx, bz] = pts[pts.length - 1];
+    // A straight deck from end to end, at the ground's height there.
+    const deck = { pts, along, half, h0: cityHeight(ax, az), h1: cityHeight(bx, bz), length: L };
+    cityLand.decks.push(deck);
+    const reach = half + DECK_EDGE, xs = pts.map((q) => q[0]), zs = pts.map((q) => q[1]);
+    for (let i = Math.floor((Math.min(...xs) - reach) / DECK_CELL); i <= Math.floor((Math.max(...xs) + reach) / DECK_CELL); i++) {
+      for (let j = Math.floor((Math.min(...zs) - reach) / DECK_CELL); j <= Math.floor((Math.max(...zs) + reach) / DECK_CELL); j++) {
+        const k = i * 100003 + j;
+        if (!cityLand.cells.has(k)) cityLand.cells.set(k, []);
+        cityLand.cells.get(k).push(deck);
+      }
+    }
+  }
+  return cityLand;
+}
+
+// The elevation grid, bicubic (Catmull-Rom) so slopes have no kinks; 0 before it's loaded.
+function cityHeight(x, z) {
+  if (!cityLand) return 0;
+  const G = MONTREAL_GROUND, h = cityLand.h;
+  const u = Math.max(1, Math.min(G.nx - 3, (x - G.x0) / G.cell)), v = Math.max(1, Math.min(G.nz - 3, (z - G.z0) / G.cell));
+  const i = Math.floor(u), j = Math.floor(v), fu = u - i, fv = v - j;
+  const wu0 = ((-fu + 2) * fu - 1) * fu / 2, wu1 = ((3 * fu - 5) * fu * fu + 2) / 2, wu2 = ((-3 * fu + 4) * fu + 1) * fu / 2, wu3 = (fu - 1) * fu * fu / 2;
+  const wv = [((-fv + 2) * fv - 1) * fv / 2, ((3 * fv - 5) * fv * fv + 2) / 2, ((-3 * fv + 4) * fv + 1) * fv / 2, (fv - 1) * fv * fv / 2];
+  let sum = 0;
+  for (let b = 0; b < 4; b++) {
+    const row = (j - 1 + b) * G.nx + i - 1;
+    sum += wv[b] * (wu0 * h[row] + wu1 * h[row + 1] + wu2 * h[row + 2] + wu3 * h[row + 3]);
+  }
+  return sum;
+}
+
+// How far a bridge's deck lifts the road above the ground at (x, z): the
+// highest deck over it (0 off the bridges). Within `half` of a bridge's line
+// the deck is level across; past that it eases back to the ground. Given a
+// heading (dx, dz), only decks running that way (within ~45°) count: a street
+// that passes under a bridge stays on the ground.
+function deckBump(x, z, dx = 0, dz = 0) {
+  const list = cityLand?.cells.get(Math.floor(x / DECK_CELL) * 100003 + Math.floor(z / DECK_CELL));
+  if (!list) return 0;
+  let best = 0, ground = null;
+  for (const d of list) {
+    const { pts, along } = d;
+    let dist = Infinity, s = 0, way = 1;
+    for (let k = 0; k + 1 < pts.length; k++) {
+      const [ax, az] = pts[k], [bx, bz] = pts[k + 1], ex = bx - ax, ez = bz - az, l2 = ex * ex + ez * ez || 1;
+      const t = ((x - ax) * ex + (z - az) * ez) / l2;
+      // Past the deck's ends the ground carries the road.
+      if ((t < 0 && k === 0) || (t > 1 && k === pts.length - 2)) continue;
+      const tc = Math.max(0, Math.min(1, t)), e = Math.hypot(x - ax - ex * tc, z - az - ez * tc);
+      if (e < dist) { dist = e; s = along[k] + (along[k + 1] - along[k]) * tc; way = dx || dz ? Math.abs(ex * dx + ez * dz) / Math.sqrt(l2 * (dx * dx + dz * dz)) : 1; }
+    }
+    if (dist > d.half + DECK_EDGE || way < 0.7) continue;
+    ground ??= cityHeight(x, z);
+    const lift = d.h0 + (d.h1 - d.h0) * (s / (d.length || 1)) - ground;
+    if (lift <= 0) continue;
+    const w = 1 - smooth((dist - d.half) / DECK_EDGE);
+    best = Math.max(best, lift * w);
+  }
+  return best;
+}
+
+// The road's height at (x, z) for something heading (dx, dz): on a bridge's
+// deck only going along it (see deckBump). Elsewhere, terrainHeight().
+export function levelHeight(x, z, dx, dz) {
+  return land.city ? cityHeight(x, z) + deckBump(x, z, dx, dz) : terrainHeight(x, z);
+}
+
+// Montreal's ground in a square tile [x0, x0 + size] x [z0, z0 + size], a
+// grid of `cell` m: tiles side by side share their edges' heights. `under`
+// (x, z, h) can change a height (to keep the ground under the water).
+export function cityGroundTile(x0, z0, size, cell, under = (x, z, h) => h) {
+  const n = Math.round(size / cell), positions = [], normals = [], indices = [];
+  for (let i = 0; i <= n; i++) {
+    for (let j = 0; j <= n; j++) {
+      const x = x0 + i * cell, z = z0 + j * cell;
+      positions.push(x, under(x, z, groundHeight(x, z)), z);
+      normals.push(...terrainNormal(x, z, groundHeight));
+    }
+  }
+  const at = (i, j) => i * (n + 1) + j;
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < n; j++) indices.push(at(i, j), at(i, j + 1), at(i + 1, j + 1), at(i, j), at(i + 1, j + 1), at(i + 1, j));
+  }
+  return { positions, normals, indices };
+}
+
+// Height of the water's surface near (x, z) (Montreal): the lowest ground
+// within `reach` m (the DTM gives the water's surface over the rivers), a
+// little raised so the ground under the water never shows through.
+export function cityWaterLevel(x, z, reach = 60) {
+  let lo = Infinity;
+  for (let a = -reach; a <= reach; a += 30) for (let b = -reach; b <= reach; b += 30) lo = Math.min(lo, cityHeight(x + a, z + b));
+  return lo + 0.3;
 }
