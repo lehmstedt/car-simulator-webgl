@@ -1,13 +1,14 @@
 """Writes a packed open map: src/<name>.js (what the page needs to know up
-front) and data/<name>/*.bin (deflated data, fetched by openmap.js).
+front) and data/<name>/*.txt (deflated data in base64, fetched by openmap.js:
+artifacts don't serve binary files).
 
-- core.bin: the `core` sections, one after the other (their byte lengths go in
+- core.txt: the `core` sections, one after the other (their byte lengths go in
   the .js file). Fetched before the map is built.
-- t<ti>_<tj>.bin: the buildings and trees of the cells in a TILE × TILE block
+- t<ti>_<tj>.txt: the buildings and trees of the cells in a TILE × TILE block
   of cells, per cell (in cell order) its building bytes then its tree bytes.
   Fetched when the car comes near, so the page starts without the whole island.
 """
-import glob, hashlib, json, os, zlib
+import base64, glob, hashlib, json, os, zlib
 
 TILE = 8  # cells per tile side
 
@@ -17,7 +18,7 @@ def write(js_path, data_dir, header, meta, core, cells):
     (before `sections`); core: {section: bytes}; cells: [((i, j), building
     bytes, tree bytes)] in the cells section's order."""
     os.makedirs(data_dir, exist_ok=True)
-    for f in glob.glob(os.path.join(data_dir, '*.bin')): os.remove(f)
+    for f in glob.glob(os.path.join(data_dir, '*.txt')): os.remove(f)
     files, h = {}, hashlib.sha256()
     files['core'] = zlib.compress(b''.join(core.values()), 9)
     tiles = {}
@@ -25,7 +26,7 @@ def write(js_path, data_dir, header, meta, core, cells):
         if b or t: tiles.setdefault((i // TILE, j // TILE), bytearray()).extend(b + t)
     for (ti, tj), raw in sorted(tiles.items()): files[f't{ti}_{tj}'] = zlib.compress(bytes(raw), 9)
     for name, data in files.items():
-        open(os.path.join(data_dir, f'{name}.bin'), 'wb').write(data)
+        open(os.path.join(data_dir, f'{name}.txt'), 'w').write(base64.b64encode(data).decode())
         h.update(name.encode()); h.update(data)
     fields = {**meta, 'tile': TILE, 'version': h.hexdigest()[:10], 'sections': {n: len(b) for n, b in core.items()}}
     body = ',\n'.join(f'  {k}: {json.dumps(v, ensure_ascii=False)}' for k, v in fields.items())
@@ -41,9 +42,9 @@ MONTREAL_HEADER = """// The island of Montreal: an open map from public data. Ge
 //
 // From Overture Maps {rel} (© OpenStreetMap contributors, ODbL, and
 // other open sources), meters around {lat:.5f}° N, {lon:.5f}° W: x east, z south.
-// The data is zlib-deflated zigzag varints in data/montreal/ (fetched and
-// unpacked by openmap.js; `version` changes with them): core.bin holds the
-// `sections` of the given byte lengths, and t<ti>_<tj>.bin the buildings and
+// The data is zlib-deflated zigzag varints, in base64, in data/montreal/ (fetched and
+// unpacked by openmap.js; `version` changes with them): core.txt holds the
+// `sections` of the given byte lengths, and t<ti>_<tj>.txt the buildings and
 // trees of the cells i, j with floor(i / `tile`), floor(j / `tile`) = ti, tj.
 // Lengths are in steps of `unit` m; lines start from their cell's middle
 // (absolute for area, walls, water), then go in steps. Cells are `chunk` m squares.

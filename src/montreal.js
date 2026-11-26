@@ -3,9 +3,9 @@
 //
 // From Overture Maps 2026-10-21.0 (© OpenStreetMap contributors, ODbL, and
 // other open sources), meters around 45.55164° N, 73.73505° W: x east, z south.
-// The data is zlib-deflated zigzag varints in data/montreal/ (fetched and
-// unpacked by openmap.js; `version` changes with them): core.bin holds the
-// `sections` of the given byte lengths, and t<ti>_<tj>.bin the buildings and
+// The data is zlib-deflated zigzag varints, in base64, in data/montreal/ (fetched and
+// unpacked by openmap.js; `version` changes with them): core.txt holds the
+// `sections` of the given byte lengths, and t<ti>_<tj>.txt the buildings and
 // trees of the cells i, j with floor(i / `tile`), floor(j / `tile`) = ti, tj.
 // Lengths are in steps of `unit` m; lines start from their cell's middle
 // (absolute for area, walls, water), then go in steps. Cells are `chunk` m squares.

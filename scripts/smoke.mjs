@@ -23,7 +23,7 @@ Math.random = () => {
 
 const assert = (ok, msg) => { if (!ok) { console.error(`FAIL: ${msg}`); process.exitCode = 1; } };
 
-setMapFiles((name) => readFile(new URL(`../data/montreal/${name}.bin`, import.meta.url)));
+setMapFiles((name) => readFile(new URL(`../data/montreal/${name}.txt`, import.meta.url), 'utf8'));
 await loadOpenMap();
 const map = buildOpenMap();
 await map.prefetch(0, 0, 40000); // the whole island: the run below never waits for tiles

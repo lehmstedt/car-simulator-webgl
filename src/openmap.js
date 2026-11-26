@@ -14,8 +14,8 @@
 //   cells near the car, and the meshes are made per cell when it comes near
 //   (see main.js, streamCells).
 // - The data is fetched, not packed in the page: the streets and the rest
-//   (data/montreal/core.bin) before the map is built, the buildings and trees
-//   in tiles of cells (t<ti>_<tj>.bin) as the car comes near them. So the
+//   (data/montreal/core.txt) before the map is built, the buildings and trees
+//   in tiles of cells (t<ti>_<tj>.txt) as the car comes near them. So the
 //   page starts without downloading the whole island.
 
 import { MONTREAL } from './montreal.js';
@@ -57,16 +57,25 @@ class Reader {
   }
 }
 
-// The map's files, as fetched (deflated), from beside the page. Replaceable
-// (setMapFiles), for running without a browser (scripts/smoke.mjs).
+// The map's files, as fetched (deflated, in base64: artifacts serve text, not
+// binary files), from beside the page. Replaceable (setMapFiles), for running
+// without a browser (scripts/smoke.mjs).
 let fetchFile = async (name) => {
-  const res = await fetch(`data/montreal/${name}.bin?v=${MONTREAL.version}`);
-  if (!res.ok) throw new Error(`data/montreal/${name}.bin: ${res.status}`);
-  return res.arrayBuffer();
+  const res = await fetch(`data/montreal/${name}.txt?v=${MONTREAL.version}`);
+  if (!res.ok) throw new Error(`data/montreal/${name}.txt: ${res.status}`);
+  return res.text();
 };
 export function setMapFiles(fn) { fetchFile = fn; }
 async function mapFile(name) {
-  const stream = new Blob([await fetchFile(name)]).stream().pipeThrough(new DecompressionStream('deflate'));
+  const text = await fetchFile(name);
+  let bytes;
+  if (Uint8Array.fromBase64) bytes = Uint8Array.fromBase64(text);
+  else {
+    const bin = atob(text);
+    bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  }
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate'));
   return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 

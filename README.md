@@ -79,9 +79,9 @@ street you're on and a heading-up minimap. You start downtown on Rue Sainte-Cath
   through them: hit one and the car stops against it.
 - **Edges**: the rivers and lakes all around, the canals and ponds, and a low concrete barrier where the
   map ends on land. The ground is flat, though Mount Royal really rises to 233 m.
-- **Streaming**: the map's data is fetched, not packed into the page: the streets and the rest (~2 MB) at
-  start, the buildings and trees in 2.4 km tiles (up to ~180 KB each, 6 MB for the whole island) as the car comes
-  near, so the game starts after ~3.5 MB rather than the whole island. Streets, paint, lights and
+- **Streaming**: the map's data is fetched, not packed into the page: the streets and the rest (~2.6 MB) at
+  start, the buildings and trees in 2.4 km tiles (up to ~240 KB each, 8 MB for the whole island) as the car comes
+  near, so the game starts after ~4.5 MB rather than the whole island. Streets, paint, lights and
   signs, buildings and trees come in 300 m cells whose meshes are made as the car approaches and freed once
   it's far; buildings and trees stay packed until a cell near the car needs them, and traffic lanes are made
   only where cars drive. The minimap is drawn in cached tiles.
