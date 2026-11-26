@@ -8,7 +8,6 @@ import { Car, PHYSICS_STEP, VARIANTS, TIRE_TEMP, tempGrip, variantSpec, wheelLay
 import { Skids } from './skids.js';
 import { Sound } from './audio.js';
 import { Ghost } from './ghost.js';
-import { BOT_LAPS } from './bot-lap.js';
 import { buildTrack, LAYOUTS, LINK_LAYOUTS, ROAD_LIFT } from './track.js';
 import { Signs, createTexture } from './signs.js';
 import { Traffic } from './traffic.js';
@@ -424,19 +423,21 @@ function unloadCell(c) {
   c.buildings = c.trees = c.layers = c.furniture = c.posts = null;
   world?.loaded?.delete(c);
 }
-// Loads cells coming within reach of (x, z), nearest first (one per frame
-// unless `all`, so driving never stutters), and frees those left far behind.
-function streamCells(x, z, all = false) {
+// Loads cells coming within reach of (x, z), nearest first (one per frame, so
+// driving never stutters, but all those within `now` m at once), and frees
+// those left far behind.
+function streamCells(x, z, now = 0) {
   if (!world.cells) return;
   const near = (c) => Math.hypot(c.x - x, c.z - z) - c.radius;
   const want = [];
   for (const c of world.cells) {
     const d = near(c);
     if (c.buildings && d > world.drawDistance + 400) unloadCell(c);
-    else if (!c.buildings && d < world.drawDistance + 150) want.push([d, c]);
+    // (Once its part of the map is in: until then, it's being fetched.)
+    else if (!c.buildings && d < world.drawDistance + 150 && track.cellReady(c.data)) want.push([d, c]);
   }
   want.sort((a, b) => a[0] - b[0]);
-  for (const [, c] of all ? want : want.slice(0, 1)) loadCell(c);
+  for (const [d, c] of want) if (d < now || c === want[0][1]) loadCell(c);
 }
 
 const meshes = {
@@ -540,6 +541,7 @@ function setLayout(kind) {
   track = world.track;
   if (world.circuits) track.key = kind;
   ghost = new Ghost(kind);
+  if (!track.open) botLapsLoading ??= fetch('data/bot-laps.json').then((r) => r.json()).then((v) => { BOT_LAPS = v; }, () => { botLapsLoading = null; });
   lap.best = Object.fromEntries(Object.keys(VARIANTS).map((v) => [v, ghost.best(v)]));
   lap.last = null;
   const b = layoutBtn?.querySelector('b'); if (b) b.textContent = LAYOUT_NAMES[kind];
@@ -561,7 +563,8 @@ function switchDrive() {
 
 function resetRace() {
   car.reset(...startPose());
-  streamCells(car.x, car.z, true);
+  // The cells around the car now; the farther ones follow over the next frames.
+  streamCells(car.x, car.z, 250);
   world.traffic?.unpark(car.x, car.z, 9);
   world.traffic?.reset(playerState());
   world.people?.reset(playerState());
@@ -1502,11 +1505,16 @@ function frame(now) {
   depthTarget?.end();
   requestAnimationFrame(frame);
 }
+// Claude's laps (scripts/autodrive.mjs), for its ghost: fetched when a circuit
+// is first picked (see setLayout), not packed in the page.
+let BOT_LAPS = {}, botLapsLoading = null;
 // For poking at the game from the browser's console: open the page with ?debug.
 if (location.search.includes('debug')) window.game = { get world() { return world; }, car, climate };
-// Start once the open map's data is unpacked (it's packed in the page).
-loadOpenMap().then(() => {
+// Start once the open map's streets are in, and on it the buildings and
+// trees around the start (the rest comes as the car drives).
+loadOpenMap(customStart?.x, customStart?.z, 800 + 150).then(async () => {
   setLayout(layout);
+  if (track.prefetch) { const [x, z] = startPose(); await track.prefetch(x, z, world.drawDistance + 150); }
   resetRace();
   last = performance.now();
   requestAnimationFrame(frame);

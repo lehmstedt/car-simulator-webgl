@@ -53,6 +53,8 @@ export class Minimap {
     let c = this.tiles.get(k);
     if (c) { this.tiles.delete(k); this.tiles.set(k, c); return c; } // most recently used last
     if (!make) return null;
+    // Not before the buildings there are in (they're being fetched).
+    if (this.city.boxReady && !this.city.boxReady(i * TILE, (i + 1) * TILE, j * TILE, (j + 1) * TILE)) return null;
     const n = Math.round(TILE / SCALE);
     c = document.createElement('canvas');
     c.width = c.height = n;

@@ -13,6 +13,10 @@
 //   once (~185,000 pieces), but buildings and trees only for the CHUNK-meter
 //   cells near the car, and the meshes are made per cell when it comes near
 //   (see main.js, streamCells).
+// - The data is fetched, not packed in the page: the streets and the rest
+//   (data/montreal/core.bin) before the map is built, the buildings and trees
+//   in tiles of cells (t<ti>_<tj>.bin) as the car comes near them. So the
+//   page starts without downloading the whole island.
 
 import { MONTREAL } from './montreal.js';
 import { ROAD_LIFT } from './track.js';
@@ -25,6 +29,7 @@ const SIDE = new Set(['residential', 'unclassified']);
 // One-way side streets are narrower: a lane and parking.
 const ONE_WAY_HALF = 3.6;
 const CHUNK = MONTREAL.chunk; // m: the cells the map is stored and drawn in
+const MAP_TILE = MONTREAL.tile;   // cells per side of the tiles buildings and trees are fetched in
 const CELL = 25;     // m: lookup grid for roads and buildings (CHUNK is a multiple)
 const KEEP_CELLS = 600; // cells whose buildings and trees stay unpacked
 const AREA_ROW = 2;     // m: rows of the area's inside/outside lookup
@@ -52,18 +57,40 @@ class Reader {
   }
 }
 
-// Unpacks the map data (base64, deflated): call once before buildOpenMap().
-let packed = null;
-export async function loadOpenMap() {
-  if (packed) return packed;
-  const bin = atob(MONTREAL.data), bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate'));
-  const raw = new Uint8Array(await new Response(stream).arrayBuffer());
-  const out = {};
-  let o = 0;
-  for (const [name, len] of Object.entries(MONTREAL.sections)) { out[name] = raw.subarray(o, o + len); o += len; }
-  return (packed = out);
+// The map's files, as fetched (deflated), from beside the page. Replaceable
+// (setMapFiles), for running without a browser (scripts/smoke.mjs).
+let fetchFile = async (name) => {
+  const res = await fetch(`data/montreal/${name}.bin?v=${MONTREAL.version}`);
+  if (!res.ok) throw new Error(`data/montreal/${name}.bin: ${res.status}`);
+  return res.arrayBuffer();
+};
+export function setMapFiles(fn) { fetchFile = fn; }
+async function mapFile(name) {
+  const stream = new Blob([await fetchFile(name)]).stream().pipeThrough(new DecompressionStream('deflate'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+// Fetches and unpacks the map's streets and the rest: call once before
+// buildOpenMap(). Meanwhile, the tiles within r m of (x, z) are fetched too,
+// so those around the start come with it rather than after.
+let packed = null, coreLoading = null;
+const early = new Map(); // tile name -> its data on the way
+export function loadOpenMap(x = MONTREAL.start[0], z = MONTREAL.start[1], r = 0) {
+  if (packed) return Promise.resolve(packed);
+  coreLoading ??= mapFile('core');
+  const t = (v) => Math.floor(Math.floor(v / CHUNK) / MAP_TILE);
+  for (let ti = t(x - r - CHUNK); ti <= t(x + r + CHUNK); ti++) {
+    for (let tj = t(z - r - CHUNK); tj <= t(z + r + CHUNK); tj++) {
+      const name = `t${ti}_${tj}`;
+      if (!early.has(name)) { const p = mapFile(name); p.catch(() => {}); early.set(name, p); }
+    }
+  }
+  return coreLoading.then((raw) => {
+    const out = {};
+    let o = 0;
+    for (const [name, len] of Object.entries(MONTREAL.sections)) { out[name] = raw.subarray(o, o + len); o += len; }
+    return (packed = out);
+  });
 }
 
 export function buildOpenMap() {
@@ -73,6 +100,27 @@ export function buildOpenMap() {
 
   // --- cells and roads -------------------------------------------------
   const cells = [], cellMap = new Map(), roads = [];
+  // Tiles of MAP_TILE × MAP_TILE cells: their buildings and trees, fetched when needed.
+  const tiles = new Map();
+  const tileOf = (i, j) => {
+    const ti = Math.floor(i / MAP_TILE), tj = Math.floor(j / MAP_TILE), k = key(ti, tj);
+    let t = tiles.get(k);
+    if (!t) tiles.set(k, (t = { name: `t${ti}_${tj}`, size: 0, data: null, loading: null }));
+    return t;
+  };
+  // Whether a tile's data is in (if not, it's fetched: retried after a failure).
+  const tileIn = (t) => {
+    if (t.data || !t.size) return true;
+    if (!t.loading) {
+      const p = early.get(t.name) ?? mapFile(t.name);
+      early.delete(t.name);
+      t.loading = p.then((d) => { t.data = d; }, (e) => {
+        console.warn(e);
+        setTimeout(() => { t.loading = null; }, 3000);
+      });
+    }
+    return false;
+  };
   const roadIndex = new Map(); // chunk -> roads within reach of it
   const index = (map, item, x0, x1, z0, z1, size) => {
     for (let i = Math.floor(x0 / size); i <= Math.floor(x1 / size); i++) {
@@ -85,14 +133,15 @@ export function buildOpenMap() {
   };
   {
     const cr = new Reader(D.cells), rr = new Reader(D.roads);
-    let bo = 0, to = 0;
     for (let n = cr.u(), q = 0; q < n; q++) {
       const i = cr.s(), j = cr.s(), nr = cr.u(), nb = cr.u(), bl = cr.u(), nt = cr.u(), tl = cr.u();
+      // Its buildings, then its trees, follow those of the tile's cells before it.
+      const tile = tileOf(i, j), o = tile.size;
+      tile.size += bl + tl;
       const cell = {
         i, j, x: (i + 0.5) * CHUNK, z: (j + 0.5) * CHUNK, radius: CHUNK * 0.75, roads: [],
-        nb, bytes: [bo, bo + bl], nt, treeBytes: [to, to + tl], buildings: null, grid: null, trees: null,
+        nb, tile, bytes: [o, o + bl], nt, treeBytes: [o + bl, o + bl + tl], buildings: null, grid: null, trees: null,
       };
-      bo += bl; to += tl;
       cells.push(cell);
       cellMap.set(key(i, j), cell);
       for (let r = 0; r < nr; r++) {
@@ -106,10 +155,15 @@ export function buildOpenMap() {
         };
         roads.push(road);
         cell.roads.push(road);
-        const xs = pts.map((p) => p[0]), zs = pts.map((p) => p[1]), reach = road.w + road.walk + 2;
-        road.box = [Math.min(...xs) - reach, Math.max(...xs) + reach, Math.min(...zs) - reach, Math.max(...zs) + reach];
+        const reach = road.w + road.walk + 2;
+        let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity, far = 0;
+        for (const [x, z] of pts) {
+          if (x < x0) x0 = x; if (x > x1) x1 = x; if (z < z0) z0 = z; if (z > z1) z1 = z;
+          far = Math.max(far, (x - cell.x) ** 2 + (z - cell.z) ** 2);
+        }
+        road.box = [x0 - reach, x1 + reach, z0 - reach, z1 + reach];
         index(roadIndex, road, ...road.box, CHUNK);
-        for (const [x, z] of pts) cell.radius = Math.max(cell.radius, Math.hypot(x - cell.x, z - cell.z) + reach);
+        cell.radius = Math.max(cell.radius, Math.sqrt(far) + reach);
       }
     }
   }
@@ -161,9 +215,17 @@ export function buildOpenMap() {
       if (!ends.has(k)) ends.set(k, []);
       ends.get(k).push(r);
     }
+    // Per crossing: its street count, and its widest two streets' half widths.
+    const widest = new Map();
+    for (const [k, at] of ends) {
+      if (at.length < 3) continue;
+      let a = null, b = 0;
+      for (const o of at) { if (!a || o.w > a.w) { b = a ? a.w : 0; a = o; } else if (o !== a && o.w > b) b = o.w; }
+      widest.set(k, [a, b]);
+    }
     const clearance = (p, r) => {
-      const at = ends.get(nodeKey(p));
-      return at.length < 3 ? 0 : Math.max(...at.map((o) => (o === r ? 0 : o.w))) + 1;
+      const w = widest.get(nodeKey(p));
+      return w ? (w[0] === r ? w[1] : w[0].w) + 1 : 0;
     };
     for (const r of roads) r.clear = [clearance(r.pts[0], r), clearance(r.pts[r.pts.length - 1], r)];
   }
@@ -262,12 +324,14 @@ export function buildOpenMap() {
 
   // --- buildings and trees, unpacked per cell --------------------------
   const unpacked = new Set(); // cells with buildings unpacked, least recently used first
+  // (null while its tile is still on its way.)
   function unpack(cell) {
     if (cell.buildings) {
       unpacked.delete(cell); unpacked.add(cell);
       return cell;
     }
-    const r = new Reader(D.buildings.subarray(...cell.bytes));
+    if (!tileIn(cell.tile)) return null;
+    const r = new Reader(cell.tile.data.subarray(...cell.bytes));
     let px = mid(cell.i), pz = mid(cell.j);
     cell.buildings = [];
     cell.grid = new Map();
@@ -309,8 +373,8 @@ export function buildOpenMap() {
     for (let i = ci - 1; i <= ci + 1; i++) {
       for (let j = cj - 1; j <= cj + 1; j++) {
         const cell = cellMap.get(key(i, j));
-        if (!cell || !cell.nb) continue;
-        for (const b of unpack(cell).grid.get(k) ?? []) {
+        if (!cell || !cell.nb || !unpack(cell)) continue;
+        for (const b of cell.grid.get(k) ?? []) {
           if (x >= b.box[0] && x <= b.box[1] && z >= b.box[2] && z <= b.box[3] && inside(b.ring, x, z)) return b;
         }
       }
@@ -319,9 +383,9 @@ export function buildOpenMap() {
   };
   // A cell's mapped trees, minus any on the asphalt or inside a building.
   function treesOf(cell) {
-    unpack(cell);
+    if (!unpack(cell)) return [];
     if (cell.trees) return cell.trees;
-    const r = new Reader(D.trees.subarray(...cell.treeBytes)), spots = r.line(cell.nt, mid(cell.i), mid(cell.j));
+    const r = new Reader(cell.tile.data.subarray(...cell.treeBytes)), spots = r.line(cell.nt, mid(cell.i), mid(cell.j));
     const trees = spots.filter(([x, z]) => {
       const n = nearestRoad(x, z);
       return !(n && n.edge < 0.6) && !buildingAt(x, z);
@@ -422,7 +486,7 @@ export function buildOpenMap() {
       towers: { positions: [], normals: [], uvs: [] }, // glass, 35 m and up
       sheds: { positions: [], normals: [] }, roofs: { positions: [], normals: [] },
     };
-    for (const b of cell.buildings) {
+    for (const b of cell.buildings ?? []) {
       // A stable pick per building.
       let r = ((b.id * 2654435761) >>> 0) / 4294967296 * weights, color = 0;
       while (r >= BRICKS[color][1]) r -= BRICKS[color++][1];
@@ -451,6 +515,21 @@ export function buildOpenMap() {
     c.trees = treesOf(cell);
     return c;
   }
+
+  // Whether the buildings and trees of the cells touching a box are in, and
+  // so those that could reach into it (they're stored in the cell of their
+  // middle). If not, their tiles are fetched.
+  const boxIn = (x0, x1, z0, z1) => {
+    let all = true;
+    const ci0 = Math.floor(x0 / CHUNK) - 1, ci1 = Math.floor(x1 / CHUNK) + 1, cj0 = Math.floor(z0 / CHUNK) - 1, cj1 = Math.floor(z1 / CHUNK) + 1;
+    for (let ti = Math.floor(ci0 / MAP_TILE); ti <= Math.floor(ci1 / MAP_TILE); ti++) {
+      for (let tj = Math.floor(cj0 / MAP_TILE); tj <= Math.floor(cj1 / MAP_TILE); tj++) {
+        const t = tiles.get(key(ti, tj));
+        if (t && !tileIn(t)) all = false;
+      }
+    }
+    return all;
+  };
 
   // Cells around (x, z), within r m (by their middle).
   const cellsNear = (x, z, r) => {
@@ -482,6 +561,14 @@ export function buildOpenMap() {
     water,
     cells,
     cellMeshes,
+    // Whether a cell's meshes can be made (its tile and its neighbors' are in);
+    // if not, the missing tiles are fetched.
+    cellReady: (cell) => boxIn(cell.i * CHUNK, (cell.i + 1) * CHUNK, cell.j * CHUNK, (cell.j + 1) * CHUNK),
+    boxReady: boxIn,
+    // Fetches the tiles within r m of (x, z): resolves once they're in.
+    async prefetch(x, z, r) {
+      while (!boxIn(x - r, x + r, z - r, z + r)) await new Promise((ok) => setTimeout(ok, 30));
+    },
     layers: [{ mesh: waterMesh(), color: [0.2, 0.36, 0.45], mat: 'water' }],
     barriers: barriers(),
     // Car roads with a piece within r m of (x, z) (by cell).
@@ -490,8 +577,8 @@ export function buildOpenMap() {
     buildingsIn(x0, x1, z0, z1) {
       const out = [];
       for (const c of cellsNear((x0 + x1) / 2, (z0 + z1) / 2, Math.max(x1 - x0, z1 - z0) / 2 + CHUNK)) {
-        if (!c.nb) continue;
-        for (const b of unpack(c).buildings) if (b.box[1] >= x0 && b.box[0] <= x1 && b.box[3] >= z0 && b.box[2] <= z1) out.push(b);
+        if (!c.nb || !unpack(c)) continue;
+        for (const b of c.buildings) if (b.box[1] >= x0 && b.box[0] <= x1 && b.box[3] >= z0 && b.box[2] <= z1) out.push(b);
       }
       return out;
     },

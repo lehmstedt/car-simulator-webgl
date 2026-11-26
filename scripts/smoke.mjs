@@ -4,7 +4,8 @@
 // exception, on NaN positions, and if the police never do their job.
 //
 //   npm test              (node scripts/smoke.mjs [seed])
-import { loadOpenMap, buildOpenMap } from '../src/openmap.js';
+import { readFile } from 'node:fs/promises';
+import { loadOpenMap, buildOpenMap, setMapFiles } from '../src/openmap.js';
 import { Traffic } from '../src/traffic.js';
 import { Pedestrians } from '../src/pedestrians.js';
 import { Police } from '../src/police.js';
@@ -22,8 +23,10 @@ Math.random = () => {
 
 const assert = (ok, msg) => { if (!ok) { console.error(`FAIL: ${msg}`); process.exitCode = 1; } };
 
+setMapFiles((name) => readFile(new URL(`../data/montreal/${name}.bin`, import.meta.url)));
 await loadOpenMap();
 const map = buildOpenMap();
+await map.prefetch(0, 0, 40000); // the whole island: the run below never waits for tiles
 const traffic = new Traffic(map);
 const people = new Pedestrians(map);
 const police = new Police(map, traffic);

@@ -1,6 +1,7 @@
-// Bundles index.html + src/*.js into one self-contained page (dist/car-simulator.html),
-// in the body-only format used for a Claude artifact: no doctype/html/head/body tags.
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+// Bundles index.html + src/*.js into one page (dist/car-simulator.html), in the
+// body-only format used for a Claude artifact: no doctype/html/head/body tags.
+// The map data it fetches is copied beside it (dist/data/): publish both.
+import { readFileSync, writeFileSync, mkdirSync, cpSync, rmSync } from 'node:fs';
 
 // Modules in dependency order: each after everything it imports, from main.js down.
 const ORDER = [];
@@ -43,4 +44,6 @@ html = html.replace(tag, () => `<script>\n{\n${js}\n}\n</script>`);
 
 mkdirSync(new URL('../dist/', import.meta.url), { recursive: true });
 writeFileSync(new URL('../dist/car-simulator.html', import.meta.url), html);
-console.log('wrote dist/car-simulator.html');
+rmSync(new URL('../dist/data/', import.meta.url), { recursive: true, force: true });
+cpSync(new URL('../data/', import.meta.url), new URL('../dist/data/', import.meta.url), { recursive: true });
+console.log(`wrote dist/car-simulator.html (${(html.length / 1e6).toFixed(2)} MB) and dist/data/`);
